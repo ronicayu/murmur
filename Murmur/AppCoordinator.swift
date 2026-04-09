@@ -96,13 +96,13 @@ final class AppCoordinator: ObservableObject {
             hotkey.setMode(mode)
         }
 
-        // Load saved hotkey or use default
+        // Load saved hotkey or use default (right command)
         if let keyCode = UserDefaults.standard.object(forKey: "hotkeyKeyCode") as? Int,
            let modsRaw = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? UInt,
            let key = Key(carbonKeyCode: UInt32(keyCode)) {
-            hotkey.register(key: key, modifiers: NSEvent.ModifierFlags(rawValue: modsRaw))
+            hotkey.register(trigger: .keyCombo(key: key, modifiers: NSEvent.ModifierFlags(rawValue: modsRaw)))
         } else {
-            hotkey.register()
+            hotkey.register(trigger: .rightCommand)
         }
 
         hotkeyTask = Task { [weak self] in

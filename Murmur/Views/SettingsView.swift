@@ -9,6 +9,7 @@ struct SettingsView: View {
     @AppStorage("soundEffects") private var soundEffects: Bool = true
     @AppStorage("launchAtLogin") private var launchAtLogin: Bool = true
 
+    @State private var useRightCommand: Bool = true
     @State private var hotkeyKey: Key = .space
     @State private var hotkeyModifiers: NSEvent.ModifierFlags = .control
 
@@ -32,10 +33,29 @@ struct SettingsView: View {
                 HStack {
                     Text("Trigger:")
                     Spacer()
-                    HotkeyRecorderView(key: $hotkeyKey, modifiers: $hotkeyModifiers)
-                        .onChange(of: hotkeyKey) { _, _ in applyHotkey() }
-                        .onChange(of: hotkeyModifiers) { _, _ in applyHotkey() }
+                    if useRightCommand {
+                        Text("Right Command")
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+                    } else {
+                        HotkeyRecorderView(key: $hotkeyKey, modifiers: $hotkeyModifiers)
+                            .onChange(of: hotkeyKey) { _, _ in applyHotkey() }
+                            .onChange(of: hotkeyModifiers) { _, _ in applyHotkey() }
+                    }
                 }
+                Toggle("Use Right Command key", isOn: $useRightCommand)
+                    .onChange(of: useRightCommand) { _, newValue in
+                        if newValue {
+                            coordinator.hotkey.register(trigger: .rightCommand)
+                            UserDefaults.standard.removeObject(forKey: "hotkeyKeyCode")
+                            UserDefaults.standard.removeObject(forKey: "hotkeyModifiers")
+                            UserDefaults.standard.set(true, forKey: "useRightCommand")
+                        } else {
+                            applyHotkey()
+                            UserDefaults.standard.set(false, forKey: "useRightCommand")
+                        }
+                    }
             }
 
             Section("Recording Mode") {
@@ -151,6 +171,7 @@ struct SettingsView: View {
     }
 
     private func loadSavedHotkey() {
+        useRightCommand = UserDefaults.standard.object(forKey: "useRightCommand") as? Bool ?? true
         if let keyCode = UserDefaults.standard.object(forKey: "hotkeyKeyCode") as? Int,
            let key = Key(carbonKeyCode: UInt32(keyCode)) {
             hotkeyKey = key

@@ -106,12 +106,18 @@ final class ModelManager: ObservableObject {
 
         // Download using huggingface-cli via Python subprocess
         // This handles authentication, LFS files, resume, etc.
-        let pythonBin = pythonEnvPath.appendingPathComponent("bin/python3")
+        // Try bundled Python env first, then system python3
+        let bundledPython = pythonEnvPath.appendingPathComponent("bin/python3")
+        let pythonBin: URL
 
-        guard FileManager.default.fileExists(atPath: pythonBin.path) else {
-            // Fall back to system python or provide setup instructions
+        if FileManager.default.fileExists(atPath: bundledPython.path) {
+            pythonBin = bundledPython
+        } else if let systemPython = findSystemPython() {
+            pythonBin = systemPython
+        } else {
+            state = .error("Python not found")
             throw MurmurError.transcriptionFailed(
-                "Python environment not found. Run: python3 -m venv ~/Library/Application\\ Support/Murmur/Python && ~/Library/Application\\ Support/Murmur/Python/bin/pip install huggingface_hub transformers torch soundfile"
+                "Python3 not found. Install Python 3 and run:\npip3 install huggingface_hub"
             )
         }
 
@@ -259,6 +265,20 @@ final class ModelManager: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    private func findSystemPython() -> URL? {
+        let candidates = [
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "/usr/bin/python3"
+        ]
+        for path in candidates {
+            if FileManager.default.fileExists(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+        }
+        return nil
+    }
 
     private func directorySize(_ url: URL) -> Int64 {
         let fm = FileManager.default
