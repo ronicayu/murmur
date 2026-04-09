@@ -4,75 +4,49 @@ import SwiftUI
 struct MurmurApp: App {
     @StateObject private var coordinator = AppCoordinator()
     @StateObject private var modelManager = ModelManager()
+    @State private var settingsWindow: NSWindow?
 
     var body: some Scene {
         MenuBarExtra {
             MenuBarView(
                 coordinator: coordinator,
-                onOpenSettings: { openSettingsWindow() }
+                onOpenSettings: { showSettings() }
             )
         } label: {
-            menuBarIcon
+            Label("Murmur", systemImage: menuBarIconName)
+                .labelStyle(.titleAndIcon)
         }
-        .menuBarExtraStyle(.window)
-
-        Window("Welcome to Murmur", id: "onboarding") {
-            OnboardingView(
-                coordinator: coordinator,
-                modelManager: modelManager
-            ) {
-                // Close onboarding window
-                NSApp.windows.first { $0.title == "Welcome to Murmur" }?.close()
-            }
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-        .defaultPosition(.center)
-
-        Window("Murmur Settings", id: "settings") {
-            SettingsView(coordinator: coordinator, modelManager: modelManager)
-        }
-        .windowResizability(.contentSize)
-        .defaultPosition(.center)
     }
 
-    @ViewBuilder
-    private var menuBarIcon: some View {
+    private var menuBarIconName: String {
         switch coordinator.state {
-        case .recording:
-            Image(systemName: "mic.fill")
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(.red)
-        case .transcribing, .injecting:
-            Image(systemName: "ellipsis.circle")
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(.primary)
-        case .error:
-            Image(systemName: "exclamationmark.triangle")
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(.orange)
-        default:
-            Image(systemName: "mic")
+        case .recording: return "mic.fill"
+        case .transcribing, .injecting: return "ellipsis.circle"
+        case .error: return "exclamationmark.triangle"
+        default: return "mic"
         }
     }
 
-    private func openSettingsWindow() {
+    private func showSettings() {
+        if let existing = settingsWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let view = SettingsView(coordinator: coordinator, modelManager: modelManager)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 360),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Murmur Settings"
+        window.contentView = NSHostingView(rootView: view)
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        // SwiftUI will handle opening the window via the Window scene
-        if let window = NSApp.windows.first(where: { $0.title == "Murmur Settings" }) {
-            window.makeKeyAndOrderFront(nil)
-        }
-    }
-
-    init() {
-        // Show onboarding on first launch
-        if !UserDefaults.standard.bool(forKey: "onboardingCompleted") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                NSApp.activate(ignoringOtherApps: true)
-                if let window = NSApp.windows.first(where: { $0.title == "Welcome to Murmur" }) {
-                    window.makeKeyAndOrderFront(nil)
-                }
-            }
-        }
+        settingsWindow = window
     }
 }
