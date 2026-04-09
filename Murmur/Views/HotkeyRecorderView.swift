@@ -46,22 +46,20 @@ struct HotkeyRecorderView: View {
 
     private func startRecording() {
         isRecording = true
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard let capturedKey = Key(carbonKeyCode: UInt32(event.keyCode)) else { return event }
 
-            // Require at least one modifier
+        // Use both local (for when settings window is key) and global (for LSUIElement apps)
+        monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [self] event in
+            guard let capturedKey = Key(carbonKeyCode: UInt32(event.keyCode)) else { return }
+
             let mods = event.modifierFlags.intersection([.control, .option, .shift, .command])
-            guard !mods.isEmpty else { return event }
+            guard !mods.isEmpty else { return }
 
             key = capturedKey
             modifiers = mods
             stopRecording()
 
-            // Persist
             UserDefaults.standard.set(Int(event.keyCode), forKey: "hotkeyKeyCode")
             UserDefaults.standard.set(Int(mods.rawValue), forKey: "hotkeyModifiers")
-
-            return nil
         }
     }
 
