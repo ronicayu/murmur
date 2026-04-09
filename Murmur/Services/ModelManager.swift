@@ -60,8 +60,10 @@ final class ModelManager: ObservableObject {
 
     var modelPath: URL? {
         let dir = modelDirectory
-        let configPath = dir.appendingPathComponent("config.json")
-        return FileManager.default.fileExists(atPath: configPath.path) ? dir : nil
+        // Must have both config.json AND model.safetensors to be usable
+        let configExists = FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.json").path)
+        let modelExists = FileManager.default.fileExists(atPath: dir.appendingPathComponent("model.safetensors").path)
+        return (configExists && modelExists) ? dir : nil
     }
 
     var pythonEnvPath: URL {
