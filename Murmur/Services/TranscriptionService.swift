@@ -44,14 +44,47 @@ final class TranscriptionService: TranscriptionServiceProtocol {
     init(
         modelPath: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Murmur/Models"),
-        pythonPath: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Murmur/Python/bin/python3"),
+        pythonPath: URL? = nil,
         scriptPath: URL? = nil
     ) {
         self.modelPath = modelPath
-        self.pythonPath = pythonPath
-        self.scriptPath = scriptPath ?? Bundle.main.url(forResource: "transcribe", withExtension: "py")
-            ?? URL(fileURLWithPath: "/dev/null")
+
+        // Find Python: bundled venv > system python
+        if let pythonPath {
+            self.pythonPath = pythonPath
+        } else {
+            let bundled = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Murmur/Python/bin/python3")
+            if FileManager.default.fileExists(atPath: bundled.path) {
+                self.pythonPath = bundled
+            } else {
+                // Fall back to system python
+                let candidates = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]
+                self.pythonPath = URL(fileURLWithPath: candidates.first { FileManager.default.fileExists(atPath: $0) } ?? "/usr/bin/python3")
+            }
+        }
+
+        // Find transcribe.py: bundle resource > app support > next to executable
+        if let scriptPath {
+            self.scriptPath = scriptPath
+        } else {
+            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Murmur/transcribe.py")
+            let bundleResource = Bundle.main.url(forResource: "transcribe", withExtension: "py")
+            let nextToExe = Bundle.main.executableURL?.deletingLastPathComponent()
+                .deletingLastPathComponent().appendingPathComponent("Resources/transcribe.py")
+
+            if let bundleResource, FileManager.default.fileExists(atPath: bundleResource.path) {
+                self.scriptPath = bundleResource
+            } else if let nextToExe, FileManager.default.fileExists(atPath: nextToExe.path) {
+                self.scriptPath = nextToExe
+            } else if FileManager.default.fileExists(atPath: appSupport.path) {
+                self.scriptPath = appSupport
+            } else {
+                // Copy from the SPM resource bundle as last resort
+                self.scriptPath = appSupport
+            }
+        }
 
         // Ignore SIGPIPE so writing to a dead pipe doesn't kill the app
         signal(SIGPIPE, SIG_IGN)
