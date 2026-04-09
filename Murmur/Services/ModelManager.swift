@@ -144,6 +144,11 @@ final class ModelManager: ObservableObject {
         try process.run()
 
         // Monitor download progress with smoothed speed (rolling average of last 5 samples)
+        // huggingface_hub downloads to ~/.cache/huggingface first, then copies to local_dir.
+        // Monitor both locations for accurate progress.
+        let hfCacheDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/huggingface")
+
         let monitorTask = Task { @MainActor [weak self] in
             guard let self else { return }
             var lastSize: Int64 = 0
@@ -152,7 +157,9 @@ final class ModelManager: ObservableObject {
 
             while !Task.isCancelled && process.isRunning {
                 try? await Task.sleep(for: .seconds(1))
-                let currentSize = self.directorySize(self.modelDirectory)
+                let modelSize = self.directorySize(self.modelDirectory)
+                let cacheSize = self.directorySize(hfCacheDir)
+                let currentSize = max(modelSize, cacheSize)
                 let progress = min(Double(currentSize) / Double(self.requiredDiskSpace), 0.99)
 
                 let instantSpeed = currentSize - lastSize
@@ -165,7 +172,11 @@ final class ModelManager: ObservableObject {
                 self.state = .downloading(progress: progress, bytesPerSec: smoothedSpeed)
                 let sizeMB = currentSize / 1_000_000
                 let totalMB = self.requiredDiskSpace / 1_000_000
-                self.statusMessage = "Downloading model: \(sizeMB) / \(totalMB) MB"
+                if modelSize > 1_000_000 {
+                    self.statusMessage = "Finalizing model: \(sizeMB) / \(totalMB) MB"
+                } else {
+                    self.statusMessage = "Downloading model: \(sizeMB) / \(totalMB) MB"
+                }
                 lastSize = currentSize
             }
         }
