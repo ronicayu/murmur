@@ -1,0 +1,276 @@
+import Foundation
+import os
+import CryptoKit
+
+enum ModelState: Sendable, Equatable {
+    case notDownloaded
+    case downloading(progress: Double, bytesPerSec: Int64)
+    case verifying
+    case ready
+    case corrupt
+    case error(String)
+
+    static func == (lhs: ModelState, rhs: ModelState) -> Bool {
+        switch (lhs, rhs) {
+        case (.notDownloaded, .notDownloaded),
+             (.verifying, .verifying),
+             (.ready, .ready),
+             (.corrupt, .corrupt):
+            return true
+        case (.downloading(let a, let b), .downloading(let c, let d)):
+            return a == c && b == d
+        case (.error(let a), .error(let b)):
+            return a == b
+        default:
+            return false
+        }
+    }
+}
+
+protocol ModelManagerProtocol {
+    var state: ModelState { get }
+    var modelPath: URL? { get }
+    func download() async throws
+    func cancelDownload()
+    func verify() async throws -> Bool
+    func delete() throws
+    func checkDiskSpace() throws
+}
+
+@MainActor
+final class ModelManager: ObservableObject {
+    @Published private(set) var state: ModelState = .notDownloaded
+    @Published private(set) var downloadProgress: Double = 0
+    @Published private(set) var downloadSpeed: Int64 = 0 // bytes/sec
+
+    private let logger = Logger(subsystem: "com.murmur.app", category: "model")
+    private var downloadTask: Task<Void, Never>?
+    private var urlSession: URLSession?
+    private var resumeData: Data?
+
+    // HuggingFace model info
+    private let modelRepo = "CohereLabs/cohere-transcribe-03-2026"
+    private let requiredDiskSpace: Int64 = 6_000_000_000 // 6 GB
+
+    var modelDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Murmur/Models")
+    }
+
+    var modelPath: URL? {
+        let dir = modelDirectory
+        let configPath = dir.appendingPathComponent("config.json")
+        return FileManager.default.fileExists(atPath: configPath.path) ? dir : nil
+    }
+
+    var pythonEnvPath: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Murmur/Python")
+    }
+
+    init() {
+        if modelPath != nil {
+            state = .ready
+        } else {
+            // Check for partial download (for resume)
+            let partialSize = directorySize(modelDirectory)
+            if partialSize > 0 {
+                downloadProgress = min(Double(partialSize) / Double(requiredDiskSpace), 0.99)
+            }
+        }
+    }
+
+    func checkDiskSpace() throws {
+        let attrs = try FileManager.default.attributesOfFileSystem(
+            forPath: NSHomeDirectory()
+        )
+        if let freeSpace = attrs[.systemFreeSize] as? Int64, freeSpace < requiredDiskSpace {
+            throw MurmurError.diskFull
+        }
+    }
+
+    func download() async throws {
+        try checkDiskSpace()
+
+        state = .downloading(progress: 0, bytesPerSec: 0)
+        downloadProgress = 0
+        downloadSpeed = 0
+
+        // Create model directory
+        try FileManager.default.createDirectory(
+            at: modelDirectory,
+            withIntermediateDirectories: true
+        )
+
+        logger.info("Starting model download from HuggingFace: \(self.modelRepo)")
+
+        // Download using huggingface-cli via Python subprocess
+        // This handles authentication, LFS files, resume, etc.
+        let pythonBin = pythonEnvPath.appendingPathComponent("bin/python3")
+
+        guard FileManager.default.fileExists(atPath: pythonBin.path) else {
+            // Fall back to system python or provide setup instructions
+            throw MurmurError.transcriptionFailed(
+                "Python environment not found. Run: python3 -m venv ~/Library/Application\\ Support/Murmur/Python && ~/Library/Application\\ Support/Murmur/Python/bin/pip install huggingface_hub transformers torch soundfile"
+            )
+        }
+
+        let downloadScript = """
+        import sys, json
+        from huggingface_hub import snapshot_download
+
+        try:
+            path = snapshot_download(
+                "\(modelRepo)",
+                local_dir="\(modelDirectory.path)",
+                local_dir_use_symlinks=False
+            )
+            print(json.dumps({"status": "ok", "path": path}))
+        except Exception as e:
+            print(json.dumps({"status": "error", "error": str(e)}))
+        """
+
+        let process = Process()
+        process.executableURL = pythonBin
+        process.arguments = ["-c", downloadScript]
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        try process.run()
+
+        // Monitor download progress by checking directory size periodically
+        let monitorTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var lastSize: Int64 = 0
+
+            while !Task.isCancelled && process.isRunning {
+                try? await Task.sleep(for: .seconds(1))
+                let currentSize = self.directorySize(self.modelDirectory)
+                let progress = min(Double(currentSize) / Double(self.requiredDiskSpace), 0.99)
+
+                self.downloadProgress = progress
+                self.downloadSpeed = currentSize - lastSize
+                self.state = .downloading(progress: progress, bytesPerSec: currentSize - lastSize)
+                lastSize = currentSize
+            }
+        }
+
+        // Wait for process on a background thread (M2 fix: don't block main actor)
+        let exitStatus: Int32 = await withCheckedContinuation { continuation in
+            process.terminationHandler = { proc in
+                continuation.resume(returning: proc.terminationStatus)
+            }
+        }
+        monitorTask.cancel()
+
+        if exitStatus != 0 {
+            let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+            let errorStr = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+            logger.error("Model download failed: \(errorStr)")
+            state = .error("Download failed: \(String(errorStr.prefix(200)))")
+            throw MurmurError.transcriptionFailed("Model download failed")
+        }
+
+        // Parse result
+        let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
+        if let outputStr = String(data: outputData, encoding: .utf8),
+           let data = outputStr.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           json["status"] as? String == "ok" {
+            logger.info("Model downloaded, verifying...")
+            downloadProgress = 1.0
+            let valid = try await verify()
+            guard valid else {
+                state = .corrupt
+                throw MurmurError.transcriptionFailed("Model integrity check failed")
+            }
+        } else {
+            state = .error("Download completed but verification failed")
+            throw MurmurError.transcriptionFailed("Model download verification failed")
+        }
+    }
+
+    func cancelDownload() {
+        downloadTask?.cancel()
+        downloadTask = nil
+        // Keep partial downloads — huggingface_hub resumes from where it left off
+        let partialSize = directorySize(modelDirectory)
+        if partialSize > 0 {
+            state = .notDownloaded
+            downloadProgress = min(Double(partialSize) / Double(requiredDiskSpace), 0.99)
+            logger.info("Download cancelled, \(partialSize) bytes preserved for resume")
+        } else {
+            state = .notDownloaded
+            downloadProgress = 0
+        }
+        logger.info("Download cancelled")
+    }
+
+    func verify() async throws -> Bool {
+        state = .verifying
+        logger.info("Verifying model...")
+
+        // Check that key model files exist
+        let requiredFiles = ["config.json", "preprocessor_config.json"]
+        for file in requiredFiles {
+            let path = modelDirectory.appendingPathComponent(file)
+            if !FileManager.default.fileExists(atPath: path.path) {
+                logger.warning("Missing model file: \(file)")
+                state = .corrupt
+                return false
+            }
+        }
+
+        // SHA-256 verification of config.json as a basic integrity check
+        let configPath = modelDirectory.appendingPathComponent("config.json")
+        if let configData = try? Data(contentsOf: configPath) {
+            let hash = SHA256.hash(data: configData)
+            let hashStr = hash.map { String(format: "%02x", $0) }.joined()
+            logger.info("config.json SHA-256: \(hashStr)")
+
+            // If we have a stored expected hash, verify it
+            let storedHash = UserDefaults.standard.string(forKey: "modelConfigHash")
+            if let storedHash, storedHash != hashStr {
+                logger.warning("Config hash mismatch: expected \(storedHash), got \(hashStr)")
+                state = .corrupt
+                return false
+            }
+            // Store hash on first verification for future comparisons
+            if storedHash == nil {
+                UserDefaults.standard.set(hashStr, forKey: "modelConfigHash")
+            }
+        }
+
+        state = .ready
+        logger.info("Model verification passed")
+        return true
+    }
+
+    func delete() throws {
+        if FileManager.default.fileExists(atPath: modelDirectory.path) {
+            try FileManager.default.removeItem(at: modelDirectory)
+        }
+        state = .notDownloaded
+        downloadProgress = 0
+        logger.info("Model deleted")
+    }
+
+    // MARK: - Helpers
+
+    private func directorySize(_ url: URL) -> Int64 {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else {
+            return 0
+        }
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
+    }
+}
