@@ -150,6 +150,20 @@ struct SettingsView: View {
                     }
                 }
             }
+
+            Section("Folders") {
+                HStack {
+                    Button("Open Model Folder") {
+                        NSWorkspace.shared.open(modelManager.modelDirectory)
+                    }
+                    Spacer()
+                    Button("Open Log Folder") {
+                        let logDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                            .appendingPathComponent("Murmur")
+                        NSWorkspace.shared.open(logDir)
+                    }
+                }
+            }
         }
     }
 
