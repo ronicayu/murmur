@@ -51,7 +51,7 @@ struct OnboardingView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(32)
         }
-        .frame(width: 520, height: 440)
+        .frame(width: 520, height: 520)
     }
 
     // MARK: - Step 1: Welcome
@@ -245,17 +245,18 @@ struct OnboardingView: View {
     // MARK: - Step 5: Model Download
 
     private var modelDownloadStep: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 20) {
             Spacer()
             Image(systemName: "arrow.down.circle.fill")
                 .font(.system(size: 48))
                 .foregroundStyle(.blue)
             Text("Download Speech Model")
                 .font(.title2.bold())
-            Text("Cohere Transcribe (~4 GB). This runs entirely on your Mac — no data leaves your device.")
+            Text("Cohere Transcribe (~4 GB).\nThis runs entirely on your Mac — no data leaves your device.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
 
             if case .downloading = viewModel.modelManager.state {
                 VStack(spacing: 8) {
@@ -269,20 +270,27 @@ struct OnboardingView: View {
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    if !viewModel.modelManager.statusMessage.isEmpty {
-                        Text(viewModel.modelManager.statusMessage)
-                            .font(.caption)
-                            .foregroundStyle(viewModel.modelManager.statusMessage.hasPrefix("Error") ? .red : .secondary)
-                            .lineLimit(2)
-                    }
                 }
             } else if viewModel.modelManager.state == .ready {
                 Label("Model downloaded", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
             } else if case .error(let msg) = viewModel.modelManager.state {
-                Label(msg, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
+                Text(msg)
                     .font(.caption)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+
+            // Always show status message when present
+            if !viewModel.modelManager.statusMessage.isEmpty {
+                Text(viewModel.modelManager.statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(viewModel.modelManager.statusMessage.hasPrefix("Error") ? .red : .secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
 
             Spacer()
