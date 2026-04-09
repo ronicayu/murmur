@@ -51,7 +51,7 @@ final class ModelManager: ObservableObject {
 
     // HuggingFace model info
     private let modelRepo = "CohereLabs/cohere-transcribe-03-2026"
-    private let requiredDiskSpace: Int64 = 6_000_000_000 // 6 GB
+    private let requiredDiskSpace: Int64 = 4_200_000_000 // ~4.1 GB actual model size
 
     var modelDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
