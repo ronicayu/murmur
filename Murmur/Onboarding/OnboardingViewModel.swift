@@ -41,6 +41,9 @@ final class OnboardingViewModel: ObservableObject {
         case .accessibility where accessibilityGranted:
             step = .accessibility
             nextStep()
+        case .huggingfaceLogin where modelManager.state == .ready:
+            step = .huggingfaceLogin
+            nextStep()
         case .modelDownload where modelManager.state == .ready:
             step = .modelDownload
             nextStep()
