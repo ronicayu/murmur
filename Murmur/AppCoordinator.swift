@@ -58,6 +58,8 @@ final class AppCoordinator: ObservableObject {
     let audioFeedback: AudioFeedbackService
     let pill: FloatingPillController
 
+    /// When true, skips accessibility check (for onboarding test where we show text in-app, not inject)
+    var skipAccessibilityCheck = false
     private var pendingRecording = false
     private var undoTimer: Task<Void, Never>?
     private var hotkeyTask: Task<Void, Never>?
@@ -137,9 +139,12 @@ final class AppCoordinator: ObservableObject {
         switch event {
         case .startRecording:
             let status = permissions.checkAll()
-            guard status.allGranted else {
-                let missing: MurmurError.Permission = status.microphone != .granted ? .microphone : .accessibility
-                transition(to: .error(.permissionRevoked(missing)))
+            if status.microphone != .granted {
+                transition(to: .error(.permissionRevoked(.microphone)))
+                return
+            }
+            if !skipAccessibilityCheck && status.accessibility != .granted {
+                transition(to: .error(.permissionRevoked(.accessibility)))
                 return
             }
             if state == .idle || state.isError {

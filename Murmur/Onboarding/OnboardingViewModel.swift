@@ -90,6 +90,11 @@ final class OnboardingViewModel: ObservableObject {
         }
     }
 
+    func enableTestMode() {
+        // Skip accessibility check during onboarding — we show text in-app, not inject
+        coordinator.skipAccessibilityCheck = true
+    }
+
     func watchForTestResult() {
         testWatchTask?.cancel()
         testWatchTask = Task { [weak self] in
@@ -204,6 +209,7 @@ final class OnboardingViewModel: ObservableObject {
 
     func completeOnboarding() {
         UserDefaults.standard.set(true, forKey: "onboardingCompleted")
+        coordinator.skipAccessibilityCheck = false // Re-enable for normal use
         try? SMAppService.mainApp.register()
         accessibilityPollTask?.cancel()
         testWatchTask?.cancel()

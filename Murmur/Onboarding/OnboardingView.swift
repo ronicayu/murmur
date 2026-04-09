@@ -406,6 +406,7 @@ struct OnboardingView: View {
             }
         }
         .onAppear {
+            viewModel.enableTestMode()
             viewModel.watchForTestResult()
         }
     }
