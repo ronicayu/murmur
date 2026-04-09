@@ -381,7 +381,8 @@ def transcribe_whisper(wav_path: str, language: str = "en"):
     input_features = inputs.input_features.to(device=device, dtype=hf_model.dtype)
 
     # Whisper supports language and task natively in generate()
-    generate_kwargs = {"max_new_tokens": 448, "task": "transcribe"}
+    # Whisper's max_target_positions is 448 total (including prompt tokens)
+    generate_kwargs = {"max_new_tokens": 440, "task": "transcribe"}
     if language and language != "auto":
         generate_kwargs["language"] = language
 
