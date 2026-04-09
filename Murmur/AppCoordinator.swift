@@ -60,6 +60,25 @@ final class AppCoordinator: ObservableObject {
 
     /// When true, skips accessibility check (for onboarding test where we show text in-app, not inject)
     var skipAccessibilityCheck = false
+
+    /// Update the transcription backend model path (called when user switches backends)
+    func switchModelPath(_ newPath: URL) {
+        transcription.setModelPath(newPath)
+        preloadModelInBackground()
+    }
+
+    /// Preload the model so the first transcription is instant
+    func preloadModelInBackground() {
+        Task.detached { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.transcription.preloadModel()
+                Self.log.info("Model preloaded successfully")
+            } catch {
+                Self.log.warning("Model preload failed (will retry on first use): \(error)")
+            }
+        }
+    }
     private var pendingRecording = false
     private var undoTimer: Task<Void, Never>?
     private var hotkeyTask: Task<Void, Never>?
@@ -122,6 +141,9 @@ final class AppCoordinator: ObservableObject {
             Task { await self?.transcription.unloadModel() }
         }
 
+        // Preload model in background so first transcription is instant
+        preloadModelInBackground()
+
         Self.log.info("Coordinator started")
     }
 
@@ -175,7 +197,7 @@ final class AppCoordinator: ObservableObject {
 
             // Monitor audio levels for the pill
             audioLevelTask?.cancel()
-            audioLevelTask = Task { [weak self] in
+            audioLevelTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 for await level in self.audio.audioLevel {
                     self.currentAudioLevel = level
@@ -189,7 +211,7 @@ final class AppCoordinator: ObservableObject {
 
             // M3: Monitor max recording duration
             maxDurationTask?.cancel()
-            maxDurationTask = Task { [weak self] in
+            maxDurationTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 for await _ in self.audio.maxDurationReached {
                     guard self.state == .recording else { continue }
@@ -255,12 +277,11 @@ final class AppCoordinator: ObservableObject {
 
             // Auto-transition from undoable to idle after 5s
             undoTimer?.cancel()
-            undoTimer = Task {
+            undoTimer = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .seconds(5))
-                if !Task.isCancelled {
-                    self.removeUndoMonitor()
-                    transition(to: .idle)
-                }
+                guard let self, !Task.isCancelled else { return }
+                self.removeUndoMonitor()
+                self.transition(to: .idle)
             }
         } catch {
             let err = mapError(error)
@@ -289,8 +310,9 @@ final class AppCoordinator: ObservableObject {
             if case .permissionRevoked(let perm) = err {
                 showPermissionAlert(for: perm)
             } else {
-                Task {
+                Task { @MainActor [weak self] in
                     try? await Task.sleep(for: .seconds(2))
+                    guard let self else { return }
                     if case .error = self.state {
                         self.state = .idle
                         self.pill.hide()

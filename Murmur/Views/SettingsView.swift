@@ -12,7 +12,7 @@ struct SettingsView: View {
 
     @State private var useRightCommand: Bool = true
     @State private var hotkeyKey: Key = .space
-    @State private var hotkeyModifiers: NSEvent.ModifierFlags = .control
+    @State private var hotkeyModifiers: NSEvent.ModifierFlags = .command
 
     var body: some View {
         TabView {
@@ -21,7 +21,7 @@ struct SettingsView: View {
             modelTab
                 .tabItem { Label("Model", systemImage: "cpu") }
         }
-        .frame(width: 420, height: 320)
+        .frame(width: 420, height: 460)
         .padding()
         .onAppear { loadSavedHotkey() }
     }
@@ -110,7 +110,44 @@ struct SettingsView: View {
 
     private var modelTab: some View {
         Form {
-            Section("Cohere Transcribe (ONNX)") {
+            Section("Speech Engine") {
+                ForEach(ModelBackend.allCases) { backend in
+                    let isActive = modelManager.activeBackend == backend
+                    let isDownloaded = modelManager.isModelDownloaded(for: backend)
+                    Button {
+                        modelManager.activeBackend = backend
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(backend.displayName)
+                                    .font(.body)
+                                    .foregroundStyle(.primary)
+                                HStack(spacing: 6) {
+                                    Text(backend.sizeDescription)
+                                    if isDownloaded {
+                                        Text("Downloaded")
+                                            .foregroundStyle(.green)
+                                    }
+                                }
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if isActive {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.accentColor)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text(modelManager.activeBackend.description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Speech Model (\(modelManager.activeBackend.shortName))") {
                 LabeledContent("Status:") {
                     modelStatusBadge
                 }
@@ -124,9 +161,16 @@ struct SettingsView: View {
                 }
 
                 if case .downloading(let progress, let speed) = modelManager.state {
-                    ProgressView(value: progress)
+                    if progress >= 0 {
+                        ProgressView(value: progress)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                    }
                     HStack {
-                        Text("\(Int(progress * 100))%")
+                        if !modelManager.statusMessage.isEmpty {
+                            Text(modelManager.statusMessage)
+                        }
                         Spacer()
                         if speed > 0 {
                             Text(formatSpeed(speed))
@@ -136,7 +180,9 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 }
 
-                if !modelManager.statusMessage.isEmpty {
+                if case .downloading = modelManager.state {
+                    // Status already shown in progress section
+                } else if !modelManager.statusMessage.isEmpty {
                     Text(modelManager.statusMessage)
                         .font(.caption)
                         .foregroundStyle(modelManager.statusMessage.hasPrefix("Error") ? .red : .secondary)

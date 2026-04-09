@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-Murmur transcription subprocess (ONNX Runtime backend).
+Murmur transcription subprocess — supports both ONNX and HuggingFace (PyTorch) backends.
 Long-lived process. Reads JSON commands from stdin, writes JSON responses to stdout.
 Logs to ~/Library/Application Support/Murmur/transcribe.log
+
+Backend is auto-detected from model directory contents:
+  - If onnx/ subdir with .onnx files exists -> ONNX Runtime backend
+  - Otherwise -> HuggingFace PyTorch backend
 """
 
 import json
@@ -27,18 +31,57 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("murmur")
-log.info("=== Transcribe subprocess started (ONNX backend) ===")
+log.info("=== Transcribe subprocess started ===")
 
+# Shared state
+backend = None  # "onnx", "huggingface", or "whisper"
 processor = None
+
+# ONNX-specific state
 encoder_sess = None
 decoder_sess = None
 gen_config = None
-
 NUM_DECODER_LAYERS = 8
+
+# HuggingFace/Whisper-specific state
+hf_model = None
+
+
+def detect_backend(model_path: str) -> str:
+    """Auto-detect backend from model directory contents."""
+    onnx_dir = os.path.join(model_path, "onnx")
+    if os.path.isdir(onnx_dir) and any(f.endswith(".onnx") for f in os.listdir(onnx_dir)):
+        return "onnx"
+    # Detect Whisper by checking config.json for model_type
+    config_path = os.path.join(model_path, "config.json")
+    if os.path.isfile(config_path):
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            if config.get("model_type") == "whisper":
+                return "whisper"
+        except Exception:
+            pass
+    return "huggingface"
 
 
 def load_model(model_path: str):
-    global processor, encoder_sess, decoder_sess, gen_config
+    detected = detect_backend(model_path)
+    log.info(f"Detected backend: {detected}")
+    if detected == "onnx":
+        return load_model_onnx(model_path)
+    elif detected == "whisper":
+        return load_model_whisper(model_path)
+    else:
+        return load_model_huggingface(model_path)
+
+
+# ---------------------------------------------------------------------------
+# ONNX Runtime backend
+# ---------------------------------------------------------------------------
+
+def load_model_onnx(model_path: str):
+    global backend, processor, encoder_sess, decoder_sess, gen_config
 
     import onnxruntime as ort
     from transformers import CohereAsrProcessor
@@ -81,22 +124,18 @@ def load_model(model_path: str):
     log.info(f"ONNX Runtime version: {ort.__version__}")
     log.info(f"Providers: {providers}")
 
+    backend = "onnx"
     return {"status": "ok"}
 
 
-def transcribe(wav_path: str, language: str = "en"):
+def transcribe_onnx(wav_path: str, language: str = "en"):
     global processor, encoder_sess, decoder_sess, gen_config
-
-    if processor is None or encoder_sess is None or decoder_sess is None:
-        log.error("Transcribe called but model not loaded")
-        return {"error": "Model not loaded"}
 
     import numpy as np
     from transformers.audio_utils import load_audio
 
     start = time.time()
 
-    # Load and preprocess audio
     log.info(f"Loading audio from {wav_path}")
     audio = load_audio(wav_path, sampling_rate=16000)
     duration = len(audio) / 16000
@@ -106,7 +145,6 @@ def transcribe(wav_path: str, language: str = "en"):
     input_features = inputs["input_features"].astype(np.float32)
     log.info(f"Input features shape: {input_features.shape}, language: {language}")
 
-    # Use decoder prompt from processor (includes language/punctuation tokens)
     decoder_prompt = inputs["decoder_input_ids"].flatten().tolist()
     log.info(f"Decoder prompt IDs: {decoder_prompt}")
 
@@ -120,7 +158,6 @@ def transcribe(wav_path: str, language: str = "en"):
     eos_id = gen_config["eos_token_id"]
     generated = list(decoder_prompt)
 
-    # Init empty KV cache
     past_kv = {}
     for i in range(NUM_DECODER_LAYERS):
         for part in ("decoder", "encoder"):
@@ -158,7 +195,6 @@ def transcribe(wav_path: str, language: str = "en"):
         if next_token == eos_id:
             break
 
-        # Update KV cache
         idx = 1
         for i in range(NUM_DECODER_LAYERS):
             past_kv[f"past_key_values.{i}.decoder.key"] = outputs[idx].astype(np.float16)
@@ -177,25 +213,232 @@ def transcribe(wav_path: str, language: str = "en"):
 
     elapsed_ms = int((time.time() - start) * 1000)
 
-    # Language detection based on character ranges
     chinese_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
     total_alpha = sum(1 for c in text if c.isalpha())
-    language = "zh" if total_alpha > 0 and chinese_chars / max(total_alpha, 1) > 0.3 else "en"
+    detected_lang = "zh" if total_alpha > 0 and chinese_chars / max(total_alpha, 1) > 0.3 else "en"
 
-    return {
-        "text": text,
-        "language": language,
-        "duration_ms": elapsed_ms,
-    }
+    return {"text": text, "language": detected_lang, "duration_ms": elapsed_ms}
+
+
+# ---------------------------------------------------------------------------
+# HuggingFace PyTorch backend
+# ---------------------------------------------------------------------------
+
+def load_model_huggingface(model_path: str):
+    global backend, hf_model, processor
+
+    import torch
+    from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    dtype = torch.float32
+
+    log.info(f"Loading HuggingFace model from {model_path}")
+    log.info(f"Device: {device}, dtype: {dtype}")
+    log.info(f"PyTorch version: {torch.__version__}")
+    log.info(f"MPS available: {torch.backends.mps.is_available()}")
+
+    files = os.listdir(model_path)
+    log.info(f"Model directory contents: {files}")
+
+    t0 = time.time()
+    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    log.info(f"Processor loaded in {time.time()-t0:.1f}s")
+
+    t0 = time.time()
+    hf_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        model_path,
+        torch_dtype=dtype,
+        trust_remote_code=True,
+    )
+    log.info(f"Model loaded in {time.time()-t0:.1f}s")
+
+    t0 = time.time()
+    hf_model = hf_model.to(device)
+    log.info(f"Model moved to {device} in {time.time()-t0:.1f}s")
+
+    param_count = sum(p.numel() for p in hf_model.parameters())
+    log.info(f"Model parameters: {param_count/1e6:.0f}M")
+    log.info(f"Model dtype: {next(hf_model.parameters()).dtype}")
+
+    backend = "huggingface"
+    return {"status": "ok"}
+
+
+def transcribe_huggingface(wav_path: str, language: str = "en"):
+    global hf_model, processor
+
+    import torch
+    import soundfile as sf
+    import numpy as np
+
+    start = time.time()
+
+    log.info(f"Loading audio from {wav_path}")
+    audio, sr = sf.read(wav_path)
+    log.info(f"Audio loaded: shape={np.array(audio).shape}, sr={sr}, duration={len(audio)/sr:.2f}s")
+
+    if len(np.array(audio).shape) > 1:
+        log.info("Converting stereo to mono")
+        audio = np.mean(audio, axis=1)
+
+    if sr != 16000:
+        log.info(f"Resampling from {sr}Hz to 16000Hz")
+        import librosa
+        audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
+        sr = 16000
+
+    log.info(f"Final audio: {len(audio)} samples, {len(audio)/sr:.2f}s")
+
+    inputs = processor(audio, sampling_rate=sr, return_tensors="pt")
+
+    device = next(hf_model.parameters()).device
+    input_features = inputs.input_features.to(device=device, dtype=hf_model.dtype)
+    log.info(f"Input features shape: {input_features.shape}, dtype: {input_features.dtype}")
+
+    t0 = time.time()
+    with torch.no_grad():
+        generated_ids = hf_model.generate(input_features, max_new_tokens=448)
+    inference_time = time.time() - t0
+    log.info(f"Inference took {inference_time:.2f}s, generated {generated_ids.shape[1]} tokens")
+
+    text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+    log.info(f"Transcription: '{text[:200]}'")
+
+    elapsed_ms = int((time.time() - start) * 1000)
+
+    chinese_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+    total_alpha = sum(1 for c in text if c.isalpha())
+    detected_lang = "zh" if total_alpha > 0 and chinese_chars / max(total_alpha, 1) > 0.3 else "en"
+
+    return {"text": text, "language": detected_lang, "duration_ms": elapsed_ms}
+
+
+# ---------------------------------------------------------------------------
+# Whisper backend
+# ---------------------------------------------------------------------------
+
+def load_model_whisper(model_path: str):
+    global backend, hf_model, processor
+
+    import torch
+    from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    dtype = torch.float16 if device == "mps" else torch.float32
+
+    log.info(f"Loading Whisper model from {model_path}")
+    log.info(f"Device: {device}, dtype: {dtype}")
+
+    t0 = time.time()
+    processor = AutoProcessor.from_pretrained(model_path)
+    log.info(f"Processor loaded in {time.time()-t0:.1f}s")
+
+    t0 = time.time()
+    hf_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        model_path,
+        torch_dtype=dtype,
+        low_cpu_mem_usage=True,
+    )
+    log.info(f"Model loaded in {time.time()-t0:.1f}s")
+
+    t0 = time.time()
+    hf_model = hf_model.to(device)
+    log.info(f"Model moved to {device} in {time.time()-t0:.1f}s")
+
+    param_count = sum(p.numel() for p in hf_model.parameters())
+    log.info(f"Model parameters: {param_count/1e6:.0f}M")
+
+    backend = "whisper"
+    return {"status": "ok"}
+
+
+def transcribe_whisper(wav_path: str, language: str = "en"):
+    global hf_model, processor
+
+    import torch
+    import soundfile as sf
+    import numpy as np
+
+    start = time.time()
+
+    log.info(f"Loading audio from {wav_path}")
+    audio, sr = sf.read(wav_path)
+
+    if len(np.array(audio).shape) > 1:
+        audio = np.mean(audio, axis=1)
+
+    if sr != 16000:
+        import librosa
+        audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
+        sr = 16000
+
+    log.info(f"Audio: {len(audio)} samples, {len(audio)/sr:.2f}s")
+
+    inputs = processor(audio, sampling_rate=sr, return_tensors="pt")
+
+    device = next(hf_model.parameters()).device
+    input_features = inputs.input_features.to(device=device, dtype=hf_model.dtype)
+
+    # Whisper supports language and task natively in generate()
+    generate_kwargs = {"max_new_tokens": 448, "task": "transcribe"}
+    if language and language != "auto":
+        generate_kwargs["language"] = language
+
+    t0 = time.time()
+    with torch.no_grad():
+        generated_ids = hf_model.generate(input_features, **generate_kwargs)
+    inference_time = time.time() - t0
+    log.info(f"Inference took {inference_time:.2f}s, generated {generated_ids.shape[1]} tokens")
+
+    text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+    log.info(f"Transcription: '{text[:200]}'")
+
+    elapsed_ms = int((time.time() - start) * 1000)
+
+    chinese_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+    total_alpha = sum(1 for c in text if c.isalpha())
+    detected_lang = "zh" if total_alpha > 0 and chinese_chars / max(total_alpha, 1) > 0.3 else "en"
+
+    return {"text": text, "language": detected_lang, "duration_ms": elapsed_ms}
+
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+def transcribe(wav_path: str, language: str = "en"):
+    if backend == "onnx":
+        if encoder_sess is None or decoder_sess is None:
+            return {"error": "Model not loaded"}
+        return transcribe_onnx(wav_path, language)
+    elif backend == "huggingface":
+        if hf_model is None:
+            return {"error": "Model not loaded"}
+        return transcribe_huggingface(wav_path, language)
+    elif backend == "whisper":
+        if hf_model is None:
+            return {"error": "Model not loaded"}
+        return transcribe_whisper(wav_path, language)
+    else:
+        return {"error": "No model loaded"}
 
 
 def unload_model():
-    global processor, encoder_sess, decoder_sess, gen_config
+    global backend, processor, encoder_sess, decoder_sess, gen_config, hf_model
+
+    if backend in ("huggingface", "whisper") and hf_model is not None:
+        import torch
+        hf_model = None
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
     processor = None
     encoder_sess = None
     decoder_sess = None
     gen_config = None
+    hf_model = None
+    backend = None
 
     import gc
     gc.collect()

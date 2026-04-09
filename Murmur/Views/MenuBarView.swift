@@ -1,101 +1,169 @@
 import SwiftUI
+import HotKey
 
 struct MenuBarView: View {
     @ObservedObject var coordinator: AppCoordinator
+    @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "en"
     var onOpenSettings: () -> Void = {}
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Status
-            HStack {
-                statusIcon
-                Text(coordinator.state.statusText)
-                    .font(.system(.body, design: .rounded))
-                    .lineLimit(1)
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+    /// Quick-access languages shown as capsule buttons in the menu bar
+    private static let quickLanguages: [(code: String, label: String)] = [
+        ("en", "EN"),
+        ("zh", "中文"),
+        ("ja", "日"),
+        ("ko", "한"),
+    ]
 
-            Divider()
+    var body: some View {
+        VStack(spacing: 0) {
+            // Status header
+            statusHeader
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .padding(.bottom, 8)
+
+            Divider().padding(.horizontal, 8)
+
+            // Language quick-switcher
+            languageSwitcher
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+
+            Divider().padding(.horizontal, 8)
 
             // Last transcription
             if let text = coordinator.lastTranscription {
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(text, forType: .string)
-                } label: {
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text("Last transcription")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(text)
-                                .font(.system(.body, design: .rounded))
-                                .lineLimit(2)
-                        }
-                        Spacer()
-                        if let lang = coordinator.lastLanguage {
-                            Text(lang == .chinese ? "中" : "EN")
-                                .font(.caption.bold())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-
-                Divider()
+                transcriptionRow(text)
+                Divider().padding(.horizontal, 8)
             }
 
-            // Hotkey reminder
-            HStack {
-                Image(systemName: "keyboard")
-                    .foregroundStyle(.secondary)
-                Text("Ctrl + Space")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            // Actions
+            menuRow(icon: "keyboard", label: hotkeyLabel, shortcut: nil, dimmed: true)
 
-            Divider()
+            Divider().padding(.horizontal, 8)
 
-            // Settings
-            Button("Settings...") {
+            menuButton(icon: "gear", label: "Settings…") {
                 onOpenSettings()
                 NSApp.activate(ignoringOtherApps: true)
                 if let window = NSApp.windows.first(where: { $0.title == "Murmur Settings" }) {
                     window.makeKeyAndOrderFront(nil)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
 
-            Divider()
-
-            // Quit
-            Button("Quit Murmur") {
+            menuButton(icon: "power", label: "Quit Murmur") {
                 coordinator.stop()
                 NSApplication.shared.terminate(nil)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.bottom, 4)
         }
-        .frame(width: 280)
+        .frame(width: 260)
+    }
+
+    // MARK: - Language Quick-Switcher
+
+    private var languageSwitcher: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Language")
+                .font(.system(.caption2, design: .rounded))
+                .foregroundStyle(.tertiary)
+
+            HStack(spacing: 6) {
+                ForEach(Self.quickLanguages, id: \.code) { lang in
+                    Button {
+                        transcriptionLanguage = lang.code
+                    } label: {
+                        Text(lang.label)
+                            .font(.system(.caption, weight: .medium, design: .rounded))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(
+                                transcriptionLanguage == lang.code
+                                    ? Color.accentColor
+                                    : Color.secondary.opacity(0.15),
+                                in: Capsule()
+                            )
+                            .foregroundStyle(
+                                transcriptionLanguage == lang.code
+                                    ? .white
+                                    : .primary
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                // "More" button — shown if current language isn't in quick list
+                let isQuickLang = Self.quickLanguages.contains { $0.code == transcriptionLanguage }
+                Button {
+                    onOpenSettings()
+                    NSApp.activate(ignoringOtherApps: true)
+                } label: {
+                    Group {
+                        if !isQuickLang {
+                            // Show the current non-quick language name
+                            Text(currentLanguageName)
+                                .font(.system(.caption, weight: .medium, design: .rounded))
+                        } else {
+                            Image(systemName: "ellipsis")
+                                .font(.system(.caption, weight: .medium))
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(
+                        !isQuickLang
+                            ? Color.accentColor
+                            : Color.secondary.opacity(0.15),
+                        in: Capsule()
+                    )
+                    .foregroundStyle(
+                        !isQuickLang ? .white : .primary
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    /// Display name for the current language (used when it's not in the quick list)
+    private var currentLanguageName: String {
+        let allLanguages: [(code: String, name: String)] = [
+            ("en", "EN"), ("zh", "中文"), ("ja", "日"), ("ko", "한"),
+            ("fr", "FR"), ("de", "DE"), ("es", "ES"), ("pt", "PT"),
+            ("it", "IT"), ("nl", "NL"), ("pl", "PL"), ("el", "EL"),
+            ("ar", "AR"), ("vi", "VI"),
+        ]
+        return allLanguages.first { $0.code == transcriptionLanguage }?.name ?? transcriptionLanguage.uppercased()
+    }
+
+    // MARK: - Status Header
+
+    private var statusHeader: some View {
+        HStack(spacing: 10) {
+            statusDot
+                .frame(width: 28, height: 28)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Murmur")
+                    .font(.system(.headline, design: .rounded))
+                Text(coordinator.state.statusText)
+                    .font(.system(.caption, design: .rounded))
+                    .foregroundStyle(statusColor)
+            }
+
+            Spacer()
+        }
     }
 
     @ViewBuilder
-    private var statusIcon: some View {
+    private var statusDot: some View {
         switch coordinator.state {
         case .idle:
-            Image(systemName: "mic")
+            Image(systemName: "mic.circle.fill")
+                .font(.system(size: 22))
                 .foregroundStyle(.secondary)
         case .recording:
-            Image(systemName: "mic.fill")
+            Image(systemName: "mic.circle.fill")
+                .font(.system(size: 22))
                 .foregroundStyle(.red)
                 .symbolEffect(.pulse)
         case .transcribing:
@@ -103,13 +171,145 @@ struct MenuBarView: View {
                 .controlSize(.small)
         case .injecting:
             Image(systemName: "text.cursor")
+                .font(.system(size: 18))
                 .foregroundStyle(.blue)
         case .undoable:
             Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 22))
                 .foregroundStyle(.green)
         case .error:
             Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 20))
                 .foregroundStyle(.orange)
         }
+    }
+
+    private var statusColor: Color {
+        switch coordinator.state {
+        case .idle: return .secondary
+        case .recording: return .red
+        case .transcribing, .injecting: return .blue
+        case .undoable: return .green
+        case .error: return .orange
+        }
+    }
+
+    // MARK: - Transcription Row
+
+    private func transcriptionRow(_ text: String) -> some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 4) {
+                        Text("Last transcription")
+                            .font(.system(.caption2, design: .rounded))
+                            .foregroundStyle(.tertiary)
+                        if let lang = coordinator.lastLanguage {
+                            Text(lang == .chinese ? "中文" : "EN")
+                                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(.quaternary, in: Capsule())
+                        }
+                    }
+                    Text(text)
+                        .font(.system(.callout, design: .rounded))
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+                        .foregroundStyle(.primary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "doc.on.doc")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 2)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(MenuRowButtonStyle())
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+    }
+
+    // MARK: - Menu Rows
+
+    private var hotkeyLabel: String {
+        let trigger = UserDefaults.standard.object(forKey: "useRightCommand") as? Bool ?? true
+        if trigger {
+            return "Right Command"
+        }
+        // Show the actual custom hotkey from UserDefaults
+        if let keyCode = UserDefaults.standard.object(forKey: "hotkeyKeyCode") as? Int,
+           let key = Key(carbonKeyCode: UInt32(keyCode)) {
+            var parts: [String] = []
+            if let modsRaw = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? UInt {
+                let mods = NSEvent.ModifierFlags(rawValue: modsRaw)
+                if mods.contains(.control) { parts.append("Ctrl") }
+                if mods.contains(.option) { parts.append("Opt") }
+                if mods.contains(.shift) { parts.append("Shift") }
+                if mods.contains(.command) { parts.append("Cmd") }
+            }
+            parts.append(key.description)
+            return parts.joined(separator: " + ")
+        }
+        return "Right Command"
+    }
+
+    private func menuRow(icon: String, label: String, shortcut: String?, dimmed: Bool = false) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .frame(width: 16, alignment: .center)
+            Text(label)
+                .font(.system(.callout, design: .rounded))
+                .foregroundStyle(dimmed ? .secondary : .primary)
+            Spacer()
+            if let shortcut {
+                Text(shortcut)
+                    .font(.system(.caption2, design: .rounded))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+    }
+
+    private func menuButton(icon: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16, alignment: .center)
+                Text(label)
+                    .font(.system(.callout, design: .rounded))
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(MenuRowButtonStyle())
+        .padding(.horizontal, 6)
+        .padding(.vertical, 1)
+    }
+}
+
+// MARK: - Button Style
+
+private struct MenuRowButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                configuration.isPressed
+                    ? Color.accentColor.opacity(0.15)
+                    : Color.clear,
+                in: RoundedRectangle(cornerRadius: 5)
+            )
     }
 }

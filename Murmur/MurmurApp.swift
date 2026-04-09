@@ -1,12 +1,22 @@
 import SwiftUI
+import Combine
 
 @main
 struct MurmurApp: App {
-    @StateObject private var coordinator = AppCoordinator()
-    @StateObject private var modelManager = ModelManager()
+    @StateObject private var modelManager: ModelManager
+    @StateObject private var coordinator: AppCoordinator
     @State private var settingsWindow: NSWindow?
     @State private var onboardingWindow: NSWindow?
     @State private var launched = false
+
+    init() {
+        let mm = ModelManager()
+        let backend = mm.activeBackend
+        let modelPath = mm.modelDirectory(for: backend)
+        let ts = TranscriptionService(modelPath: modelPath)
+        _modelManager = StateObject(wrappedValue: mm)
+        _coordinator = StateObject(wrappedValue: AppCoordinator(transcription: ts))
+    }
 
     var body: some Scene {
         MenuBarExtra {
@@ -24,6 +34,15 @@ struct MurmurApp: App {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                             showOnboarding()
                         }
+                    }
+                }
+                .onReceive(modelManager.$activeBackend) { newBackend in
+                    coordinator.switchModelPath(modelManager.modelDirectory(for: newBackend))
+                }
+                .onReceive(modelManager.$state) { newState in
+                    // Preload model immediately after download completes
+                    if newState == .ready {
+                        coordinator.preloadModelInBackground()
                     }
                 }
         }
@@ -54,7 +73,7 @@ struct MurmurApp: App {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 580),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -77,7 +96,7 @@ struct MurmurApp: App {
 
         let view = SettingsView(coordinator: coordinator, modelManager: modelManager)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 360),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 480),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false

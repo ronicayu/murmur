@@ -29,7 +29,8 @@ final class TranscriptionService: TranscriptionServiceProtocol {
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
     private let logger = Logger(subsystem: "com.murmur.app", category: "transcription")
-    private let modelPath: URL
+    private var modelPath: URL
+    private var loadedModelPath: URL?
     private let scriptPath: URL
     private let pythonPath: URL
     private let lock = NSLock()
@@ -39,6 +40,18 @@ final class TranscriptionService: TranscriptionServiceProtocol {
         lock.lock()
         defer { lock.unlock() }
         return _isModelLoaded
+    }
+
+    /// Update the model path (e.g. when switching backends). Forces reload on next transcription.
+    func setModelPath(_ newPath: URL) {
+        lock.lock()
+        let changed = modelPath != newPath
+        modelPath = newPath
+        lock.unlock()
+        if changed && isModelLoaded {
+            // Kill the process so it reloads with the new model path
+            killProcess()
+        }
     }
 
     init(
@@ -91,6 +104,7 @@ final class TranscriptionService: TranscriptionServiceProtocol {
     }
 
     func preloadModel() async throws {
+        guard !isModelLoaded else { return }
         try ensureProcessRunning()
         let response = try await send(command: [
             "cmd": "load",

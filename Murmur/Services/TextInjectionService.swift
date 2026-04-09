@@ -16,26 +16,26 @@ final class TextInjectionService: TextInjectionServiceProtocol {
     private var lastInjectionMethod: InjectionMethod?
 
     func inject(text: String) async throws -> InjectionMethod {
-        // Tier 1: CGEvent keystrokes
+        // Tier 1: Clipboard paste (most reliable — works with all apps)
         do {
-            try await injectViaCGEvent(text: text)
-            lastInjectionMethod = .cgEvent
-            log.info("Injected via CGEvent (\(text.count) chars)")
-            return .cgEvent
+            try await injectViaClipboard(text: text)
+            lastInjectionMethod = .clipboard
+            log.info("Injected via clipboard (\(text.count) chars)")
+            return .clipboard
         } catch {
-            log.warning("CGEvent injection failed: \(error.localizedDescription), falling back to clipboard")
+            log.warning("Clipboard injection failed: \(error.localizedDescription), falling back to CGEvent")
         }
 
-        // Tier 2: Clipboard paste
-        try await injectViaClipboard(text: text)
-        lastInjectionMethod = .clipboard
-        log.info("Injected via clipboard (\(text.count) chars)")
-        return .clipboard
+        // Tier 2: CGEvent keystrokes (fallback — event.post is void so failures are silent)
+        try await injectViaCGEvent(text: text)
+        lastInjectionMethod = .cgEvent
+        log.info("Injected via CGEvent (\(text.count) chars)")
+        return .cgEvent
     }
 
     func undoLastInjection() async throws {
-        guard lastInjectionMethod == .cgEvent else {
-            log.info("Undo not supported for clipboard injection")
+        guard lastInjectionMethod != nil else {
+            log.info("No injection to undo")
             return
         }
 

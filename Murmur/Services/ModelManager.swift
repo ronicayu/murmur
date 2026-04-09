@@ -2,6 +2,96 @@ import Foundation
 import os
 import CryptoKit
 
+// MARK: - Model Backend
+
+enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
+    case onnx
+    case huggingface
+    case whisper
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .onnx: return "Standard (Recommended)"
+        case .huggingface: return "High Quality"
+        case .whisper: return "Whisper"
+        }
+    }
+
+    var shortName: String {
+        switch self {
+        case .onnx: return "Standard"
+        case .huggingface: return "High Quality"
+        case .whisper: return "Whisper"
+        }
+    }
+
+    var modelRepo: String {
+        switch self {
+        case .onnx: return "onnx-community/cohere-transcribe-03-2026-ONNX"
+        case .huggingface: return "CohereLabs/cohere-transcribe-03-2026"
+        case .whisper: return "openai/whisper-large-v3-turbo"
+        }
+    }
+
+    var requiredDiskSpace: Int64 {
+        switch self {
+        case .onnx: return 1_600_000_000       // ~1.5 GB
+        case .huggingface: return 4_200_000_000 // ~4.1 GB
+        case .whisper: return 1_600_000_000     // ~1.6 GB
+        }
+    }
+
+    var modelSubdirectory: String {
+        switch self {
+        case .onnx: return "Murmur/Models-ONNX"
+        case .huggingface: return "Murmur/Models"
+        case .whisper: return "Murmur/Models-Whisper"
+        }
+    }
+
+    /// HuggingFace download filter patterns (nil = download everything)
+    var allowPatterns: [String]? {
+        switch self {
+        case .onnx: return ["onnx/encoder_model_q4f16*", "onnx/decoder_model_merged_q4f16*", "*.json"]
+        case .huggingface, .whisper: return nil
+        }
+    }
+
+    /// Files that must exist for the model to be considered valid
+    var requiredFiles: [String] {
+        switch self {
+        case .onnx: return ["config.json", "onnx/encoder_model_q4f16.onnx", "onnx/decoder_model_merged_q4f16.onnx"]
+        case .huggingface, .whisper: return ["config.json", "model.safetensors"]
+        }
+    }
+
+    /// Whether this backend requires a HuggingFace token (gated model)
+    var requiresHFLogin: Bool {
+        switch self {
+        case .onnx, .whisper: return false
+        case .huggingface: return true
+        }
+    }
+
+    var sizeDescription: String {
+        switch self {
+        case .onnx: return "~1.5 GB"
+        case .huggingface: return "~4 GB"
+        case .whisper: return "~1.6 GB"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .onnx: return "Smaller download, fast and lightweight. Great for most users."
+        case .huggingface: return "Uses your Mac's GPU for faster transcription. Larger download, requires a free account."
+        case .whisper: return "OpenAI's Whisper model. Uses your Mac's GPU, great multilingual support. No account needed."
+        }
+    }
+}
+
 enum ModelState: Sendable, Equatable {
     case notDownloaded
     case downloading(progress: Double, bytesPerSec: Int64)
@@ -43,27 +133,42 @@ final class ModelManager: ObservableObject {
     @Published private(set) var downloadProgress: Double = 0
     @Published private(set) var downloadSpeed: Int64 = 0 // bytes/sec
     @Published private(set) var statusMessage: String = ""
+    @Published var activeBackend: ModelBackend {
+        didSet {
+            UserDefaults.standard.set(activeBackend.rawValue, forKey: "modelBackend")
+            refreshState()
+        }
+    }
 
     private let logger = Logger(subsystem: "com.murmur.app", category: "model")
     private var downloadTask: Task<Void, Never>?
     private var urlSession: URLSession?
     private var resumeData: Data?
 
-    // HuggingFace model info
-    private let modelRepo = "onnx-community/cohere-transcribe-03-2026-ONNX"
-    private let requiredDiskSpace: Int64 = 1_600_000_000 // ~1.5 GB for q4f16 variant
-
     var modelDirectory: URL {
+        modelDirectory(for: activeBackend)
+    }
+
+    func modelDirectory(for backend: ModelBackend) -> URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Murmur/Models-ONNX")
+            .appendingPathComponent(backend.modelSubdirectory)
     }
 
     var modelPath: URL? {
-        let dir = modelDirectory
-        let configExists = FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.json").path)
-        let encoderExists = FileManager.default.fileExists(atPath: dir.appendingPathComponent("onnx/encoder_model_q4f16.onnx").path)
-        let decoderExists = FileManager.default.fileExists(atPath: dir.appendingPathComponent("onnx/decoder_model_merged_q4f16.onnx").path)
-        return (configExists && encoderExists && decoderExists) ? dir : nil
+        modelPath(for: activeBackend)
+    }
+
+    func modelPath(for backend: ModelBackend) -> URL? {
+        let dir = modelDirectory(for: backend)
+        let allExist = backend.requiredFiles.allSatisfy { file in
+            FileManager.default.fileExists(atPath: dir.appendingPathComponent(file).path)
+        }
+        return allExist ? dir : nil
+    }
+
+    /// Check if a specific backend's model is downloaded
+    func isModelDownloaded(for backend: ModelBackend) -> Bool {
+        modelPath(for: backend) != nil
     }
 
     var pythonEnvPath: URL {
@@ -72,13 +177,26 @@ final class ModelManager: ObservableObject {
     }
 
     init() {
+        let saved = UserDefaults.standard.string(forKey: "modelBackend")
+            .flatMap(ModelBackend.init(rawValue:)) ?? .onnx
+        self.activeBackend = saved
+        refreshState()
+    }
+
+    /// Re-evaluate state based on current activeBackend
+    func refreshState() {
         if modelPath != nil {
             state = .ready
+            downloadProgress = 0
+            statusMessage = ""
         } else {
-            // Check for partial download (for resume)
+            state = .notDownloaded
+            downloadProgress = 0
             let partialSize = directorySize(modelDirectory)
             if partialSize > 0 {
-                downloadProgress = min(Double(partialSize) / Double(requiredDiskSpace), 0.99)
+                statusMessage = "Partial download: \(partialSize / 1_000_000) MB on disk"
+            } else {
+                statusMessage = ""
             }
         }
     }
@@ -87,12 +205,13 @@ final class ModelManager: ObservableObject {
         let attrs = try FileManager.default.attributesOfFileSystem(
             forPath: NSHomeDirectory()
         )
-        if let freeSpace = attrs[.systemFreeSize] as? Int64, freeSpace < requiredDiskSpace {
+        if let freeSpace = attrs[.systemFreeSize] as? Int64, freeSpace < activeBackend.requiredDiskSpace {
             throw MurmurError.diskFull
         }
     }
 
     func download() async throws {
+        let backend = activeBackend
         try checkDiskSpace()
 
         state = .downloading(progress: 0, bytesPerSec: 0)
@@ -105,14 +224,22 @@ final class ModelManager: ObservableObject {
             withIntermediateDirectories: true
         )
 
-        logger.info("Starting model download from HuggingFace: \(self.modelRepo)")
+        logger.info("Starting model download from HuggingFace: \(backend.modelRepo) (backend: \(backend.rawValue))")
 
-        statusMessage = "Setting up Python environment..."
+        statusMessage = "Preparing first-time setup..."
 
         // Ensure bundled Python env exists with all dependencies
         let pythonBin = try await ensurePythonEnv()
 
-        statusMessage = "Downloading model from HuggingFace..."
+        statusMessage = "Downloading speech model..."
+
+        let allowPatternsArg: String
+        if let patterns = backend.allowPatterns {
+            let quoted = patterns.map { "\"\($0)\"" }.joined(separator: ", ")
+            allowPatternsArg = "allow_patterns=[\(quoted)],"
+        } else {
+            allowPatternsArg = ""
+        }
 
         let downloadScript = """
         import sys, json, os
@@ -120,15 +247,17 @@ final class ModelManager: ObservableObject {
 
         try:
             path = snapshot_download(
-                "\(modelRepo)",
+                "\(backend.modelRepo)",
                 local_dir="\(modelDirectory.path)",
-                allow_patterns=["onnx/encoder_model_q4f16*", "onnx/decoder_model_merged_q4f16*", "*.json"],
+                \(allowPatternsArg)
             )
             print(json.dumps({"status": "ok", "path": path}), flush=True)
         except Exception as e:
             msg = str(e)
-            if "404" in msg:
-                msg = "Model not found on HuggingFace: \(modelRepo)"
+            if "401" in msg or "gated" in msg.lower() or "restricted" in msg.lower():
+                msg = "Access denied. Please log in and request access at huggingface.co first."
+            elif "404" in msg:
+                msg = "Model not found. Please check your internet connection and try again."
             print(json.dumps({"status": "error", "error": msg}), flush=True)
         """
 
@@ -143,9 +272,10 @@ final class ModelManager: ObservableObject {
 
         try process.run()
 
-        // Monitor download progress with smoothed speed (rolling average of last 5 samples)
+        // Monitor download activity: show downloaded size and speed.
+        // We don't know the exact total, so we show an indeterminate progress
+        // and only set 100% when the process confirms success.
         // huggingface_hub downloads to ~/.cache/huggingface first, then copies to local_dir.
-        // Monitor both locations for accurate progress.
         let hfCacheDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".cache/huggingface")
 
@@ -160,22 +290,20 @@ final class ModelManager: ObservableObject {
                 let modelSize = self.directorySize(self.modelDirectory)
                 let cacheSize = self.directorySize(hfCacheDir)
                 let currentSize = max(modelSize, cacheSize)
-                let progress = min(Double(currentSize) / Double(self.requiredDiskSpace), 0.99)
 
                 let instantSpeed = currentSize - lastSize
                 speedSamples.append(instantSpeed)
                 if speedSamples.count > maxSamples { speedSamples.removeFirst() }
                 let smoothedSpeed = speedSamples.reduce(0, +) / Int64(speedSamples.count)
 
-                self.downloadProgress = progress
                 self.downloadSpeed = smoothedSpeed
-                self.state = .downloading(progress: progress, bytesPerSec: smoothedSpeed)
+                // Use indeterminate progress (-1) so the UI shows a spinner, not a stuck bar
+                self.state = .downloading(progress: -1, bytesPerSec: smoothedSpeed)
                 let sizeMB = currentSize / 1_000_000
-                let totalMB = self.requiredDiskSpace / 1_000_000
                 if modelSize > 1_000_000 {
-                    self.statusMessage = "Finalizing model: \(sizeMB) / \(totalMB) MB"
+                    self.statusMessage = "Finalizing model: \(sizeMB) MB downloaded"
                 } else {
-                    self.statusMessage = "Downloading model: \(sizeMB) / \(totalMB) MB"
+                    self.statusMessage = "Downloading: \(sizeMB) MB downloaded"
                 }
                 lastSize = currentSize
             }
@@ -247,13 +375,13 @@ final class ModelManager: ObservableObject {
         downloadTask = nil
         // Keep partial downloads — huggingface_hub resumes from where it left off
         let partialSize = directorySize(modelDirectory)
+        state = .notDownloaded
+        downloadProgress = 0
         if partialSize > 0 {
-            state = .notDownloaded
-            downloadProgress = min(Double(partialSize) / Double(requiredDiskSpace), 0.99)
+            statusMessage = "Download paused — \(partialSize / 1_000_000) MB saved, will resume"
             logger.info("Download cancelled, \(partialSize) bytes preserved for resume")
         } else {
-            state = .notDownloaded
-            downloadProgress = 0
+            statusMessage = ""
         }
         logger.info("Download cancelled")
     }
@@ -263,7 +391,7 @@ final class ModelManager: ObservableObject {
         logger.info("Verifying model...")
 
         // Check that key model files exist
-        let requiredFiles = ["config.json", "onnx/encoder_model_q4f16.onnx", "onnx/decoder_model_merged_q4f16.onnx"]
+        let requiredFiles = activeBackend.requiredFiles
         for file in requiredFiles {
             let path = modelDirectory.appendingPathComponent(file)
             if !FileManager.default.fileExists(atPath: path.path) {
@@ -314,28 +442,28 @@ final class ModelManager: ObservableObject {
         let bundledPython = pythonEnvPath.appendingPathComponent("bin/python3")
 
         if FileManager.default.fileExists(atPath: bundledPython.path) {
-            statusMessage = "Checking Python environment..."
-            let check = try await runProcess(bundledPython, args: ["-c", "import huggingface_hub, onnxruntime, transformers; print('ok')"])
+            statusMessage = "Checking setup..."
+            let check = try await runProcess(bundledPython, args: ["-c", "import huggingface_hub, onnxruntime, transformers, torch; print('ok')"])
             if check.status == 0 {
-                statusMessage = "Python environment ready"
+                statusMessage = "Ready"
                 return bundledPython
             }
-            statusMessage = "Installing missing packages..."
+            statusMessage = "Installing missing components..."
         }
 
         guard let systemPython = findSystemPython() else {
-            statusMessage = "Error: Python3 not found"
-            state = .error("Python3 not found. Install via: brew install python3")
+            statusMessage = "Error: Python is required but not installed"
+            state = .error("Python3 not found. Install it from python.org or via Homebrew: brew install python3")
             throw MurmurError.transcriptionFailed("Python3 not found")
         }
 
         // Create venv
         if !FileManager.default.fileExists(atPath: bundledPython.path) {
-            statusMessage = "Creating Python environment..."
+            statusMessage = "Preparing environment..."
             let venvResult = try await runProcess(systemPython, args: ["-m", "venv", pythonEnvPath.path])
             if venvResult.status != 0 {
-                statusMessage = "Error: Failed to create Python env"
-                state = .error("Failed to create Python env")
+                statusMessage = "Error: Failed to set up environment"
+                state = .error("Setup failed — could not create environment")
                 throw MurmurError.transcriptionFailed("venv creation failed: \(venvResult.stderr.prefix(200))")
             }
         }
@@ -343,24 +471,26 @@ final class ModelManager: ObservableObject {
         // Install packages one by one for progress visibility
         let pip = pythonEnvPath.appendingPathComponent("bin/pip3")
         let packages = [
-            ("huggingface_hub", "Downloading: huggingface_hub..."),
-            ("transformers>=5.4.0", "Downloading: transformers..."),
-            ("onnxruntime", "Downloading: ONNX Runtime..."),
-            ("torch", "Downloading: PyTorch (needed for feature extraction)..."),
-            ("librosa", "Downloading: librosa..."),
+            ("huggingface_hub", "Setting up: downloading components (1/7)..."),
+            ("transformers>=5.4.0", "Setting up: downloading components (2/7)..."),
+            ("torch", "Setting up: downloading components (3/7, this may take a minute)..."),
+            ("onnxruntime", "Setting up: downloading components (4/7)..."),
+            ("soundfile", "Setting up: downloading components (5/7)..."),
+            ("librosa", "Setting up: downloading components (6/7)..."),
+            ("accelerate", "Setting up: downloading components (7/7)..."),
         ]
 
         for (pkg, message) in packages {
             statusMessage = message
             let result = try await runProcessWithLiveOutput(pip, args: ["install", pkg])
             if result != 0 {
-                statusMessage = "Error: Failed to install \(pkg)"
-                state = .error("Failed to install \(pkg)")
+                statusMessage = "Error: Setup failed. Please check your internet connection."
+                state = .error("Setup failed — could not install required components")
                 throw MurmurError.transcriptionFailed("pip install \(pkg) failed")
             }
         }
 
-        statusMessage = "Python environment ready"
+        statusMessage = "Setup complete"
         return bundledPython
     }
 
