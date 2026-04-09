@@ -145,15 +145,31 @@ struct OnboardingView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
             } else {
-                Button("Open System Settings") {
-                    viewModel.openAccessibilitySettings()
+                VStack(spacing: 8) {
+                    Button("Open System Settings") {
+                        viewModel.openAccessibilitySettings()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+
+                    Button("I've already enabled it — Continue") {
+                        viewModel.accessibilityGranted = true
+                        viewModel.nextStep()
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
             }
         }
         .onAppear {
-            viewModel.startPollingAccessibility()
+            // Check immediately — might already be granted
+            viewModel.accessibilityGranted = AXIsProcessTrusted()
+            if viewModel.accessibilityGranted {
+                viewModel.nextStep()
+            } else {
+                viewModel.startPollingAccessibility()
+            }
         }
     }
 
