@@ -50,20 +50,20 @@ final class ModelManager: ObservableObject {
     private var resumeData: Data?
 
     // HuggingFace model info
-    private let modelRepo = "CohereLabs/cohere-transcribe-03-2026"
-    private let requiredDiskSpace: Int64 = 4_200_000_000 // ~4.1 GB actual model size
+    private let modelRepo = "onnx-community/cohere-transcribe-03-2026-ONNX"
+    private let requiredDiskSpace: Int64 = 1_600_000_000 // ~1.5 GB for q4f16 variant
 
     var modelDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Murmur/Models")
+            .appendingPathComponent("Murmur/Models-ONNX")
     }
 
     var modelPath: URL? {
         let dir = modelDirectory
-        // Must have both config.json AND model.safetensors to be usable
         let configExists = FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.json").path)
-        let modelExists = FileManager.default.fileExists(atPath: dir.appendingPathComponent("model.safetensors").path)
-        return (configExists && modelExists) ? dir : nil
+        let encoderExists = FileManager.default.fileExists(atPath: dir.appendingPathComponent("onnx/encoder_model_q4f16.onnx").path)
+        let decoderExists = FileManager.default.fileExists(atPath: dir.appendingPathComponent("onnx/decoder_model_merged_q4f16.onnx").path)
+        return (configExists && encoderExists && decoderExists) ? dir : nil
     }
 
     var pythonEnvPath: URL {
@@ -122,14 +122,12 @@ final class ModelManager: ObservableObject {
             path = snapshot_download(
                 "\(modelRepo)",
                 local_dir="\(modelDirectory.path)",
+                allow_patterns=["onnx/encoder_model_q4f16*", "onnx/decoder_model_merged_q4f16*", "*.json"],
             )
             print(json.dumps({"status": "ok", "path": path}), flush=True)
         except Exception as e:
             msg = str(e)
-            # Provide helpful messages for common errors
-            if "401" in msg or "gated" in msg.lower() or "restricted" in msg.lower():
-                msg = "This model requires access approval. Visit https://huggingface.co/\(modelRepo) to request access, then run: huggingface-cli login"
-            elif "404" in msg:
+            if "404" in msg:
                 msg = "Model not found on HuggingFace: \(modelRepo)"
             print(json.dumps({"status": "error", "error": msg}), flush=True)
         """
@@ -265,7 +263,7 @@ final class ModelManager: ObservableObject {
         logger.info("Verifying model...")
 
         // Check that key model files exist
-        let requiredFiles = ["config.json", "preprocessor_config.json"]
+        let requiredFiles = ["config.json", "onnx/encoder_model_q4f16.onnx", "onnx/decoder_model_merged_q4f16.onnx"]
         for file in requiredFiles {
             let path = modelDirectory.appendingPathComponent(file)
             if !FileManager.default.fileExists(atPath: path.path) {
@@ -317,7 +315,7 @@ final class ModelManager: ObservableObject {
 
         if FileManager.default.fileExists(atPath: bundledPython.path) {
             statusMessage = "Checking Python environment..."
-            let check = try await runProcess(bundledPython, args: ["-c", "import huggingface_hub; print('ok')"])
+            let check = try await runProcess(bundledPython, args: ["-c", "import huggingface_hub, onnxruntime, transformers; print('ok')"])
             if check.status == 0 {
                 statusMessage = "Python environment ready"
                 return bundledPython
@@ -346,10 +344,9 @@ final class ModelManager: ObservableObject {
         let pip = pythonEnvPath.appendingPathComponent("bin/pip3")
         let packages = [
             ("huggingface_hub", "Downloading: huggingface_hub..."),
-            ("transformers", "Downloading: transformers..."),
-            ("torch", "Downloading: PyTorch (~2GB, this takes a few minutes)..."),
-            ("accelerate", "Downloading: accelerate..."),
-            ("soundfile", "Downloading: soundfile..."),
+            ("transformers>=5.4.0", "Downloading: transformers..."),
+            ("onnxruntime", "Downloading: ONNX Runtime..."),
+            ("torch", "Downloading: PyTorch (needed for feature extraction)..."),
             ("librosa", "Downloading: librosa..."),
         ]
 

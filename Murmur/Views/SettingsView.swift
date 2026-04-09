@@ -110,7 +110,7 @@ struct SettingsView: View {
 
     private var modelTab: some View {
         Form {
-            Section("Cohere Transcribe") {
+            Section("Cohere Transcribe (ONNX)") {
                 LabeledContent("Status:") {
                     modelStatusBadge
                 }
