@@ -370,7 +370,7 @@ struct OnboardingView: View {
                     Label("Now try the real shortcut", systemImage: "keyboard")
                         .font(.headline)
 
-                    Text("Press **Ctrl + Space** to start, speak, then press again to stop.")
+                    Text("Press **Right Command** to start, speak, then press again to stop.")
                         .font(.body)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -402,7 +402,7 @@ struct OnboardingView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(viewModel.hotkeyTestResult == nil)
+                .disabled(viewModel.hotkeyTestResult == nil && viewModel.testResult == nil)
             }
         }
         .onAppear {
@@ -466,7 +466,7 @@ struct OnboardingView: View {
                     .font(.title.bold())
 
                 VStack(alignment: .leading, spacing: 12) {
-                    Label("**Ctrl + Space** — start / stop recording", systemImage: "keyboard")
+                    Label("**Right Command** — start / stop recording", systemImage: "keyboard")
                     Label("**Esc** — cancel recording", systemImage: "escape")
                     Label("**Cmd + Z** — undo last insertion", systemImage: "arrow.uturn.backward")
                 }
