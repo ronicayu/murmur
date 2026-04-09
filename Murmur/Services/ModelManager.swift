@@ -346,6 +346,7 @@ final class ModelManager: ObservableObject {
             ("huggingface_hub", "Downloading: huggingface_hub..."),
             ("transformers", "Downloading: transformers..."),
             ("torch", "Downloading: PyTorch (~2GB, this takes a few minutes)..."),
+            ("accelerate", "Downloading: accelerate..."),
             ("soundfile", "Downloading: soundfile..."),
             ("librosa", "Downloading: librosa..."),
         ]

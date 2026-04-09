@@ -27,12 +27,13 @@ def load_model(model_path: str):
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     dtype = torch.float16 if device == "mps" else torch.float32
 
-    processor = AutoProcessor.from_pretrained(model_path)
+    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
         model_path,
         torch_dtype=dtype,
-        device_map=device,
+        trust_remote_code=True,
     )
+    model = model.to(device)
 
     return {"status": "ok"}
 
