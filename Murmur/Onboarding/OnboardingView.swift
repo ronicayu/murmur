@@ -263,10 +263,18 @@ struct OnboardingView: View {
                     HStack {
                         Text("\(Int(viewModel.modelManager.downloadProgress * 100))%")
                         Spacer()
-                        Text(formatSpeed(viewModel.modelManager.downloadSpeed))
+                        if viewModel.modelManager.downloadSpeed > 0 {
+                            Text(formatSpeed(viewModel.modelManager.downloadSpeed))
+                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    if !viewModel.modelManager.statusMessage.isEmpty {
+                        Text(viewModel.modelManager.statusMessage)
+                            .font(.caption)
+                            .foregroundStyle(viewModel.modelManager.statusMessage.hasPrefix("Error") ? .red : .secondary)
+                            .lineLimit(2)
+                    }
                 }
             } else if viewModel.modelManager.state == .ready {
                 Label("Model downloaded", systemImage: "checkmark.circle.fill")

@@ -143,20 +143,26 @@ final class ModelManager: ObservableObject {
 
         try process.run()
 
-        // Monitor download progress by checking directory size periodically
+        // Monitor download progress with smoothed speed (rolling average of last 5 samples)
         let monitorTask = Task { @MainActor [weak self] in
             guard let self else { return }
             var lastSize: Int64 = 0
+            var speedSamples: [Int64] = []
+            let maxSamples = 5
 
             while !Task.isCancelled && process.isRunning {
                 try? await Task.sleep(for: .seconds(1))
                 let currentSize = self.directorySize(self.modelDirectory)
                 let progress = min(Double(currentSize) / Double(self.requiredDiskSpace), 0.99)
 
-                let speed = currentSize - lastSize
+                let instantSpeed = currentSize - lastSize
+                speedSamples.append(instantSpeed)
+                if speedSamples.count > maxSamples { speedSamples.removeFirst() }
+                let smoothedSpeed = speedSamples.reduce(0, +) / Int64(speedSamples.count)
+
                 self.downloadProgress = progress
-                self.downloadSpeed = speed
-                self.state = .downloading(progress: progress, bytesPerSec: speed)
+                self.downloadSpeed = smoothedSpeed
+                self.state = .downloading(progress: progress, bytesPerSec: smoothedSpeed)
                 let sizeMB = currentSize / 1_000_000
                 let totalMB = self.requiredDiskSpace / 1_000_000
                 self.statusMessage = "Downloading model: \(sizeMB) / \(totalMB) MB"

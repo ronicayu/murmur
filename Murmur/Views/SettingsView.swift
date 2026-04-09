@@ -102,9 +102,15 @@ struct SettingsView: View {
 
                 if case .downloading(let progress, let speed) = modelManager.state {
                     ProgressView(value: progress)
-                    Text("\(Int(progress * 100))% — \(formatSpeed(speed))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text("\(Int(progress * 100))%")
+                        Spacer()
+                        if speed > 0 {
+                            Text(formatSpeed(speed))
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
 
                 if !modelManager.statusMessage.isEmpty {
