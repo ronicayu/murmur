@@ -106,6 +106,14 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                if !modelManager.statusMessage.isEmpty {
+                    Text(modelManager.statusMessage)
+                        .font(.caption)
+                        .foregroundStyle(modelManager.statusMessage.hasPrefix("Error") ? .red : .secondary)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                }
             }
 
             Section {

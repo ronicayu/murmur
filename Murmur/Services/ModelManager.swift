@@ -42,6 +42,7 @@ final class ModelManager: ObservableObject {
     @Published private(set) var state: ModelState = .notDownloaded
     @Published private(set) var downloadProgress: Double = 0
     @Published private(set) var downloadSpeed: Int64 = 0 // bytes/sec
+    @Published private(set) var statusMessage: String = ""
 
     private let logger = Logger(subsystem: "com.murmur.app", category: "model")
     private var downloadTask: Task<Void, Never>?
@@ -104,8 +105,12 @@ final class ModelManager: ObservableObject {
 
         logger.info("Starting model download from HuggingFace: \(self.modelRepo)")
 
+        statusMessage = "Setting up Python environment..."
+
         // Ensure bundled Python env exists with all dependencies
         let pythonBin = try await ensurePythonEnv()
+
+        statusMessage = "Downloading model from HuggingFace..."
 
         let downloadScript = """
         import sys, json
@@ -143,9 +148,13 @@ final class ModelManager: ObservableObject {
                 let currentSize = self.directorySize(self.modelDirectory)
                 let progress = min(Double(currentSize) / Double(self.requiredDiskSpace), 0.99)
 
+                let speed = currentSize - lastSize
                 self.downloadProgress = progress
-                self.downloadSpeed = currentSize - lastSize
-                self.state = .downloading(progress: progress, bytesPerSec: currentSize - lastSize)
+                self.downloadSpeed = speed
+                self.state = .downloading(progress: progress, bytesPerSec: speed)
+                let sizeMB = currentSize / 1_000_000
+                let totalMB = self.requiredDiskSpace / 1_000_000
+                self.statusMessage = "Downloading model: \(sizeMB) / \(totalMB) MB"
                 lastSize = currentSize
             }
         }
@@ -162,7 +171,9 @@ final class ModelManager: ObservableObject {
             let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
             let errorStr = String(data: errorData, encoding: .utf8) ?? "Unknown error"
             logger.error("Model download failed: \(errorStr)")
-            state = .error("Download failed: \(String(errorStr.prefix(200)))")
+            let shortErr = String(errorStr.suffix(200))
+            statusMessage = "Error: \(shortErr)"
+            state = .error("Download failed: \(shortErr)")
             throw MurmurError.transcriptionFailed("Model download failed")
         }
 
@@ -253,62 +264,57 @@ final class ModelManager: ObservableObject {
     // MARK: - Helpers
 
     /// Creates the bundled Python venv and installs all dependencies.
-    /// Skips if already set up.
     private func ensurePythonEnv() async throws -> URL {
         let bundledPython = pythonEnvPath.appendingPathComponent("bin/python3")
 
         if FileManager.default.fileExists(atPath: bundledPython.path) {
-            // Check if huggingface_hub is installed
-            let check = try await runProcess(
-                bundledPython,
-                args: ["-c", "import huggingface_hub; print('ok')"]
-            )
+            statusMessage = "Checking Python environment..."
+            let check = try await runProcess(bundledPython, args: ["-c", "import huggingface_hub; print('ok')"])
             if check.status == 0 {
+                statusMessage = "Python environment ready"
                 return bundledPython
             }
-            logger.info("Python env exists but missing packages, installing...")
-        } else {
-            logger.info("Creating Python venv at \(self.pythonEnvPath.path)")
+            statusMessage = "Installing missing packages..."
         }
 
-        // Find system python3 to bootstrap
         guard let systemPython = findSystemPython() else {
-            state = .error("Python3 not found")
-            throw MurmurError.transcriptionFailed(
-                "Python3 not found. Install Python 3 from python.org or via Homebrew: brew install python3"
-            )
+            statusMessage = "Error: Python3 not found"
+            state = .error("Python3 not found. Install via: brew install python3")
+            throw MurmurError.transcriptionFailed("Python3 not found")
         }
 
         // Create venv
         if !FileManager.default.fileExists(atPath: bundledPython.path) {
-            state = .downloading(progress: 0, bytesPerSec: 0)
-            logger.info("Creating venv with \(systemPython.path)")
-
-            let venvResult = try await runProcess(
-                systemPython,
-                args: ["-m", "venv", pythonEnvPath.path]
-            )
+            statusMessage = "Creating Python environment..."
+            let venvResult = try await runProcess(systemPython, args: ["-m", "venv", pythonEnvPath.path])
             if venvResult.status != 0 {
+                statusMessage = "Error: Failed to create Python env"
                 state = .error("Failed to create Python env")
-                throw MurmurError.transcriptionFailed("Failed to create Python venv: \(venvResult.stderr)")
+                throw MurmurError.transcriptionFailed("venv creation failed: \(venvResult.stderr.prefix(200))")
             }
         }
 
-        // Install packages
-        logger.info("Installing Python dependencies...")
+        // Install packages one by one for progress visibility
         let pip = pythonEnvPath.appendingPathComponent("bin/pip3")
-        let packages = ["huggingface_hub", "transformers", "torch", "soundfile", "librosa"]
+        let packages = [
+            ("huggingface_hub", "Downloading: huggingface_hub..."),
+            ("transformers", "Downloading: transformers..."),
+            ("torch", "Downloading: PyTorch (~2GB, this takes a few minutes)..."),
+            ("soundfile", "Downloading: soundfile..."),
+            ("librosa", "Downloading: librosa..."),
+        ]
 
-        let installResult = try await runProcess(
-            pip,
-            args: ["install"] + packages
-        )
-        if installResult.status != 0 {
-            state = .error("Failed to install dependencies")
-            throw MurmurError.transcriptionFailed("pip install failed: \(installResult.stderr)")
+        for (pkg, message) in packages {
+            statusMessage = message
+            let result = try await runProcessWithLiveOutput(pip, args: ["install", pkg])
+            if result != 0 {
+                statusMessage = "Error: Failed to install \(pkg)"
+                state = .error("Failed to install \(pkg)")
+                throw MurmurError.transcriptionFailed("pip install \(pkg) failed")
+            }
         }
 
-        logger.info("Python environment ready")
+        statusMessage = "Python environment ready"
         return bundledPython
     }
 
@@ -344,6 +350,43 @@ final class ModelManager: ObservableObject {
             stdout: String(data: stdoutData, encoding: .utf8) ?? "",
             stderr: String(data: stderrData, encoding: .utf8) ?? ""
         )
+    }
+
+    /// Runs a process and streams stderr lines to statusMessage for live progress.
+    private func runProcessWithLiveOutput(_ executable: URL, args: [String]) async throws -> Int32 {
+        let proc = Process()
+        proc.executableURL = executable
+        proc.arguments = args
+
+        let stderrPipe = Pipe()
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = stderrPipe
+
+        try proc.run()
+
+        // Stream stderr lines to update status
+        let streamTask = Task { @MainActor [weak self] in
+            let handle = stderrPipe.fileHandleForReading
+            while let line = String(data: handle.availableData, encoding: .utf8), !line.isEmpty, !Task.isCancelled {
+                // Show the last meaningful line (pip progress)
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    // Extract just the last line for display
+                    if let lastLine = trimmed.components(separatedBy: "\n").last, !lastLine.isEmpty {
+                        self?.statusMessage = String(lastLine.prefix(80))
+                    }
+                }
+            }
+        }
+
+        let status: Int32 = await withCheckedContinuation { continuation in
+            proc.terminationHandler = { p in
+                continuation.resume(returning: p.terminationStatus)
+            }
+        }
+        streamTask.cancel()
+
+        return status
     }
 
     private func findSystemPython() -> URL? {
