@@ -4,6 +4,7 @@ enum OnboardingStep: Int, CaseIterable {
     case welcome = 0
     case microphone
     case accessibility
+    case huggingfaceLogin
     case modelDownload
     case testTranscription
     case done
@@ -37,6 +38,8 @@ struct OnboardingView: View {
                     microphoneStep
                 case .accessibility:
                     accessibilityStep
+                case .huggingfaceLogin:
+                    huggingfaceLoginStep
                 case .modelDownload:
                     modelDownloadStep
                 case .testTranscription:
@@ -154,7 +157,76 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Step 4: Model Download
+    // MARK: - Step 4: HuggingFace Login
+
+    private var huggingfaceLoginStep: some View {
+        VStack(spacing: 24) {
+            Spacer()
+            Image(systemName: "person.badge.key.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.indigo)
+            Text("HuggingFace Login")
+                .font(.title2.bold())
+            Text("The speech model is hosted on HuggingFace and requires a free account to download.")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            VStack(alignment: .leading, spacing: 12) {
+                Label("1. Create a free account at huggingface.co", systemImage: "1.circle")
+                Label("2. Visit the model page and request access", systemImage: "2.circle")
+                Label("3. Click \"Login\" below to authenticate", systemImage: "3.circle")
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+
+            if viewModel.hfLoggedIn {
+                Label("Logged in to HuggingFace", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            }
+
+            if !viewModel.hfStatusMessage.isEmpty {
+                Text(viewModel.hfStatusMessage)
+                    .font(.caption)
+                    .foregroundStyle(viewModel.hfStatusMessage.hasPrefix("Error") ? .red : .secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            Spacer()
+
+            HStack(spacing: 12) {
+                Button("Open HuggingFace") {
+                    NSWorkspace.shared.open(URL(string: "https://huggingface.co/CohereLabs/cohere-transcribe-03-2026")!)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+
+                if viewModel.hfLoggedIn {
+                    Button("Continue") {
+                        viewModel.nextStep()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                } else {
+                    Button("Login") {
+                        Task { await viewModel.loginHuggingFace() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                }
+            }
+
+            Button("Skip (I'll set this up later)") {
+                viewModel.nextStep()
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .font(.caption)
+            .padding(.bottom, 4)
+        }
+    }
+
+    // MARK: - Step 5: Model Download
 
     private var modelDownloadStep: some View {
         VStack(spacing: 24) {

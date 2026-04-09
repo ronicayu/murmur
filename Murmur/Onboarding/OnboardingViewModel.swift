@@ -14,6 +14,8 @@ final class OnboardingViewModel: ObservableObject {
     @Published var hotkeyConflictDetected = false
     @Published var customKey: Key = .space
     @Published var customModifiers: NSEvent.ModifierFlags = .control
+    @Published var hfLoggedIn = false
+    @Published var hfStatusMessage = ""
 
     let coordinator: AppCoordinator
     let modelManager: ModelManager
@@ -107,6 +109,88 @@ final class OnboardingViewModel: ObservableObject {
                     lastKnownResult = text
                 }
             }
+        }
+    }
+
+    func loginHuggingFace() async {
+        hfStatusMessage = "Opening browser for login..."
+
+        // Find python
+        let pythonPaths = [
+            modelManager.pythonEnvPath.appendingPathComponent("bin/python3").path,
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "/usr/bin/python3"
+        ]
+        guard let pythonPath = pythonPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+            hfStatusMessage = "Error: Python3 not found. Install via: brew install python3"
+            return
+        }
+
+        // Use huggingface-cli login which opens browser
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: pythonPath)
+        proc.arguments = ["-m", "huggingface_hub.commands.huggingface_cli", "login"]
+
+        // This needs a terminal for interactive login. Instead, open the token page
+        // and have the user paste the token.
+        NSWorkspace.shared.open(URL(string: "https://huggingface.co/settings/tokens")!)
+        hfStatusMessage = "Create a token at huggingface.co/settings/tokens, then paste it below."
+
+        // For now, prompt via a dialog
+        let alert = NSAlert()
+        alert.messageText = "Paste your HuggingFace token"
+        alert.informativeText = "1. Copy a token from the page that just opened\n2. Paste it below\n\nThe token will be saved for downloading models."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Save Token")
+        alert.addButton(withTitle: "Cancel")
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        input.placeholderString = "hf_..."
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let token = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !token.isEmpty else {
+                hfStatusMessage = "Error: No token entered"
+                return
+            }
+
+            // Save token using huggingface_hub
+            hfStatusMessage = "Saving token..."
+            let saveScript = """
+            from huggingface_hub import login
+            login(token="\(token)")
+            print("ok")
+            """
+
+            let saveProc = Process()
+            saveProc.executableURL = URL(fileURLWithPath: pythonPath)
+            saveProc.arguments = ["-c", saveScript]
+            let stdout = Pipe()
+            let stderr = Pipe()
+            saveProc.standardOutput = stdout
+            saveProc.standardError = stderr
+
+            do {
+                try saveProc.run()
+                saveProc.waitUntilExit()
+
+                if saveProc.terminationStatus == 0 {
+                    hfLoggedIn = true
+                    hfStatusMessage = "Token saved successfully"
+                } else {
+                    let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+                    let errStr = String(data: errData, encoding: .utf8) ?? "Unknown error"
+                    hfStatusMessage = "Error: \(String(errStr.suffix(150)))"
+                }
+            } catch {
+                hfStatusMessage = "Error: \(error.localizedDescription)"
+            }
+        } else {
+            hfStatusMessage = "Login cancelled"
         }
     }
 
