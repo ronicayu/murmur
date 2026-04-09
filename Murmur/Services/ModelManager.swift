@@ -113,18 +113,23 @@ final class ModelManager: ObservableObject {
         statusMessage = "Downloading model from HuggingFace..."
 
         let downloadScript = """
-        import sys, json
+        import sys, json, os
         from huggingface_hub import snapshot_download
 
         try:
             path = snapshot_download(
                 "\(modelRepo)",
                 local_dir="\(modelDirectory.path)",
-                local_dir_use_symlinks=False
             )
-            print(json.dumps({"status": "ok", "path": path}))
+            print(json.dumps({"status": "ok", "path": path}), flush=True)
         except Exception as e:
-            print(json.dumps({"status": "error", "error": str(e)}))
+            msg = str(e)
+            # Provide helpful messages for common errors
+            if "401" in msg or "gated" in msg.lower() or "restricted" in msg.lower():
+                msg = "This model requires access approval. Visit https://huggingface.co/\(modelRepo) to request access, then run: huggingface-cli login"
+            elif "404" in msg:
+                msg = "Model not found on HuggingFace: \(modelRepo)"
+            print(json.dumps({"status": "error", "error": msg}), flush=True)
         """
 
         let process = Process()
@@ -167,32 +172,56 @@ final class ModelManager: ObservableObject {
         }
         monitorTask.cancel()
 
-        if exitStatus != 0 {
-            let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
-            let errorStr = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-            logger.error("Model download failed: \(errorStr)")
-            let shortErr = String(errorStr.suffix(200))
-            statusMessage = "Error: \(shortErr)"
-            state = .error("Download failed: \(shortErr)")
-            throw MurmurError.transcriptionFailed("Model download failed")
+        // Read stdout for JSON result (our script always prints JSON)
+        let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+        let outputStr = String(data: outputData, encoding: .utf8) ?? ""
+        let stderrStr = String(data: stderrData, encoding: .utf8) ?? ""
+
+        // Try to parse JSON response from our script
+        if let jsonLine = outputStr.components(separatedBy: "\n").last(where: { $0.contains("{") }),
+           let data = jsonLine.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+
+            if let error = json["error"] as? String {
+                logger.error("Model download error: \(error)")
+                statusMessage = "Error: \(error)"
+                state = .error(String(error.prefix(200)))
+                throw MurmurError.transcriptionFailed(error)
+            }
+
+            if json["status"] as? String == "ok" {
+                logger.info("Model downloaded, verifying...")
+                statusMessage = "Verifying model..."
+                downloadProgress = 1.0
+                let valid = try await verify()
+                guard valid else {
+                    statusMessage = "Error: Model integrity check failed"
+                    state = .corrupt
+                    throw MurmurError.transcriptionFailed("Model integrity check failed")
+                }
+                statusMessage = "Model ready"
+                return
+            }
         }
 
-        // Parse result
-        let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
-        if let outputStr = String(data: outputData, encoding: .utf8),
-           let data = outputStr.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           json["status"] as? String == "ok" {
-            logger.info("Model downloaded, verifying...")
-            downloadProgress = 1.0
-            let valid = try await verify()
-            guard valid else {
-                state = .corrupt
-                throw MurmurError.transcriptionFailed("Model integrity check failed")
-            }
+        // Fallback: no JSON parsed, check exit status
+        if exitStatus != 0 {
+            let shortErr = String(stderrStr.suffix(200))
+            logger.error("Model download failed: \(shortErr)")
+            statusMessage = "Error: \(shortErr)"
+            state = .error("Download failed")
+            throw MurmurError.transcriptionFailed("Model download failed: \(shortErr)")
+        }
+
+        // Process exited 0 but no JSON — check if files exist
+        if modelPath != nil {
+            statusMessage = "Model ready"
+            state = .ready
         } else {
-            state = .error("Download completed but verification failed")
-            throw MurmurError.transcriptionFailed("Model download verification failed")
+            statusMessage = "Error: Download completed but model files missing"
+            state = .error("Model files missing after download")
+            throw MurmurError.transcriptionFailed("Model files missing")
         }
     }
 
