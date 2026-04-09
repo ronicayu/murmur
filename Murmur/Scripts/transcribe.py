@@ -25,7 +25,8 @@ def load_model(model_path: str):
     from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
-    dtype = torch.float16 if device == "mps" else torch.float32
+    # Use float32 — float16 on MPS causes c10 conversion errors with some ops
+    dtype = torch.float32
 
     processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
