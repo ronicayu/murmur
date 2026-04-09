@@ -135,8 +135,9 @@ final class AudioService: AudioServiceProtocol {
         // VAD: check if audio was silence
         let avgRMS = accum.isEmpty ? Float(-100) : accum.reduce(0, +) / Float(accum.count)
         let dbRMS = 20 * Foundation.log10(max(avgRMS, 1e-10))
-        if dbRMS < -40 {
-            logger.info("Silence detected (RMS: \(dbRMS) dB)")
+        logger.info("Audio RMS: \(dbRMS) dB (threshold: -60 dB)")
+        if dbRMS < -60 {
+            logger.info("Silence detected")
             try? FileManager.default.removeItem(at: url)
             throw MurmurError.silenceDetected
         }
