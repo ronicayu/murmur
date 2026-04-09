@@ -104,22 +104,8 @@ final class ModelManager: ObservableObject {
 
         logger.info("Starting model download from HuggingFace: \(self.modelRepo)")
 
-        // Download using huggingface-cli via Python subprocess
-        // This handles authentication, LFS files, resume, etc.
-        // Try bundled Python env first, then system python3
-        let bundledPython = pythonEnvPath.appendingPathComponent("bin/python3")
-        let pythonBin: URL
-
-        if FileManager.default.fileExists(atPath: bundledPython.path) {
-            pythonBin = bundledPython
-        } else if let systemPython = findSystemPython() {
-            pythonBin = systemPython
-        } else {
-            state = .error("Python not found")
-            throw MurmurError.transcriptionFailed(
-                "Python3 not found. Install Python 3 and run:\npip3 install huggingface_hub"
-            )
-        }
+        // Ensure bundled Python env exists with all dependencies
+        let pythonBin = try await ensurePythonEnv()
 
         let downloadScript = """
         import sys, json
@@ -265,6 +251,100 @@ final class ModelManager: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Creates the bundled Python venv and installs all dependencies.
+    /// Skips if already set up.
+    private func ensurePythonEnv() async throws -> URL {
+        let bundledPython = pythonEnvPath.appendingPathComponent("bin/python3")
+
+        if FileManager.default.fileExists(atPath: bundledPython.path) {
+            // Check if huggingface_hub is installed
+            let check = try await runProcess(
+                bundledPython,
+                args: ["-c", "import huggingface_hub; print('ok')"]
+            )
+            if check.status == 0 {
+                return bundledPython
+            }
+            logger.info("Python env exists but missing packages, installing...")
+        } else {
+            logger.info("Creating Python venv at \(self.pythonEnvPath.path)")
+        }
+
+        // Find system python3 to bootstrap
+        guard let systemPython = findSystemPython() else {
+            state = .error("Python3 not found")
+            throw MurmurError.transcriptionFailed(
+                "Python3 not found. Install Python 3 from python.org or via Homebrew: brew install python3"
+            )
+        }
+
+        // Create venv
+        if !FileManager.default.fileExists(atPath: bundledPython.path) {
+            state = .downloading(progress: 0, bytesPerSec: 0)
+            logger.info("Creating venv with \(systemPython.path)")
+
+            let venvResult = try await runProcess(
+                systemPython,
+                args: ["-m", "venv", pythonEnvPath.path]
+            )
+            if venvResult.status != 0 {
+                state = .error("Failed to create Python env")
+                throw MurmurError.transcriptionFailed("Failed to create Python venv: \(venvResult.stderr)")
+            }
+        }
+
+        // Install packages
+        logger.info("Installing Python dependencies...")
+        let pip = pythonEnvPath.appendingPathComponent("bin/pip3")
+        let packages = ["huggingface_hub", "transformers", "torch", "soundfile", "librosa"]
+
+        let installResult = try await runProcess(
+            pip,
+            args: ["install"] + packages
+        )
+        if installResult.status != 0 {
+            state = .error("Failed to install dependencies")
+            throw MurmurError.transcriptionFailed("pip install failed: \(installResult.stderr)")
+        }
+
+        logger.info("Python environment ready")
+        return bundledPython
+    }
+
+    private struct ProcessResult {
+        let status: Int32
+        let stdout: String
+        let stderr: String
+    }
+
+    private func runProcess(_ executable: URL, args: [String]) async throws -> ProcessResult {
+        let proc = Process()
+        proc.executableURL = executable
+        proc.arguments = args
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        proc.standardOutput = stdoutPipe
+        proc.standardError = stderrPipe
+
+        try proc.run()
+
+        let status: Int32 = await withCheckedContinuation { continuation in
+            proc.terminationHandler = { p in
+                continuation.resume(returning: p.terminationStatus)
+            }
+        }
+
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+
+        return ProcessResult(
+            status: status,
+            stdout: String(data: stdoutData, encoding: .utf8) ?? "",
+            stderr: String(data: stderrData, encoding: .utf8) ?? ""
+        )
+    }
 
     private func findSystemPython() -> URL? {
         let candidates = [
