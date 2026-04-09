@@ -219,7 +219,8 @@ final class AppCoordinator: ObservableObject {
                 try await self.audio.stopRecording()
             }
             let result = try await withTimeout(seconds: 120, operation: "transcription") {
-                try await self.transcription.transcribe(audioURL: wav)
+                let lang = UserDefaults.standard.string(forKey: "transcriptionLanguage") ?? "en"
+                return try await self.transcription.transcribe(audioURL: wav, language: lang)
             }
 
             transition(to: .injecting)

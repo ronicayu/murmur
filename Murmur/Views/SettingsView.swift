@@ -8,6 +8,7 @@ struct SettingsView: View {
     @AppStorage("recordingMode") private var recordingMode: String = RecordingMode.toggle.rawValue
     @AppStorage("soundEffects") private var soundEffects: Bool = true
     @AppStorage("launchAtLogin") private var launchAtLogin: Bool = true
+    @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "en"
 
     @State private var useRightCommand: Bool = true
     @State private var hotkeyKey: Key = .space
@@ -71,6 +72,28 @@ struct SettingsView: View {
                         coordinator.hotkey.setMode(mode)
                     }
                 }
+            }
+
+            Section("Language") {
+                Picker("Transcription language:", selection: $transcriptionLanguage) {
+                    Text("English").tag("en")
+                    Text("中文 (Chinese)").tag("zh")
+                    Text("日本語 (Japanese)").tag("ja")
+                    Text("한국어 (Korean)").tag("ko")
+                    Text("Français").tag("fr")
+                    Text("Deutsch").tag("de")
+                    Text("Español").tag("es")
+                    Text("Português").tag("pt")
+                    Text("Italiano").tag("it")
+                    Text("Nederlands").tag("nl")
+                    Text("Polski").tag("pl")
+                    Text("Ελληνικά").tag("el")
+                    Text("العربية").tag("ar")
+                    Text("Tiếng Việt").tag("vi")
+                }
+                Text("For mixed Chinese/English, select 中文")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Behavior") {

@@ -14,7 +14,7 @@ struct TranscriptionResult: Sendable {
 }
 
 protocol TranscriptionServiceProtocol {
-    func transcribe(audioURL: URL) async throws -> TranscriptionResult
+    func transcribe(audioURL: URL, language: String) async throws -> TranscriptionResult
     func preloadModel() async throws
     func unloadModel() async
     var isModelLoaded: Bool { get }
@@ -43,7 +43,7 @@ final class TranscriptionService: TranscriptionServiceProtocol {
 
     init(
         modelPath: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Murmur/Models"),
+            .appendingPathComponent("Murmur/Models-ONNX"),
         pythonPath: URL? = nil,
         scriptPath: URL? = nil
     ) {
@@ -106,7 +106,7 @@ final class TranscriptionService: TranscriptionServiceProtocol {
         logger.info("Model loaded from \(self.modelPath.path)")
     }
 
-    func transcribe(audioURL: URL) async throws -> TranscriptionResult {
+    func transcribe(audioURL: URL, language: String = "en") async throws -> TranscriptionResult {
         if !isModelLoaded {
             try await preloadModel()
         }
@@ -115,7 +115,8 @@ final class TranscriptionService: TranscriptionServiceProtocol {
         do {
             response = try await send(command: [
                 "cmd": "transcribe",
-                "wav_path": audioURL.path
+                "wav_path": audioURL.path,
+                "language": language
             ])
         } catch {
             // Clean up temp file even on error (B6 fix)
@@ -172,7 +173,10 @@ final class TranscriptionService: TranscriptionServiceProtocol {
         let proc = Process()
         proc.executableURL = pythonPath
         proc.arguments = ["-u", scriptPath.path]
-        proc.environment = ["PYTHONUNBUFFERED": "1"]
+        proc.environment = [
+            "PYTHONUNBUFFERED": "1",
+            "KMP_DUPLICATE_LIB_OK": "TRUE",
+        ]
 
         let stdin = Pipe()
         let stdout = Pipe()
