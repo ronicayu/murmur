@@ -218,7 +218,7 @@ final class AppCoordinator: ObservableObject {
             let wav = try await withTimeout(seconds: 5, operation: "stop recording") {
                 try await self.audio.stopRecording()
             }
-            let result = try await withTimeout(seconds: 30, operation: "transcription") {
+            let result = try await withTimeout(seconds: 120, operation: "transcription") {
                 try await self.transcription.transcribe(audioURL: wav)
             }
 
