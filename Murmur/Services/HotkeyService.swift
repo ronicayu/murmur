@@ -90,8 +90,8 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
         }
     }
 
-    /// Legacy convenience for key+modifier combos
-    func register(key: Key = .space, modifiers: NSEvent.ModifierFlags = .control) {
+    /// Convenience for key+modifier combos (custom hotkey)
+    func register(key: Key = .space, modifiers: NSEvent.ModifierFlags = .command) {
         register(trigger: .keyCombo(key: key, modifiers: modifiers))
     }
 

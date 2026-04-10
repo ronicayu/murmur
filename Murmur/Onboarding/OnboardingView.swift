@@ -4,6 +4,7 @@ enum OnboardingStep: Int, CaseIterable {
     case welcome = 0
     case microphone
     case accessibility
+    case modelChoice
     case huggingfaceLogin
     case modelDownload
     case testTranscription
@@ -24,8 +25,8 @@ struct OnboardingView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Progress bar
-            ProgressView(value: Double(viewModel.step.rawValue), total: Double(OnboardingStep.allCases.count - 1))
+            // Progress bar — maps actual step to visible progress (skipping modelChoice + huggingfaceLogin)
+            ProgressView(value: Double(viewModel.visibleStepIndex), total: Double(viewModel.visibleStepCount - 1))
                 .padding(.horizontal, 32)
                 .padding(.top, 20)
 
@@ -38,6 +39,8 @@ struct OnboardingView: View {
                     microphoneStep
                 case .accessibility:
                     accessibilityStep
+                case .modelChoice:
+                    modelChoiceStep
                 case .huggingfaceLogin:
                     huggingfaceLoginStep
                 case .modelDownload:
@@ -51,10 +54,10 @@ struct OnboardingView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(32)
         }
-        .frame(width: 520, height: 520)
+        .frame(width: 520, height: 580)
     }
 
-    // MARK: - Step 1: Welcome
+    // MARK: - Step 1: Welcome + Microphone (merged)
 
     private var welcomeStep: some View {
         VStack(spacing: 24) {
@@ -70,29 +73,6 @@ struct OnboardingView: View {
             Text("Local transcription. No cloud. Chinese + English.")
                 .font(.body)
                 .foregroundStyle(.tertiary)
-            Spacer()
-            Button("Get Started") {
-                viewModel.nextStep()
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-        }
-    }
-
-    // MARK: - Step 2: Microphone
-
-    private var microphoneStep: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            Image(systemName: "mic.badge.plus")
-                .font(.system(size: 48))
-                .foregroundStyle(.orange)
-            Text("Microphone Access")
-                .font(.title2.bold())
-            Text("Murmur needs your microphone to hear your voice.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
 
             if viewModel.micGranted {
                 Label("Microphone access granted", systemImage: "checkmark.circle.fill")
@@ -100,16 +80,24 @@ struct OnboardingView: View {
             }
 
             Spacer()
-            Button(viewModel.micGranted ? "Continue" : "Grant Access") {
+            Button(viewModel.micGranted ? "Get Started" : "Grant Microphone & Get Started") {
                 if viewModel.micGranted {
                     viewModel.nextStep()
                 } else {
-                    Task { await viewModel.requestMicrophone() }
+                    Task {
+                        await viewModel.requestMicrophone()
+                    }
                 }
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
         }
+    }
+
+    // microphone step is now merged into welcome — kept as empty redirect
+    private var microphoneStep: some View {
+        // This step is auto-skipped; kept for enum compatibility
+        Color.clear.onAppear { viewModel.nextStep() }
     }
 
     // MARK: - Step 3: Accessibility
@@ -173,7 +161,37 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Step 4: HuggingFace Login
+    // MARK: - Step 4: Model Choice
+
+    private var modelChoiceStep: some View {
+        VStack(spacing: 24) {
+            Spacer()
+            Image(systemName: "sparkles")
+                .font(.system(size: 48))
+                .foregroundStyle(.blue)
+            Text("Choose Speech Engine")
+                .font(.title2.bold())
+            Text("Pick how Murmur turns your voice into text.\nYou can switch anytime in Settings.")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            VStack(spacing: 12) {
+                ForEach(ModelBackend.allCases, id: \.self) { backend in
+                    backendCard(backend)
+                }
+            }
+
+            Spacer()
+            Button("Continue") {
+                viewModel.nextStep()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+        }
+    }
+
+    // MARK: - Step 5: HuggingFace Login
 
     private var huggingfaceLoginStep: some View {
         VStack(spacing: 24) {
@@ -181,17 +199,17 @@ struct OnboardingView: View {
             Image(systemName: "person.badge.key.fill")
                 .font(.system(size: 48))
                 .foregroundStyle(.indigo)
-            Text("HuggingFace Login")
+            Text("Free Account Required")
                 .font(.title2.bold())
-            Text("The speech model is hosted on HuggingFace and requires a free account to download.")
+            Text("The High Quality engine is hosted on a platform called HuggingFace. You need a free account to download it.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
             VStack(alignment: .leading, spacing: 12) {
-                Label("1. Create a free account at huggingface.co", systemImage: "1.circle")
-                Label("2. Visit the model page and request access", systemImage: "2.circle")
-                Label("3. Click \"Login\" below to authenticate", systemImage: "3.circle")
+                Label("1. Create a free account (opens in browser)", systemImage: "1.circle")
+                Label("2. Request access to the model", systemImage: "2.circle")
+                Label("3. Come back here and click \"Login\"", systemImage: "3.circle")
             }
             .font(.callout)
             .foregroundStyle(.secondary)
@@ -252,20 +270,27 @@ struct OnboardingView: View {
                 .foregroundStyle(.blue)
             Text("Download Speech Model")
                 .font(.title2.bold())
-            Text("Cohere Transcribe (~4 GB).\nThis runs entirely on your Mac — no data leaves your device.")
+            Text("\(viewModel.modelManager.activeBackend.shortName) engine (\(viewModel.modelManager.activeBackend.sizeDescription)).\nEverything runs on your Mac — no data leaves your device.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if case .downloading = viewModel.modelManager.state {
+            if case .downloading(let progress, let speed) = viewModel.modelManager.state {
                 VStack(spacing: 8) {
-                    ProgressView(value: viewModel.modelManager.downloadProgress)
+                    if progress >= 0 {
+                        ProgressView(value: progress)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                    }
                     HStack {
-                        Text("\(Int(viewModel.modelManager.downloadProgress * 100))%")
+                        if !viewModel.modelManager.statusMessage.isEmpty {
+                            Text(viewModel.modelManager.statusMessage)
+                        }
                         Spacer()
-                        if viewModel.modelManager.downloadSpeed > 0 {
-                            Text(formatSpeed(viewModel.modelManager.downloadSpeed))
+                        if speed > 0 {
+                            Text(formatSpeed(speed))
                         }
                     }
                     .font(.caption)
@@ -283,8 +308,10 @@ struct OnboardingView: View {
                     .textSelection(.enabled)
             }
 
-            // Always show status message when present
-            if !viewModel.modelManager.statusMessage.isEmpty {
+            // Show status message when not downloading (setup messages, errors, etc.)
+            if case .downloading = viewModel.modelManager.state {
+                // Already shown in the progress section above
+            } else if !viewModel.modelManager.statusMessage.isEmpty {
                 Text(viewModel.modelManager.statusMessage)
                     .font(.caption)
                     .foregroundStyle(viewModel.modelManager.statusMessage.hasPrefix("Error") ? .red : .secondary)
@@ -349,6 +376,7 @@ struct OnboardingView: View {
                             }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(viewModel.coordinator.state == .recording ? "Stop recording" : "Start recording")
 
                     if viewModel.coordinator.state == .recording {
                         Text("Recording... tap again to stop")
@@ -489,6 +517,89 @@ struct OnboardingView: View {
         }
         .onAppear {
             viewModel.checkHotkeyConflict()
+        }
+    }
+
+    @ViewBuilder
+    private func backendCard(_ backend: ModelBackend) -> some View {
+        let isSelected: Bool = viewModel.modelManager.activeBackend == backend
+        let isDownloaded: Bool = viewModel.modelManager.isModelDownloaded(for: backend)
+        let fillColor: Color = isSelected ? Color.accentColor.opacity(0.08) : Color.clear
+        let strokeColor: Color = isSelected ? Color.accentColor.opacity(0.3) : Color.secondary.opacity(0.2)
+
+        Button {
+            viewModel.selectBackend(backend)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: backendIcon(backend))
+                    .font(.title2)
+                    .foregroundStyle(backendColor(backend))
+                    .frame(width: 32)
+
+                backendCardContent(backend, isDownloaded: isDownloaded)
+
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 10).fill(fillColor))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(strokeColor, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func backendCardContent(_ backend: ModelBackend, isDownloaded: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(backend.displayName)
+                    .font(.headline)
+                if backend == .onnx {
+                    Text("Recommended")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.blue, in: Capsule())
+                }
+                if isDownloaded {
+                    Text("Downloaded")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.green, in: Capsule())
+                }
+            }
+            Text(backend.description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+            if !isDownloaded {
+                Text("Download: \(backend.sizeDescription)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private func backendIcon(_ backend: ModelBackend) -> String {
+        switch backend {
+        case .onnx: return "hare.fill"
+        case .huggingface: return "wand.and.stars"
+        case .whisper: return "waveform"
+        }
+    }
+
+    private func backendColor(_ backend: ModelBackend) -> Color {
+        switch backend {
+        case .onnx: return .blue
+        case .huggingface: return .purple
+        case .whisper: return .orange
         }
     }
 

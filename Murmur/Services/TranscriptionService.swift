@@ -14,7 +14,7 @@ struct TranscriptionResult: Sendable {
 }
 
 protocol TranscriptionServiceProtocol {
-    func transcribe(audioURL: URL) async throws -> TranscriptionResult
+    func transcribe(audioURL: URL, language: String) async throws -> TranscriptionResult
     func preloadModel() async throws
     func unloadModel() async
     var isModelLoaded: Bool { get }
@@ -22,28 +22,38 @@ protocol TranscriptionServiceProtocol {
 
 /// Manages a long-lived Python subprocess for transcription.
 /// Protocol: JSON lines over stdin/stdout.
-/// All mutable state is protected by `lock`.
-final class TranscriptionService: TranscriptionServiceProtocol {
+/// Actor isolation serializes all subprocess access — no manual locking needed.
+actor TranscriptionService: TranscriptionServiceProtocol {
     private var process: Process?
     private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
     private let logger = Logger(subsystem: "com.murmur.app", category: "transcription")
-    private let modelPath: URL
+    private var modelPath: URL
     private let scriptPath: URL
     private let pythonPath: URL
-    private let lock = NSLock()
     private var _isModelLoaded = false
+    /// Thread-safe process reference for cancellation handler (Process.terminate is thread-safe)
+    nonisolated(unsafe) private var _processRef: Process?
 
-    var isModelLoaded: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return _isModelLoaded
+    nonisolated var isModelLoaded: Bool {
+        // This is inherently racy when called from outside the actor,
+        // but it's only used as a hint (preloadModel rechecks under isolation).
+        false // Conservative: always attempt preload check inside actor
+    }
+
+    /// Update the model path (e.g. when switching backends). Forces reload on next transcription.
+    func setModelPath(_ newPath: URL) {
+        let changed = modelPath != newPath
+        modelPath = newPath
+        if changed {
+            killProcess()
+        }
     }
 
     init(
         modelPath: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Murmur/Models"),
+            .appendingPathComponent("Murmur/Models-ONNX"),
         pythonPath: URL? = nil,
         scriptPath: URL? = nil
     ) {
@@ -58,7 +68,6 @@ final class TranscriptionService: TranscriptionServiceProtocol {
             if FileManager.default.fileExists(atPath: bundled.path) {
                 self.pythonPath = bundled
             } else {
-                // Fall back to system python
                 let candidates = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]
                 self.pythonPath = URL(fileURLWithPath: candidates.first { FileManager.default.fileExists(atPath: $0) } ?? "/usr/bin/python3")
             }
@@ -81,7 +90,6 @@ final class TranscriptionService: TranscriptionServiceProtocol {
             } else if FileManager.default.fileExists(atPath: appSupport.path) {
                 self.scriptPath = appSupport
             } else {
-                // Copy from the SPM resource bundle as last resort
                 self.scriptPath = appSupport
             }
         }
@@ -91,6 +99,7 @@ final class TranscriptionService: TranscriptionServiceProtocol {
     }
 
     func preloadModel() async throws {
+        guard !_isModelLoaded else { return }
         try ensureProcessRunning()
         let response = try await send(command: [
             "cmd": "load",
@@ -100,14 +109,12 @@ final class TranscriptionService: TranscriptionServiceProtocol {
             let err = response["error"] as? String ?? "Unknown error"
             throw MurmurError.transcriptionFailed("Model load failed: \(err)")
         }
-        lock.lock()
         _isModelLoaded = true
-        lock.unlock()
         logger.info("Model loaded from \(self.modelPath.path)")
     }
 
-    func transcribe(audioURL: URL) async throws -> TranscriptionResult {
-        if !isModelLoaded {
+    func transcribe(audioURL: URL, language: String = "en") async throws -> TranscriptionResult {
+        if !_isModelLoaded {
             try await preloadModel()
         }
 
@@ -115,15 +122,14 @@ final class TranscriptionService: TranscriptionServiceProtocol {
         do {
             response = try await send(command: [
                 "cmd": "transcribe",
-                "wav_path": audioURL.path
+                "wav_path": audioURL.path,
+                "language": language
             ])
         } catch {
-            // Clean up temp file even on error (B6 fix)
             try? FileManager.default.removeItem(at: audioURL)
             throw error
         }
 
-        // Clean up temp audio file
         try? FileManager.default.removeItem(at: audioURL)
 
         if let error = response["error"] as? String {
@@ -134,9 +140,11 @@ final class TranscriptionService: TranscriptionServiceProtocol {
             throw MurmurError.transcriptionFailed("No text in response")
         }
 
-        // Length limit on injected text (S2 mitigation)
-        let sanitizedText = String(text.prefix(10_000))
+        guard !text.isEmpty else {
+            throw MurmurError.silenceDetected
+        }
 
+        let sanitizedText = String(text.prefix(10_000))
         let langStr = response["language"] as? String ?? "unknown"
         let language = DetectedLanguage(rawValue: langStr) ?? .unknown
         let durationMs = response["duration_ms"] as? Int ?? 0
@@ -146,21 +154,16 @@ final class TranscriptionService: TranscriptionServiceProtocol {
     }
 
     func unloadModel() async {
-        guard isModelLoaded else { return }
+        guard _isModelLoaded else { return }
         _ = try? await send(command: ["cmd": "unload"])
-        lock.lock()
         _isModelLoaded = false
-        lock.unlock()
         logger.info("Model unloaded")
     }
 
     // MARK: - Subprocess Management
 
     private func ensureProcessRunning() throws {
-        lock.lock()
-        let running = process?.isRunning ?? false
-        lock.unlock()
-        if running { return }
+        if process?.isRunning == true { return }
         try launchProcess()
     }
 
@@ -172,7 +175,10 @@ final class TranscriptionService: TranscriptionServiceProtocol {
         let proc = Process()
         proc.executableURL = pythonPath
         proc.arguments = ["-u", scriptPath.path]
-        proc.environment = ["PYTHONUNBUFFERED": "1"]
+        proc.environment = [
+            "PYTHONUNBUFFERED": "1",
+            "KMP_DUPLICATE_LIB_OK": "TRUE",
+        ]
 
         let stdin = Pipe()
         let stdout = Pipe()
@@ -181,21 +187,14 @@ final class TranscriptionService: TranscriptionServiceProtocol {
         proc.standardOutput = stdout
         proc.standardError = stderr
 
-        proc.terminationHandler = { [weak self] p in
-            self?.logger.warning("Python process exited with code \(p.terminationStatus)")
-            self?.lock.lock()
-            self?._isModelLoaded = false
-            self?.lock.unlock()
-        }
-
         try proc.run()
 
-        lock.lock()
         self.process = proc
+        self._processRef = proc
         self.stdinPipe = stdin
         self.stdoutPipe = stdout
         self.stderrPipe = stderr
-        lock.unlock()
+        self._isModelLoaded = false
 
         logger.info("Python subprocess started (pid: \(proc.processIdentifier))")
     }
@@ -203,12 +202,7 @@ final class TranscriptionService: TranscriptionServiceProtocol {
     private func send(command: [String: Any]) async throws -> [String: Any] {
         try ensureProcessRunning()
 
-        lock.lock()
-        let stdin = stdinPipe
-        let stdout = stdoutPipe
-        lock.unlock()
-
-        guard let stdinPipe = stdin, let stdoutPipe = stdout else {
+        guard let stdinPipe, let stdoutPipe else {
             throw MurmurError.transcriptionFailed("No pipe to Python process")
         }
 
@@ -216,61 +210,67 @@ final class TranscriptionService: TranscriptionServiceProtocol {
         var line = data
         line.append(contentsOf: [0x0A]) // newline
 
-        // Write to stdin — SIGPIPE is ignored at process level, so this won't kill us
         do {
             try stdinPipe.fileHandleForWriting.write(contentsOf: line)
         } catch {
-            // Process is dead, clean up and report
             killProcess()
             throw MurmurError.transcriptionFailed("Python process died unexpectedly")
         }
 
-        // Read one line from stdout with cancellation safety
+        // Read one JSON line from stdout using buffered reads (not byte-by-byte).
+        // Kill the process on cancellation to unblock the read thread.
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[String: Any], Error>) in
                 DispatchQueue.global(qos: .userInitiated).async {
                     let handle = stdoutPipe.fileHandleForReading
                     var buffer = Data()
 
+                    // Read in chunks instead of byte-by-byte (fewer syscalls)
                     while true {
-                        let byte = handle.readData(ofLength: 1)
-                        if byte.isEmpty {
+                        let chunk = handle.availableData
+                        if chunk.isEmpty {
                             continuation.resume(throwing: MurmurError.transcriptionFailed("Python process closed stdout"))
                             return
                         }
-                        if byte[0] == 0x0A { break }
-                        buffer.append(byte)
-                    }
+                        buffer.append(chunk)
 
-                    do {
-                        guard let json = try JSONSerialization.jsonObject(with: buffer) as? [String: Any] else {
-                            continuation.resume(throwing: MurmurError.transcriptionFailed("Invalid JSON from Python"))
+                        // Check if we have a complete line
+                        if let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                            let lineData = buffer[buffer.startIndex..<newlineIndex]
+                            do {
+                                guard let json = try JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+                                    continuation.resume(throwing: MurmurError.transcriptionFailed("Invalid JSON from Python"))
+                                    return
+                                }
+                                continuation.resume(returning: json)
+                            } catch {
+                                continuation.resume(throwing: MurmurError.transcriptionFailed("JSON parse error: \(error)"))
+                            }
                             return
                         }
-                        continuation.resume(returning: json)
-                    } catch {
-                        continuation.resume(throwing: MurmurError.transcriptionFailed("JSON parse error: \(error)"))
                     }
                 }
             }
-        } onCancel: {
-            // Don't kill the process on cancel — just let the read complete naturally.
-            // The timeout in AppCoordinator will handle the overall flow.
+        } onCancel: { [weak self] in
+            // Kill the process to unblock the read thread.
+            // The process will be relaunched on next use.
+            self?.killProcessFromOutside()
         }
     }
 
+    /// Non-isolated kill for use in cancellation handlers.
+    /// Uses the atomic process reference to terminate without actor isolation.
+    nonisolated func killProcessFromOutside() {
+        _processRef?.terminate()
+    }
+
     func killProcess() {
-        lock.lock()
         process?.terminate()
         process = nil
+        _processRef = nil
         stdinPipe = nil
         stdoutPipe = nil
         stderrPipe = nil
         _isModelLoaded = false
-        lock.unlock()
-    }
-
-    deinit {
-        killProcess()
     }
 }

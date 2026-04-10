@@ -1,4 +1,5 @@
 import SwiftUI
+import Carbon
 import HotKey
 import os
 
@@ -49,6 +50,9 @@ final class AppCoordinator: ObservableObject {
     @Published var lastTranscription: String?
     @Published var lastLanguage: DetectedLanguage?
     @Published private(set) var currentAudioLevel: Float = 0
+    @Published private(set) var transcriptionHistory: [(text: String, language: DetectedLanguage, date: Date)] = []
+
+    private let maxHistoryCount = 20
 
     let hotkey: HotkeyService
     let audio: AudioService
@@ -60,6 +64,34 @@ final class AppCoordinator: ObservableObject {
 
     /// When true, skips accessibility check (for onboarding test where we show text in-app, not inject)
     var skipAccessibilityCheck = false
+
+    /// Update the transcription backend model path (called when user switches backends)
+    func switchModelPath(_ newPath: URL) {
+        Task {
+            await transcription.setModelPath(newPath)
+        }
+        preloadModelInBackground()
+    }
+
+    /// Preload the model so the first transcription is instant.
+    /// Cancels any in-flight preload to avoid concurrent `send()` calls
+    /// that would corrupt the JSON protocol.
+    private var preloadTask: Task<Void, Never>?
+
+    func preloadModelInBackground() {
+        preloadTask?.cancel()
+        preloadTask = Task.detached { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.transcription.preloadModel()
+                Self.log.info("Model preloaded successfully")
+            } catch {
+                if !Task.isCancelled {
+                    Self.log.warning("Model preload failed (will retry on first use): \(error)")
+                }
+            }
+        }
+    }
     private var pendingRecording = false
     private var undoTimer: Task<Void, Never>?
     private var hotkeyTask: Task<Void, Never>?
@@ -114,13 +146,22 @@ final class AppCoordinator: ObservableObject {
             }
         }
 
-        // Unload model on sleep
+        // Unload model on sleep, re-preload on wake
         NotificationCenter.default.addObserver(
             forName: NSWorkspace.willSleepNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
             Task { await self?.transcription.unloadModel() }
         }
+        NotificationCenter.default.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.preloadModelInBackground()
+        }
+
+        // Preload model in background so first transcription is instant
+        preloadModelInBackground()
 
         Self.log.info("Coordinator started")
     }
@@ -130,7 +171,7 @@ final class AppCoordinator: ObservableObject {
         audioLevelTask?.cancel()
         hotkey.unregister()
         audio.cancelRecording()
-        transcription.killProcess()
+        Task { await transcription.killProcess() }
     }
 
     // MARK: - Event Handling
@@ -175,7 +216,7 @@ final class AppCoordinator: ObservableObject {
 
             // Monitor audio levels for the pill
             audioLevelTask?.cancel()
-            audioLevelTask = Task { [weak self] in
+            audioLevelTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 for await level in self.audio.audioLevel {
                     self.currentAudioLevel = level
@@ -189,7 +230,7 @@ final class AppCoordinator: ObservableObject {
 
             // M3: Monitor max recording duration
             maxDurationTask?.cancel()
-            maxDurationTask = Task { [weak self] in
+            maxDurationTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 for await _ in self.audio.maxDurationReached {
                     guard self.state == .recording else { continue }
@@ -218,8 +259,9 @@ final class AppCoordinator: ObservableObject {
             let wav = try await withTimeout(seconds: 5, operation: "stop recording") {
                 try await self.audio.stopRecording()
             }
+            let lang = resolveTranscriptionLanguage()
             let result = try await withTimeout(seconds: 120, operation: "transcription") {
-                try await self.transcription.transcribe(audioURL: wav)
+                return try await self.transcription.transcribe(audioURL: wav, language: lang)
             }
 
             transition(to: .injecting)
@@ -231,6 +273,10 @@ final class AppCoordinator: ObservableObject {
 
             lastTranscription = result.text
             lastLanguage = result.language
+            transcriptionHistory.insert((text: result.text, language: result.language, date: Date()), at: 0)
+            if transcriptionHistory.count > maxHistoryCount {
+                transcriptionHistory.removeLast()
+            }
             let undoableState = AppState.undoable(text: result.text, method: method)
             transition(to: undoableState)
             audioFeedback.playSuccess()
@@ -254,12 +300,11 @@ final class AppCoordinator: ObservableObject {
 
             // Auto-transition from undoable to idle after 5s
             undoTimer?.cancel()
-            undoTimer = Task {
+            undoTimer = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .seconds(5))
-                if !Task.isCancelled {
-                    self.removeUndoMonitor()
-                    transition(to: .idle)
-                }
+                guard let self, !Task.isCancelled else { return }
+                self.removeUndoMonitor()
+                self.transition(to: .idle)
             }
         } catch {
             let err = mapError(error)
@@ -288,8 +333,9 @@ final class AppCoordinator: ObservableObject {
             if case .permissionRevoked(let perm) = err {
                 showPermissionAlert(for: perm)
             } else {
-                Task {
+                Task { @MainActor [weak self] in
                     try? await Task.sleep(for: .seconds(2))
+                    guard let self else { return }
                     if case .error = self.state {
                         self.state = .idle
                         self.pill.hide()
@@ -320,6 +366,35 @@ final class AppCoordinator: ObservableObject {
             NSEvent.removeMonitor(monitor)
             undoMonitor = nil
         }
+    }
+
+    /// When language is "auto", resolve to the active input method's language.
+    /// e.g., Pinyin/Wubi → "zh", ABC/US → "en", Kotoeri → "ja"
+    private func resolveTranscriptionLanguage() -> String {
+        let stored = UserDefaults.standard.string(forKey: "transcriptionLanguage") ?? "auto"
+        guard stored == "auto" else { return stored }
+
+        if let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
+           let ptr = TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages),
+           let languages = Unmanaged<CFArray>.fromOpaque(ptr).takeUnretainedValue() as? [String],
+           let primary = languages.first {
+            // Map input source language codes to our supported codes
+            let prefix = String(primary.prefix(2))
+            switch prefix {
+            case "zh": return "zh"
+            case "ja": return "ja"
+            case "ko": return "ko"
+            case "fr": return "fr"
+            case "de": return "de"
+            case "es": return "es"
+            case "pt": return "pt"
+            case "it": return "it"
+            case "vi": return "vi"
+            case "ar": return "ar"
+            default: return "en"
+            }
+        }
+        return "en"
     }
 
     private func mapError(_ error: Error) -> MurmurError {

@@ -13,12 +13,23 @@ final class OnboardingViewModel: ObservableObject {
     @Published var hotkeyTestResult: String?
     @Published var hotkeyConflictDetected = false
     @Published var customKey: Key = .space
-    @Published var customModifiers: NSEvent.ModifierFlags = .control
+    @Published var customModifiers: NSEvent.ModifierFlags = .command // fallback if user switches off Right Command
     @Published var hfLoggedIn = false
     @Published var hfStatusMessage = ""
 
     let coordinator: AppCoordinator
     let modelManager: ModelManager
+
+    /// Steps actually shown to the user (mic merged into welcome; modelChoice and huggingfaceLogin skipped)
+    private static let visibleSteps: [OnboardingStep] = [
+        .welcome, .accessibility, .modelDownload, .testTranscription, .done
+    ]
+
+    var visibleStepCount: Int { Self.visibleSteps.count }
+
+    var visibleStepIndex: Int {
+        Self.visibleSteps.firstIndex(of: step) ?? 0
+    }
     private var accessibilityPollTask: Task<Void, Never>?
     private var testWatchTask: Task<Void, Never>?
 
@@ -35,13 +46,20 @@ final class OnboardingViewModel: ObservableObject {
         guard let next = OnboardingStep(rawValue: step.rawValue + 1) else { return }
 
         switch next {
-        case .microphone where micGranted:
+        case .microphone:
+            // Microphone is merged into welcome step — always skip
             step = .microphone
             nextStep()
         case .accessibility where accessibilityGranted:
             step = .accessibility
             nextStep()
-        case .huggingfaceLogin where modelManager.state == .ready:
+        case .modelChoice:
+            // Always use ONNX during onboarding — advanced backends are in Settings
+            modelManager.activeBackend = .onnx
+            step = .modelChoice
+            nextStep()
+        case .huggingfaceLogin:
+            // Skip — ONNX doesn't need HF login
             step = .huggingfaceLogin
             nextStep()
         case .modelDownload where modelManager.state == .ready:
@@ -50,6 +68,10 @@ final class OnboardingViewModel: ObservableObject {
         default:
             step = next
         }
+    }
+
+    func selectBackend(_ backend: ModelBackend) {
+        modelManager.activeBackend = backend
     }
 
     func requestMicrophone() async {
@@ -143,12 +165,12 @@ final class OnboardingViewModel: ObservableObject {
         // This needs a terminal for interactive login. Instead, open the token page
         // and have the user paste the token.
         NSWorkspace.shared.open(URL(string: "https://huggingface.co/settings/tokens")!)
-        hfStatusMessage = "Create a token at huggingface.co/settings/tokens, then paste it below."
+        hfStatusMessage = "Create an access token, then paste it below."
 
         // For now, prompt via a dialog
         let alert = NSAlert()
-        alert.messageText = "Paste your HuggingFace token"
-        alert.informativeText = "1. Copy a token from the page that just opened\n2. Paste it below\n\nThe token will be saved for downloading models."
+        alert.messageText = "Paste your access token"
+        alert.informativeText = "1. Copy a token from the page that just opened\n2. Paste it below\n\nThis lets Murmur download the speech model."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Save Token")
         alert.addButton(withTitle: "Cancel")
@@ -184,9 +206,15 @@ final class OnboardingViewModel: ObservableObject {
 
             do {
                 try saveProc.run()
-                saveProc.waitUntilExit()
 
-                if saveProc.terminationStatus == 0 {
+                // Wait on a background thread to avoid blocking the main actor
+                let exitStatus: Int32 = await withCheckedContinuation { continuation in
+                    saveProc.terminationHandler = { proc in
+                        continuation.resume(returning: proc.terminationStatus)
+                    }
+                }
+
+                if exitStatus == 0 {
                     hfLoggedIn = true
                     hfStatusMessage = "Token saved successfully"
                 } else {
@@ -203,10 +231,15 @@ final class OnboardingViewModel: ObservableObject {
     }
 
     func checkHotkeyConflict() {
-        // Only check if still using default Ctrl+Space
-        let savedKey = UserDefaults.standard.object(forKey: "hotkeyKeyCode")
-        if savedKey == nil {
-            hotkeyConflictDetected = HotkeyConflictDetector.ctrlSpaceConflictsWithInputSources()
+        // Right Command is the default — it never conflicts with input source switching.
+        // Only check for conflict if user has set a custom Ctrl+Space hotkey.
+        if let keyCode = UserDefaults.standard.object(forKey: "hotkeyKeyCode") as? Int,
+           let modsRaw = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? UInt {
+            let mods = NSEvent.ModifierFlags(rawValue: modsRaw)
+            let isCtrlSpace = Key(carbonKeyCode: UInt32(keyCode)) == .space && mods == .control
+            if isCtrlSpace {
+                hotkeyConflictDetected = HotkeyConflictDetector.ctrlSpaceConflictsWithInputSources()
+            }
         }
     }
 
