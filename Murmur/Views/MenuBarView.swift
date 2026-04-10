@@ -28,7 +28,7 @@ struct MenuBarView: View {
             // Language quick-switcher
             languageSwitcher
                 .padding(.horizontal, 14)
-                .padding(.vertical, 8)
+                .padding(.vertical, 6)
 
             Divider().padding(.horizontal, 8)
 
@@ -39,9 +39,10 @@ struct MenuBarView: View {
             }
 
             // Actions
-            menuRow(icon: "keyboard", label: hotkeyLabel, shortcut: nil, dimmed: true)
-
-            Divider().padding(.horizontal, 8)
+            menuButton(icon: "keyboard", label: hotkeyLabel) {
+                onOpenSettings()
+                NSApp.activate(ignoringOtherApps: true)
+            }
 
             menuButton(icon: "gear", label: "Settings…") {
                 onOpenSettings()
@@ -50,6 +51,8 @@ struct MenuBarView: View {
                     window.makeKeyAndOrderFront(nil)
                 }
             }
+
+            Divider().padding(.horizontal, 8)
 
             menuButton(icon: "power", label: "Quit Murmur") {
                 coordinator.stop()
@@ -201,11 +204,13 @@ struct MenuBarView: View {
 
     private var transcriptionHistorySection: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Recent")
-                .font(.system(.caption2, design: .rounded))
-                .foregroundStyle(.tertiary)
-                .padding(.horizontal, 14)
-                .padding(.top, 4)
+            if coordinator.transcriptionHistory.count > 1 {
+                Text("Recent")
+                    .font(.system(.caption2, design: .rounded))
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 4)
+            }
 
             ScrollView {
                 VStack(spacing: 0) {

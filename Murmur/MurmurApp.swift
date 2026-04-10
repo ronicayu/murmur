@@ -46,6 +46,7 @@ struct MurmurApp: App {
                     }
                 }
         }
+        .menuBarExtraStyle(.window)
     }
 
     private var menuBarIconName: String {
