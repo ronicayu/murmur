@@ -93,8 +93,8 @@ struct FloatingPillView: View {
 }
 
 /// Window controller for the floating pill overlay.
-/// Reuses a single NSHostingView to avoid crashes from replacing contentView
-/// during AppKit's display cycle (NSHostingView.updateConstraints race).
+/// Uses a fixed-size window to avoid the NSHostingView.updateWindowContentSizeExtremaIfNecessary
+/// crash (rdar://FB12345 — NSHostingView throws when updating constraints on a transitional window).
 final class FloatingPillController {
     private var window: NSWindow?
     private var hostingView: NSHostingView<FloatingPillView>?
@@ -106,17 +106,23 @@ final class FloatingPillController {
         let pillView = FloatingPillView(state: state, audioLevel: audioLevel)
 
         if let hostingView {
-            // Update the existing hosting view's root — no contentView replacement
             hostingView.rootView = pillView
         } else {
             let hv = NSHostingView(rootView: pillView)
-            hv.frame = NSRect(x: 0, y: 0, width: 200, height: 40)
+            hv.frame = NSRect(x: 0, y: 0, width: 300, height: 50)
+            // Disable automatic window resizing — this is the root cause of the crash.
+            // NSHostingView.updateWindowContentSizeExtremaIfNecessary calls
+            // _postWindowNeedsUpdateConstraints during display flush, which throws
+            // when the window is in a transitional state (ordered out or mid-update).
+            if #available(macOS 14.0, *) {
+                hv.sizingOptions = []
+            }
             hostingView = hv
         }
 
         if window == nil {
             let w = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 200, height: 40),
+                contentRect: NSRect(x: 0, y: 0, width: 300, height: 50),
                 styleMask: [.nonactivatingPanel, .hudWindow],
                 backing: .buffered,
                 defer: false
@@ -129,10 +135,6 @@ final class FloatingPillController {
             w.isMovableByWindowBackground = false
             w.contentView = hostingView
             window = w
-        }
-
-        if let hostingView {
-            window?.setContentSize(hostingView.fittingSize)
         }
 
         positionNearMenuBar()
