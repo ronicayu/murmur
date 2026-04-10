@@ -215,21 +215,48 @@ actor TranscriptionService: TranscriptionServiceProtocol {
             }
         }
 
-        // Find transcribe.py: bundle resource > app support > next to executable
+        // Find transcribe.py: bundle resource > next to executable > app support.
+        // When a newer source copy is found, sync it to App Support so the
+        // deployed script stays up-to-date across builds.
         if let scriptPath {
             self.scriptPath = scriptPath
         } else {
-            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("Murmur/transcribe.py")
+            let fm = FileManager.default
+            let appSupportDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Murmur", isDirectory: true)
+            let appSupport = appSupportDir.appendingPathComponent("transcribe.py")
             let bundleResource = Bundle.main.url(forResource: "transcribe", withExtension: "py")
             let nextToExe = Bundle.main.executableURL?.deletingLastPathComponent()
                 .deletingLastPathComponent().appendingPathComponent("Resources/transcribe.py")
 
-            if let bundleResource, FileManager.default.fileExists(atPath: bundleResource.path) {
-                self.scriptPath = bundleResource
-            } else if let nextToExe, FileManager.default.fileExists(atPath: nextToExe.path) {
-                self.scriptPath = nextToExe
-            } else if FileManager.default.fileExists(atPath: appSupport.path) {
+            // Pick the best available source copy
+            let sourceURL: URL? = {
+                if let bundleResource, fm.fileExists(atPath: bundleResource.path) {
+                    return bundleResource
+                }
+                if let nextToExe, fm.fileExists(atPath: nextToExe.path) {
+                    return nextToExe
+                }
+                return nil
+            }()
+
+            if let sourceURL {
+                // Sync source → App Support if source is newer or App Support is missing
+                try? fm.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+                let shouldCopy: Bool
+                if !fm.fileExists(atPath: appSupport.path) {
+                    shouldCopy = true
+                } else {
+                    let srcMod = (try? fm.attributesOfItem(atPath: sourceURL.path)[.modificationDate] as? Date) ?? .distantPast
+                    let dstMod = (try? fm.attributesOfItem(atPath: appSupport.path)[.modificationDate] as? Date) ?? .distantPast
+                    shouldCopy = srcMod > dstMod
+                }
+                if shouldCopy {
+                    try? fm.removeItem(at: appSupport)
+                    try? fm.copyItem(at: sourceURL, to: appSupport)
+                }
+                self.scriptPath = appSupport
+            } else if fm.fileExists(atPath: appSupport.path) {
                 self.scriptPath = appSupport
             } else {
                 self.scriptPath = appSupport
