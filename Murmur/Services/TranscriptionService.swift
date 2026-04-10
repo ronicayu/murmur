@@ -174,12 +174,17 @@ final class TranscriptionService: TranscriptionServiceProtocol {
     private func ensureProcessRunning() throws {
         lock.lock()
         let running = process?.isRunning ?? false
-        lock.unlock()
-        if running { return }
-        try launchProcess()
+        if running {
+            lock.unlock()
+            return
+        }
+        // Hold lock across launch to prevent TOCTOU race with setModelPath/killProcess
+        defer { lock.unlock() }
+        try launchProcessLocked()
     }
 
-    private func launchProcess() throws {
+    /// Must be called with `lock` held.
+    private func launchProcessLocked() throws {
         guard FileManager.default.fileExists(atPath: pythonPath.path) else {
             throw MurmurError.modelNotFound
         }
@@ -208,12 +213,10 @@ final class TranscriptionService: TranscriptionServiceProtocol {
 
         try proc.run()
 
-        lock.lock()
         self.process = proc
         self.stdinPipe = stdin
         self.stdoutPipe = stdout
         self.stderrPipe = stderr
-        lock.unlock()
 
         logger.info("Python subprocess started (pid: \(proc.processIdentifier))")
     }

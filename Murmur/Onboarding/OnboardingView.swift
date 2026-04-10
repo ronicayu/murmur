@@ -25,8 +25,8 @@ struct OnboardingView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Progress bar
-            ProgressView(value: Double(viewModel.step.rawValue), total: Double(OnboardingStep.allCases.count - 1))
+            // Progress bar — maps actual step to visible progress (skipping modelChoice + huggingfaceLogin)
+            ProgressView(value: Double(viewModel.visibleStepIndex), total: Double(viewModel.visibleStepCount - 1))
                 .padding(.horizontal, 32)
                 .padding(.top, 20)
 
@@ -57,7 +57,7 @@ struct OnboardingView: View {
         .frame(width: 520, height: 580)
     }
 
-    // MARK: - Step 1: Welcome
+    // MARK: - Step 1: Welcome + Microphone (merged)
 
     private var welcomeStep: some View {
         VStack(spacing: 24) {
@@ -73,29 +73,6 @@ struct OnboardingView: View {
             Text("Local transcription. No cloud. Chinese + English.")
                 .font(.body)
                 .foregroundStyle(.tertiary)
-            Spacer()
-            Button("Get Started") {
-                viewModel.nextStep()
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-        }
-    }
-
-    // MARK: - Step 2: Microphone
-
-    private var microphoneStep: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            Image(systemName: "mic.badge.plus")
-                .font(.system(size: 48))
-                .foregroundStyle(.orange)
-            Text("Microphone Access")
-                .font(.title2.bold())
-            Text("Murmur needs your microphone to hear your voice.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
 
             if viewModel.micGranted {
                 Label("Microphone access granted", systemImage: "checkmark.circle.fill")
@@ -103,16 +80,24 @@ struct OnboardingView: View {
             }
 
             Spacer()
-            Button(viewModel.micGranted ? "Continue" : "Grant Access") {
+            Button(viewModel.micGranted ? "Get Started" : "Grant Microphone & Get Started") {
                 if viewModel.micGranted {
                     viewModel.nextStep()
                 } else {
-                    Task { await viewModel.requestMicrophone() }
+                    Task {
+                        await viewModel.requestMicrophone()
+                    }
                 }
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
         }
+    }
+
+    // microphone step is now merged into welcome — kept as empty redirect
+    private var microphoneStep: some View {
+        // This step is auto-skipped; kept for enum compatibility
+        Color.clear.onAppear { viewModel.nextStep() }
     }
 
     // MARK: - Step 3: Accessibility
@@ -192,71 +177,8 @@ struct OnboardingView: View {
                 .multilineTextAlignment(.center)
 
             VStack(spacing: 12) {
-                ForEach(ModelBackend.allCases) { backend in
-                    let isSelected = viewModel.modelManager.activeBackend == backend
-                    let isDownloaded = viewModel.modelManager.isModelDownloaded(for: backend)
-                    Button {
-                        viewModel.selectBackend(backend)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: backendIcon(backend))
-                                .font(.title2)
-                                .foregroundStyle(backendColor(backend))
-                                .frame(width: 32)
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 6) {
-                                    Text(backend.displayName)
-                                        .font(.headline)
-                                    if backend == .onnx {
-                                        Text("Recommended")
-                                            .font(.caption2.bold())
-                                            .foregroundStyle(.white)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(.blue, in: Capsule())
-                                    }
-                                    if isDownloaded {
-                                        Text("Downloaded")
-                                            .font(.caption2.bold())
-                                            .foregroundStyle(.white)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(.green, in: Capsule())
-                                    }
-                                }
-                                Text(backend.description)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.leading)
-                                if !isDownloaded {
-                                    Text("Download: \(backend.sizeDescription)")
-                                        .font(.caption2)
-                                        .foregroundStyle(.tertiary)
-                                }
-                            }
-                            Spacer()
-                            if isSelected {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.accentColor)
-                            }
-                        }
-                        .padding(12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(isSelected
-                                    ? Color.accentColor.opacity(0.08)
-                                    : Color.clear)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(isSelected
-                                    ? Color.accentColor.opacity(0.3)
-                                    : Color.secondary.opacity(0.2), lineWidth: 1)
-                        )
-                    }
-                    .buttonStyle(.plain)
+                ForEach(ModelBackend.allCases, id: \.self) { backend in
+                    backendCard(backend)
                 }
             }
 
@@ -454,6 +376,7 @@ struct OnboardingView: View {
                             }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(viewModel.coordinator.state == .recording ? "Stop recording" : "Start recording")
 
                     if viewModel.coordinator.state == .recording {
                         Text("Recording... tap again to stop")
@@ -594,6 +517,73 @@ struct OnboardingView: View {
         }
         .onAppear {
             viewModel.checkHotkeyConflict()
+        }
+    }
+
+    @ViewBuilder
+    private func backendCard(_ backend: ModelBackend) -> some View {
+        let isSelected: Bool = viewModel.modelManager.activeBackend == backend
+        let isDownloaded: Bool = viewModel.modelManager.isModelDownloaded(for: backend)
+        let fillColor: Color = isSelected ? Color.accentColor.opacity(0.08) : Color.clear
+        let strokeColor: Color = isSelected ? Color.accentColor.opacity(0.3) : Color.secondary.opacity(0.2)
+
+        Button {
+            viewModel.selectBackend(backend)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: backendIcon(backend))
+                    .font(.title2)
+                    .foregroundStyle(backendColor(backend))
+                    .frame(width: 32)
+
+                backendCardContent(backend, isDownloaded: isDownloaded)
+
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 10).fill(fillColor))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(strokeColor, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func backendCardContent(_ backend: ModelBackend, isDownloaded: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(backend.displayName)
+                    .font(.headline)
+                if backend == .onnx {
+                    Text("Recommended")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.blue, in: Capsule())
+                }
+                if isDownloaded {
+                    Text("Downloaded")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.green, in: Capsule())
+                }
+            }
+            Text(backend.description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+            if !isDownloaded {
+                Text("Download: \(backend.sizeDescription)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 

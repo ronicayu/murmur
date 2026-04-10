@@ -3,11 +3,12 @@ import HotKey
 
 struct MenuBarView: View {
     @ObservedObject var coordinator: AppCoordinator
-    @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "en"
+    @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
     var onOpenSettings: () -> Void = {}
 
     /// Quick-access languages shown as capsule buttons in the menu bar
     private static let quickLanguages: [(code: String, label: String)] = [
+        ("auto", "Auto"),
         ("en", "EN"),
         ("zh", "中文"),
         ("ja", "日"),
@@ -31,9 +32,9 @@ struct MenuBarView: View {
 
             Divider().padding(.horizontal, 8)
 
-            // Last transcription
-            if let text = coordinator.lastTranscription {
-                transcriptionRow(text)
+            // Transcription history
+            if !coordinator.transcriptionHistory.isEmpty {
+                transcriptionHistorySection
                 Divider().padding(.horizontal, 8)
             }
 
@@ -73,7 +74,7 @@ struct MenuBarView: View {
                         transcriptionLanguage = lang.code
                     } label: {
                         Text(lang.label)
-                            .font(.system(.caption, weight: .medium, design: .rounded))
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)
                             .background(
@@ -89,6 +90,8 @@ struct MenuBarView: View {
                             )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Language: \(lang.label)")
+                    .accessibilityAddTraits(transcriptionLanguage == lang.code ? .isSelected : [])
                 }
 
                 // "More" button — shown if current language isn't in quick list
@@ -101,7 +104,7 @@ struct MenuBarView: View {
                         if !isQuickLang {
                             // Show the current non-quick language name
                             Text(currentLanguageName)
-                                .font(.system(.caption, weight: .medium, design: .rounded))
+                                .font(.system(size: 11, weight: .medium, design: .rounded))
                         } else {
                             Image(systemName: "ellipsis")
                                 .font(.system(.caption, weight: .medium))
@@ -127,7 +130,7 @@ struct MenuBarView: View {
     /// Display name for the current language (used when it's not in the quick list)
     private var currentLanguageName: String {
         let allLanguages: [(code: String, name: String)] = [
-            ("en", "EN"), ("zh", "中文"), ("ja", "日"), ("ko", "한"),
+            ("auto", "Auto"), ("en", "EN"), ("zh", "中文"), ("ja", "日"), ("ko", "한"),
             ("fr", "FR"), ("de", "DE"), ("es", "ES"), ("pt", "PT"),
             ("it", "IT"), ("nl", "NL"), ("pl", "PL"), ("el", "EL"),
             ("ar", "AR"), ("vi", "VI"),
@@ -194,35 +197,47 @@ struct MenuBarView: View {
         }
     }
 
-    // MARK: - Transcription Row
+    // MARK: - Transcription History
 
-    private func transcriptionRow(_ text: String) -> some View {
+    private var transcriptionHistorySection: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Recent")
+                .font(.system(.caption2, design: .rounded))
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 14)
+                .padding(.top, 4)
+
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(Array(coordinator.transcriptionHistory.enumerated()), id: \.offset) { _, entry in
+                        transcriptionRow(entry.text, language: entry.language)
+                    }
+                }
+            }
+            .frame(maxHeight: 160)
+        }
+    }
+
+    private func transcriptionRow(_ text: String, language: DetectedLanguage) -> some View {
         Button {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
         } label: {
             HStack(alignment: .top, spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 4) {
-                        Text("Last transcription")
-                            .font(.system(.caption2, design: .rounded))
-                            .foregroundStyle(.tertiary)
-                        if let lang = coordinator.lastLanguage {
-                            Text(lang == .chinese ? "中文" : "EN")
-                                .font(.system(size: 9, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(.quaternary, in: Capsule())
-                        }
-                    }
                     Text(text)
                         .font(.system(.callout, design: .rounded))
-                        .lineLimit(3)
+                        .lineLimit(2)
                         .multilineTextAlignment(.leading)
                         .foregroundStyle(.primary)
                 }
                 Spacer(minLength: 0)
+                Text(languageLabel(language))
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(.quaternary, in: Capsule())
                 Image(systemName: "doc.on.doc")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -233,6 +248,14 @@ struct MenuBarView: View {
         .buttonStyle(MenuRowButtonStyle())
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
+    }
+
+    private func languageLabel(_ lang: DetectedLanguage) -> String {
+        switch lang {
+        case .chinese: return "中文"
+        case .english: return "EN"
+        case .unknown: return "?"
+        }
     }
 
     // MARK: - Menu Rows

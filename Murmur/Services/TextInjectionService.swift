@@ -80,7 +80,8 @@ final class TextInjectionService: TextInjectionServiceProtocol {
     private func injectViaClipboard(text: String) async throws {
         let pasteboard = NSPasteboard.general
 
-        // Save current clipboard (all types per item)
+        // Save current clipboard (all types per item) and change count
+        let savedChangeCount = pasteboard.changeCount
         let savedItems = pasteboard.pasteboardItems?.map { item -> [(String, Data)] in
             item.types.compactMap { type in
                 guard let data = item.data(forType: type) else { return nil }
@@ -104,8 +105,12 @@ final class TextInjectionService: TextInjectionServiceProtocol {
         keyDown.post(tap: .cghidEventTap)
         keyUp.post(tap: .cghidEventTap)
 
-        // Restore clipboard after delay
+        // Restore clipboard after delay, but only if nothing else has written to it
         try await Task.sleep(for: .milliseconds(1500))
+        guard pasteboard.changeCount == savedChangeCount + 1 else {
+            // Clipboard was modified by the user or another app — skip restore
+            return
+        }
         pasteboard.clearContents()
         for itemTypes in savedItems {
             let item = NSPasteboardItem()

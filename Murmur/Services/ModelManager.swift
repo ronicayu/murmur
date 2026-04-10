@@ -180,6 +180,18 @@ final class ModelManager: ObservableObject {
         let saved = UserDefaults.standard.string(forKey: "modelBackend")
             .flatMap(ModelBackend.init(rawValue:)) ?? .onnx
         self.activeBackend = saved
+
+        // One-time migration: move the old shared "modelConfigHash" key to the
+        // per-backend key so that existing hash verifications keep working.
+        let oldKey = "modelConfigHash"
+        if let oldHash = UserDefaults.standard.string(forKey: oldKey) {
+            let perBackendKey = "modelConfigHash_\(saved.rawValue)"
+            if UserDefaults.standard.string(forKey: perBackendKey) == nil {
+                UserDefaults.standard.set(oldHash, forKey: perBackendKey)
+            }
+            UserDefaults.standard.removeObject(forKey: oldKey)
+        }
+
         refreshState()
     }
 
@@ -408,16 +420,17 @@ final class ModelManager: ObservableObject {
             let hashStr = hash.map { String(format: "%02x", $0) }.joined()
             logger.info("config.json SHA-256: \(hashStr)")
 
-            // If we have a stored expected hash, verify it
-            let storedHash = UserDefaults.standard.string(forKey: "modelConfigHash")
+            // Use per-backend key to avoid cross-backend hash collisions
+            let hashKey = "modelConfigHash_\(self.activeBackend.rawValue)"
+            let storedHash = UserDefaults.standard.string(forKey: hashKey)
             if let storedHash, storedHash != hashStr {
-                logger.warning("Config hash mismatch: expected \(storedHash), got \(hashStr)")
+                logger.warning("Config hash mismatch for \(self.activeBackend.rawValue): expected \(storedHash), got \(hashStr)")
                 state = .corrupt
                 return false
             }
             // Store hash on first verification for future comparisons
             if storedHash == nil {
-                UserDefaults.standard.set(hashStr, forKey: "modelConfigHash")
+                UserDefaults.standard.set(hashStr, forKey: hashKey)
             }
         }
 

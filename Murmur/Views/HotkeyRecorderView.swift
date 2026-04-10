@@ -7,7 +7,8 @@ struct HotkeyRecorderView: View {
     @Binding var key: Key
     @Binding var modifiers: NSEvent.ModifierFlags
     @State private var isRecording = false
-    @State private var monitor: Any?
+    @State private var localMonitor: Any?
+    @State private var globalMonitor: Any?
 
     var body: some View {
         Button {
@@ -32,6 +33,7 @@ struct HotkeyRecorderView: View {
         }
         .buttonStyle(.plain)
         .onDisappear { stopRecording() }
+        .accessibilityLabel(isRecording ? "Recording shortcut. Press a key combination." : "Hotkey: \(shortcutLabel). Click to change.")
     }
 
     private var shortcutLabel: String {
@@ -47,13 +49,18 @@ struct HotkeyRecorderView: View {
     private func startRecording() {
         isRecording = true
 
-        // Use both local (for when settings window is key) and global (for LSUIElement apps)
-        monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [self] event in
+        // Handler shared by both monitors. The flag prevents double-firing if both
+        // monitors somehow receive the same event.
+        var handled = false
+
+        let handler: (NSEvent) -> Void = { [self] event in
+            guard !handled else { return }
             guard let capturedKey = Key(carbonKeyCode: UInt32(event.keyCode)) else { return }
 
             let mods = event.modifierFlags.intersection([.control, .option, .shift, .command])
             guard !mods.isEmpty else { return }
 
+            handled = true
             key = capturedKey
             modifiers = mods
             stopRecording()
@@ -61,14 +68,28 @@ struct HotkeyRecorderView: View {
             UserDefaults.standard.set(Int(event.keyCode), forKey: "hotkeyKeyCode")
             UserDefaults.standard.set(Int(mods.rawValue), forKey: "hotkeyModifiers")
         }
+
+        // Local monitor fires when the app's own window is key.
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            handler(event)
+            // Return nil to consume the event while recording.
+            return nil
+        }
+
+        // Global monitor fires when another app is key (needed for LSUIElement apps).
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
     }
 
     private func stopRecording() {
         isRecording = false
-        if let monitor {
-            NSEvent.removeMonitor(monitor)
+        if let localMonitor {
+            NSEvent.removeMonitor(localMonitor)
         }
-        monitor = nil
+        if let globalMonitor {
+            NSEvent.removeMonitor(globalMonitor)
+        }
+        localMonitor = nil
+        globalMonitor = nil
     }
 }
 

@@ -49,6 +49,9 @@ final class AppCoordinator: ObservableObject {
     @Published var lastTranscription: String?
     @Published var lastLanguage: DetectedLanguage?
     @Published private(set) var currentAudioLevel: Float = 0
+    @Published private(set) var transcriptionHistory: [(text: String, language: DetectedLanguage, date: Date)] = []
+
+    private let maxHistoryCount = 20
 
     let hotkey: HotkeyService
     let audio: AudioService
@@ -254,6 +257,10 @@ final class AppCoordinator: ObservableObject {
 
             lastTranscription = result.text
             lastLanguage = result.language
+            transcriptionHistory.insert((text: result.text, language: result.language, date: Date()), at: 0)
+            if transcriptionHistory.count > maxHistoryCount {
+                transcriptionHistory.removeLast()
+            }
             let undoableState = AppState.undoable(text: result.text, method: method)
             transition(to: undoableState)
             audioFeedback.playSuccess()

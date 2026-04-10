@@ -14,6 +14,19 @@ struct FloatingPillView: View {
         .background(.ultraThinMaterial, in: Capsule())
         .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
         .frame(minWidth: 120)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(pillAccessibilityLabel)
+    }
+
+    private var pillAccessibilityLabel: String {
+        switch state {
+        case .recording: return "Recording audio. Press Escape to cancel."
+        case .transcribing: return "Transcribing audio"
+        case .injecting: return "Inserting text"
+        case .undoable(let text, _): return "Transcribed: \(text). Press Command Z to undo."
+        case .error(let err): return "Error: \(err.localizedDescription)"
+        case .idle: return "Murmur idle"
+        }
     }
 
     @ViewBuilder
@@ -49,8 +62,13 @@ struct FloatingPillView: View {
     private var stateText: some View {
         switch state {
         case .recording:
-            Text("Recording...")
-                .font(.system(.caption, design: .rounded, weight: .medium))
+            VStack(spacing: 1) {
+                Text("Recording...")
+                    .font(.system(.caption, design: .rounded, weight: .medium))
+                Text("Esc to cancel")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+            }
         case .transcribing:
             Text("Transcribing...")
                 .font(.system(.caption, design: .rounded, weight: .medium))

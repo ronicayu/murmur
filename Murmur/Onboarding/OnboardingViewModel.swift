@@ -19,6 +19,17 @@ final class OnboardingViewModel: ObservableObject {
 
     let coordinator: AppCoordinator
     let modelManager: ModelManager
+
+    /// Steps actually shown to the user (mic merged into welcome; modelChoice and huggingfaceLogin skipped)
+    private static let visibleSteps: [OnboardingStep] = [
+        .welcome, .accessibility, .modelDownload, .testTranscription, .done
+    ]
+
+    var visibleStepCount: Int { Self.visibleSteps.count }
+
+    var visibleStepIndex: Int {
+        Self.visibleSteps.firstIndex(of: step) ?? 0
+    }
     private var accessibilityPollTask: Task<Void, Never>?
     private var testWatchTask: Task<Void, Never>?
 
@@ -35,17 +46,20 @@ final class OnboardingViewModel: ObservableObject {
         guard let next = OnboardingStep(rawValue: step.rawValue + 1) else { return }
 
         switch next {
-        case .microphone where micGranted:
+        case .microphone:
+            // Microphone is merged into welcome step — always skip
             step = .microphone
             nextStep()
         case .accessibility where accessibilityGranted:
             step = .accessibility
             nextStep()
-        case .huggingfaceLogin where !modelManager.activeBackend.requiresHFLogin:
-            // Skip HF login for backends that don't need it (e.g. ONNX)
-            step = .huggingfaceLogin
+        case .modelChoice:
+            // Always use ONNX during onboarding — advanced backends are in Settings
+            modelManager.activeBackend = .onnx
+            step = .modelChoice
             nextStep()
-        case .huggingfaceLogin where modelManager.state == .ready:
+        case .huggingfaceLogin:
+            // Skip — ONNX doesn't need HF login
             step = .huggingfaceLogin
             nextStep()
         case .modelDownload where modelManager.state == .ready:
@@ -192,9 +206,15 @@ final class OnboardingViewModel: ObservableObject {
 
             do {
                 try saveProc.run()
-                saveProc.waitUntilExit()
 
-                if saveProc.terminationStatus == 0 {
+                // Wait on a background thread to avoid blocking the main actor
+                let exitStatus: Int32 = await withCheckedContinuation { continuation in
+                    saveProc.terminationHandler = { proc in
+                        continuation.resume(returning: proc.terminationStatus)
+                    }
+                }
+
+                if exitStatus == 0 {
                     hfLoggedIn = true
                     hfStatusMessage = "Token saved successfully"
                 } else {

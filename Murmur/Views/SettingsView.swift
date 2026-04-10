@@ -8,9 +8,10 @@ struct SettingsView: View {
     @AppStorage("recordingMode") private var recordingMode: String = RecordingMode.toggle.rawValue
     @AppStorage("soundEffects") private var soundEffects: Bool = true
     @AppStorage("launchAtLogin") private var launchAtLogin: Bool = true
-    @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "en"
+    @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
 
     @State private var useRightCommand: Bool = true
+    @State private var showDeleteConfirmation = false
     @State private var hotkeyKey: Key = .space
     @State private var hotkeyModifiers: NSEvent.ModifierFlags = .command
 
@@ -76,6 +77,8 @@ struct SettingsView: View {
 
             Section("Language") {
                 Picker("Transcription language:", selection: $transcriptionLanguage) {
+                    Text("Auto (detect language)").tag("auto")
+                    Divider()
                     Text("English").tag("en")
                     Text("中文 (Chinese)").tag("zh")
                     Text("日本語 (Japanese)").tag("ja")
@@ -91,7 +94,7 @@ struct SettingsView: View {
                     Text("العربية").tag("ar")
                     Text("Tiếng Việt").tag("vi")
                 }
-                Text("For mixed Chinese/English, select 中文")
+                Text("Auto works best for mixed Chinese/English. Pin a language if auto-detect is wrong.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -108,43 +111,27 @@ struct SettingsView: View {
 
     // MARK: - Model Tab
 
+    @State private var showAdvancedEngines = false
+
     private var modelTab: some View {
         Form {
             Section("Speech Engine") {
-                ForEach(ModelBackend.allCases) { backend in
-                    let isActive = modelManager.activeBackend == backend
-                    let isDownloaded = modelManager.isModelDownloaded(for: backend)
-                    Button {
-                        modelManager.activeBackend = backend
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(backend.displayName)
-                                    .font(.body)
-                                    .foregroundStyle(.primary)
-                                HStack(spacing: 6) {
-                                    Text(backend.sizeDescription)
-                                    if isDownloaded {
-                                        Text("Downloaded")
-                                            .foregroundStyle(.green)
-                                    }
-                                }
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if isActive {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.accentColor)
-                            }
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-                Text(modelManager.activeBackend.description)
+                engineRow(.onnx)
+                Text(ModelBackend.onnx.description)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            Section {
+                DisclosureGroup("Advanced Engines", isExpanded: $showAdvancedEngines) {
+                    engineRow(.huggingface)
+                    engineRow(.whisper)
+                    if modelManager.activeBackend != .onnx {
+                        Text(modelManager.activeBackend.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             Section("Speech Model (\(modelManager.activeBackend.shortName))") {
@@ -195,7 +182,15 @@ struct SettingsView: View {
                 HStack {
                     if modelManager.state == .ready {
                         Button("Delete Model", role: .destructive) {
-                            try? modelManager.delete()
+                            showDeleteConfirmation = true
+                        }
+                        .alert("Delete Model?", isPresented: $showDeleteConfirmation) {
+                            Button("Delete", role: .destructive) {
+                                try? modelManager.delete()
+                            }
+                            Button("Cancel", role: .cancel) { }
+                        } message: {
+                            Text("The \(modelManager.activeBackend.shortName) model (\(modelManager.activeBackend.sizeDescription)) will be removed. You can re-download it later.")
                         }
                     } else if case .downloading = modelManager.state {
                         Button("Cancel Download") {
@@ -259,6 +254,38 @@ struct SettingsView: View {
                 .foregroundStyle(.red)
                 .lineLimit(2)
         }
+    }
+
+    private func engineRow(_ backend: ModelBackend) -> some View {
+        let isActive: Bool = modelManager.activeBackend == backend
+        let isDownloaded: Bool = modelManager.isModelDownloaded(for: backend)
+        return Button {
+            modelManager.activeBackend = backend
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(backend.displayName)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                    HStack(spacing: 6) {
+                        Text(backend.sizeDescription)
+                        if isDownloaded {
+                            Text("Downloaded")
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if isActive {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Helpers

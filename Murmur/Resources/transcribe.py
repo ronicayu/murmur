@@ -141,7 +141,11 @@ def transcribe_onnx(wav_path: str, language: str = "en"):
     duration = len(audio) / 16000
     log.info(f"Audio: {len(audio)} samples, {duration:.2f}s")
 
-    inputs = processor(audio, sampling_rate=16000, return_tensors="np", language=language)
+    # When language is "auto", omit it so the model auto-detects
+    proc_kwargs = {"sampling_rate": 16000, "return_tensors": "np"}
+    if language and language != "auto":
+        proc_kwargs["language"] = language
+    inputs = processor(audio, **proc_kwargs)
     input_features = inputs["input_features"].astype(np.float32)
     log.info(f"Input features shape: {input_features.shape}, language: {language}")
 
@@ -290,7 +294,10 @@ def transcribe_huggingface(wav_path: str, language: str = "en"):
 
     log.info(f"Final audio: {len(audio)} samples, {len(audio)/sr:.2f}s")
 
-    inputs = processor(audio, sampling_rate=sr, return_tensors="pt")
+    proc_kwargs = {"sampling_rate": sr, "return_tensors": "pt"}
+    if language and language != "auto":
+        proc_kwargs["language"] = language
+    inputs = processor(audio, **proc_kwargs)
 
     device = next(hf_model.parameters()).device
     input_features = inputs.input_features.to(device=device, dtype=hf_model.dtype)
@@ -473,7 +480,7 @@ def main():
             if action == "load":
                 response = load_model(cmd["model_path"])
             elif action == "transcribe":
-                response = transcribe(cmd["wav_path"], language=cmd.get("language", "en"))
+                response = transcribe(cmd["wav_path"], language=cmd.get("language", "auto"))
             elif action == "unload":
                 response = unload_model()
             else:

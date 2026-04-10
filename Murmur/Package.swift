@@ -16,8 +16,13 @@ let package = Package(
             name: "Murmur",
             dependencies: ["HotKey"],
             path: ".",
-            exclude: ["Package.swift", "Scripts"],
+            exclude: ["Package.swift", "Scripts", "Tests"],
             resources: [.copy("Resources")]
+        ),
+        .testTarget(
+            name: "MurmurTests",
+            dependencies: ["Murmur"],
+            path: "Tests"
         ),
     ]
 )
