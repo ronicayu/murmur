@@ -1,0 +1,61 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Build release binary
+        working-directory: Murmur
+        run: swift build -c release
+
+      - name: Assemble app bundle
+        working-directory: Murmur
+        run: |
+          APP="dist/Murmur.app"
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources"
+
+          # Find binary
+          BINARY=".build/arm64-apple-macosx/release/Murmur"
+          [ -f "$BINARY" ] || BINARY=".build/release/Murmur"
+          cp "$BINARY" "$APP/Contents/MacOS/Murmur"
+
+          # Info.plist with version from tag
+          cp Info.plist "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP/Contents/Info.plist" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ steps.version.outputs.VERSION }}" "$APP/Contents/Info.plist"
+
+          # Resources
+          cp Resources/AppIcon.icns "$APP/Contents/Resources/"
+          cp Resources/transcribe.py "$APP/Contents/Resources/"
+          cp Resources/requirements.txt "$APP/Contents/Resources/"
+
+          # SPM resource bundle
+          BUNDLE=".build/arm64-apple-macosx/release/Murmur_Murmur.bundle"
+          [ -d "$BUNDLE" ] && cp -R "$BUNDLE" "$APP/Contents/Resources/" || true
+
+          # Ad-hoc sign
+          codesign --force --deep --sign - "$APP"
+
+      - name: Create DMG
+        working-directory: Murmur
+        run: |
+          hdiutil create -volname "Murmur" -srcfolder dist/Murmur.app \
+            -ov -format UDZO "dist/Murmur-${{ steps.version.outputs.VERSION }}.dmg"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Murmur/dist/Murmur-${{ steps.version.outputs.VERSION }}.dmg
+          generate_release_notes: true
