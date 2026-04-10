@@ -15,9 +15,15 @@ import time
 import os
 import logging
 
-# Prevent OMP duplicate library crash on macOS with Homebrew Python + torch
+# Prevent OMP duplicate library crash on macOS with Homebrew Python + torch/onnxruntime.
+# Python 3.14 pthread changes break OMP's pthread_mutex_init with explicit thread counts.
+# CRITICAL: import torch BEFORE onnxruntime — torch must initialize OMP first,
+# otherwise ORT's OMP init conflicts with torch's when CohereAsrProcessor loads torch later.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-os.environ.setdefault("OMP_NUM_THREADS", "4")
+try:
+    import torch  # noqa: F401 — must be imported before onnxruntime
+except ImportError:
+    pass
 
 # Set up file logging
 log_dir = os.path.expanduser("~/Library/Application Support/Murmur")
@@ -102,8 +108,16 @@ def load_model_onnx(model_path: str):
 
     sess_opts = ort.SessionOptions()
     sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    sess_opts.intra_op_num_threads = 4
-    providers = ["CPUExecutionProvider"]
+    # Let ORT manage threading — hardcoded thread count crashes on Python 3.14
+    # due to OMP pthread_mutex_init incompatibility
+    sess_opts.intra_op_num_threads = 0
+
+    # Use CoreML on Apple Silicon when available, fall back to CPU
+    available = ort.get_available_providers()
+    if "CoreMLExecutionProvider" in available:
+        providers = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    else:
+        providers = ["CPUExecutionProvider"]
 
     t0 = time.time()
     encoder_sess = ort.InferenceSession(
