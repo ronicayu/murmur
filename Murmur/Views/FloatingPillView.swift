@@ -93,16 +93,26 @@ struct FloatingPillView: View {
 }
 
 /// Window controller for the floating pill overlay.
+/// Reuses a single NSHostingView to avoid crashes from replacing contentView
+/// during AppKit's display cycle (NSHostingView.updateConstraints race).
 final class FloatingPillController {
     private var window: NSWindow?
+    private var hostingView: NSHostingView<FloatingPillView>?
     private var hideTask: Task<Void, Never>?
 
     func show(state: AppState, audioLevel: Float = 0) {
         hideTask?.cancel()
 
         let pillView = FloatingPillView(state: state, audioLevel: audioLevel)
-        let hostingView = NSHostingView(rootView: pillView)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 200, height: 40)
+
+        if let hostingView {
+            // Update the existing hosting view's root — no contentView replacement
+            hostingView.rootView = pillView
+        } else {
+            let hv = NSHostingView(rootView: pillView)
+            hv.frame = NSRect(x: 0, y: 0, width: 200, height: 40)
+            hostingView = hv
+        }
 
         if window == nil {
             let w = NSPanel(
@@ -117,11 +127,13 @@ final class FloatingPillController {
             w.hasShadow = false
             w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             w.isMovableByWindowBackground = false
+            w.contentView = hostingView
             window = w
         }
 
-        window?.contentView = hostingView
-        window?.setContentSize(hostingView.fittingSize)
+        if let hostingView {
+            window?.setContentSize(hostingView.fittingSize)
+        }
 
         positionNearMenuBar()
         window?.orderFrontRegardless()
