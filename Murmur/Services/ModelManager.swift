@@ -484,13 +484,14 @@ final class ModelManager: ObservableObject {
         // Install packages one by one for progress visibility
         let pip = pythonEnvPath.appendingPathComponent("bin/pip3")
         let packages = [
-            ("huggingface_hub", "Setting up: downloading components (1/7)..."),
-            ("transformers>=5.4.0", "Setting up: downloading components (2/7)..."),
-            ("torch", "Setting up: downloading components (3/7, this may take a minute)..."),
-            ("onnxruntime", "Setting up: downloading components (4/7)..."),
-            ("soundfile", "Setting up: downloading components (5/7)..."),
-            ("librosa", "Setting up: downloading components (6/7)..."),
-            ("accelerate", "Setting up: downloading components (7/7)..."),
+            ("huggingface_hub", "Setting up: downloading components (1/8)..."),
+            ("transformers>=5.4.0", "Setting up: downloading components (2/8)..."),
+            ("torch", "Setting up: downloading components (3/8, this may take a minute)..."),
+            ("onnxruntime", "Setting up: downloading components (4/8)..."),
+            ("soundfile", "Setting up: downloading components (5/8)..."),
+            ("librosa", "Setting up: downloading components (6/8)..."),
+            ("accelerate", "Setting up: downloading components (7/8)..."),
+            ("opencc-python-reimplemented", "Setting up: downloading components (8/8)..."),
         ]
 
         for (pkg, message) in packages {

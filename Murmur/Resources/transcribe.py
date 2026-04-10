@@ -39,6 +39,18 @@ logging.basicConfig(
 log = logging.getLogger("murmur")
 log.info("=== Transcribe subprocess started ===")
 
+# Traditional → Simplified Chinese converter (Cohere Transcribe outputs traditional)
+try:
+    import opencc
+    _t2s = opencc.OpenCC("t2s")
+    def to_simplified(text: str) -> str:
+        return _t2s.convert(text)
+    log.info("opencc loaded — will convert traditional → simplified Chinese")
+except ImportError:
+    def to_simplified(text: str) -> str:
+        return text
+    log.warning("opencc not installed — traditional Chinese will not be converted")
+
 # Shared state
 backend = None  # "onnx", "huggingface", or "whisper"
 processor = None
@@ -235,6 +247,10 @@ def transcribe_onnx(wav_path: str, language: str = "en"):
     total_alpha = sum(1 for c in text if c.isalpha())
     detected_lang = "zh" if total_alpha > 0 and chinese_chars / max(total_alpha, 1) > 0.3 else "en"
 
+    # Convert traditional → simplified Chinese
+    if detected_lang == "zh":
+        text = to_simplified(text)
+
     return {"text": text, "language": detected_lang, "duration_ms": elapsed_ms}
 
 
@@ -331,6 +347,10 @@ def transcribe_huggingface(wav_path: str, language: str = "en"):
     total_alpha = sum(1 for c in text if c.isalpha())
     detected_lang = "zh" if total_alpha > 0 and chinese_chars / max(total_alpha, 1) > 0.3 else "en"
 
+    # Convert traditional → simplified Chinese
+    if detected_lang == "zh":
+        text = to_simplified(text)
+
     return {"text": text, "language": detected_lang, "duration_ms": elapsed_ms}
 
 
@@ -420,6 +440,10 @@ def transcribe_whisper(wav_path: str, language: str = "en"):
     chinese_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
     total_alpha = sum(1 for c in text if c.isalpha())
     detected_lang = "zh" if total_alpha > 0 and chinese_chars / max(total_alpha, 1) > 0.3 else "en"
+
+    # Convert traditional → simplified Chinese
+    if detected_lang == "zh":
+        text = to_simplified(text)
 
     return {"text": text, "language": detected_lang, "duration_ms": elapsed_ms}
 
