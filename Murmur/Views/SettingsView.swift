@@ -9,11 +9,17 @@ struct SettingsView: View {
     @AppStorage("soundEffects") private var soundEffects: Bool = true
     @AppStorage("launchAtLogin") private var launchAtLogin: Bool = true
     @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
+    @AppStorage("streamingInputEnabled") private var streamingInputEnabled: Bool = false
+    @AppStorage("streamingDiscoveryBadgeDismissed") private var discoveryBadgeDismissed: Bool = false
 
     @State private var useRightCommand: Bool = true
     @State private var showDeleteConfirmation = false
     @State private var hotkeyKey: Key = .space
     @State private var hotkeyModifiers: NSEvent.ModifierFlags = .command
+
+    private var showDiscoveryBadge: Bool {
+        V1UsageCounter.shouldShowDiscoveryBadge
+    }
 
     var body: some View {
         TabView {
@@ -105,6 +111,41 @@ struct SettingsView: View {
                     .onChange(of: launchAtLogin) { _, newValue in
                         setLaunchAtLogin(newValue)
                     }
+            }
+
+            // MARK: - V3 Streaming (beta)
+            Section {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text("Streaming input (beta)")
+                                .font(.body)
+                            if showDiscoveryBadge {
+                                Text("New")
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 2)
+                                    .background(Color.orange, in: Capsule())
+                            }
+                        }
+                        Text("See text appear as you speak. Final result replaces streaming preview.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $streamingInputEnabled)
+                        .labelsHidden()
+                        .onChange(of: streamingInputEnabled) { _, newValue in
+                            if newValue {
+                                // Dismiss discovery badge on first enable
+                                V1UsageCounter.dismissDiscoveryBadge()
+                                discoveryBadgeDismissed = true
+                            }
+                        }
+                }
+            } header: {
+                Text("Experimental")
             }
         }
     }

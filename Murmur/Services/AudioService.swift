@@ -6,6 +6,12 @@ protocol AudioServiceProtocol {
     func stopRecording() async throws -> URL
     func cancelRecording()
     var audioLevel: AsyncStream<Float> { get }
+    /// URL of the in-progress WAV file (nil if not recording).
+    var currentRecordingURL: URL? { get }
+    /// Attach a streaming accumulator to receive audio buffers during recording.
+    func attachStreamingAccumulator(_ accumulator: AudioBufferAccumulator?)
+    /// Detach any streaming accumulator (called when streaming is cancelled or stopped).
+    func detachStreamingAccumulator()
 }
 
 final class AudioService: AudioServiceProtocol {
@@ -17,6 +23,12 @@ final class AudioService: AudioServiceProtocol {
     private let maxDuration: TimeInterval = 120
     private var recordingStart: Date?
     private var maxDurationTask: Task<Void, Never>?
+
+    /// V3: optional streaming accumulator attached during a streaming session.
+    private var streamingAccumulator: AudioBufferAccumulator?
+
+    /// URL of the WAV file currently being written (nil when not recording).
+    private(set) var currentRecordingURL: URL?
 
     /// Protects mutable state accessed from the audio tap thread.
     private let lock = NSLock()
@@ -38,6 +50,22 @@ final class AudioService: AudioServiceProtocol {
         )
     }
 
+    // MARK: - V3 Streaming Accumulator
+
+    func attachStreamingAccumulator(_ accumulator: AudioBufferAccumulator?) {
+        lock.lock()
+        streamingAccumulator = accumulator
+        lock.unlock()
+    }
+
+    func detachStreamingAccumulator() {
+        lock.lock()
+        streamingAccumulator = nil
+        lock.unlock()
+    }
+
+    // MARK: - Recording
+
     func startRecording() async throws {
         guard !engine.isRunning else { return }
 
@@ -45,6 +73,7 @@ final class AudioService: AudioServiceProtocol {
 
         let tempDir = FileManager.default.temporaryDirectory
         let url = tempDir.appendingPathComponent("murmur_\(UUID().uuidString).wav")
+        currentRecordingURL = url
 
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
@@ -91,8 +120,12 @@ final class AudioService: AudioServiceProtocol {
                 try? self.outputFile?.write(from: convertedBuffer)
                 let rms = self.computeRMS(convertedBuffer)
                 self.rmsAccumulator.append(rms)
+                // V3 dual-output: feed streaming accumulator (if attached)
+                let acc = self.streamingAccumulator
                 self.lock.unlock()
                 self.levelContinuation.yield(rms)
+                // Invoke outside the lock to prevent deadlock inside onChunkReady
+                acc?.append(convertedBuffer)
             }
         }
 
@@ -123,7 +156,9 @@ final class AudioService: AudioServiceProtocol {
         let url = tempURL
         let accum = rmsAccumulator
         outputFile = nil
+        streamingAccumulator = nil
         lock.unlock()
+        currentRecordingURL = nil
 
         guard let url else {
             throw MurmurError.transcriptionFailed("No active recording")
@@ -155,7 +190,9 @@ final class AudioService: AudioServiceProtocol {
         outputFile = nil
         let url = tempURL
         tempURL = nil
+        streamingAccumulator = nil
         lock.unlock()
+        currentRecordingURL = nil
 
         if let url {
             try? FileManager.default.removeItem(at: url)

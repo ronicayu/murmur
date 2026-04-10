@@ -213,6 +213,11 @@ struct MenuBarView: View {
                 .font(.system(size: 22))
                 .foregroundStyle(.red)
                 .symbolEffect(.pulse)
+        case .streaming:
+            Image(systemName: "waveform")
+                .font(.system(size: 20))
+                .foregroundStyle(.orange)
+                .symbolEffect(.pulse, options: .repeating)
         case .transcribing:
             ProgressView()
                 .controlSize(.small)
@@ -235,6 +240,7 @@ struct MenuBarView: View {
         switch coordinator.state {
         case .idle: return .secondary
         case .recording: return .red
+        case .streaming: return .orange
         case .transcribing, .injecting: return .blue
         case .undoable: return .green
         case .error: return .orange

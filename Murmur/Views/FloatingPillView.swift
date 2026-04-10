@@ -21,6 +21,10 @@ struct FloatingPillView: View {
     private var pillAccessibilityLabel: String {
         switch state {
         case .recording: return "Recording audio. Press Escape to cancel."
+        case .streaming(let n):
+            return n == 0
+                ? "Streaming voice input. Press Escape to cancel."
+                : "Streaming voice input, \(n) chunks transcribed. Press Escape to cancel."
         case .transcribing: return "Transcribing audio"
         case .injecting: return "Inserting text"
         case .undoable(let text, _): return "Transcribed: \(text). Press Command Z to undo."
@@ -38,6 +42,12 @@ struct FloatingPillView: View {
                 .frame(width: 10, height: 10)
                 .scaleEffect(CGFloat(1.0 + audioLevel * 2))
                 .animation(.easeInOut(duration: 0.1), value: audioLevel)
+        case .streaming:
+            // Pulsing wave icon signals live streaming
+            Image(systemName: "waveform")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .symbolEffect(.pulse, options: .repeating)
         case .transcribing:
             ProgressView()
                 .controlSize(.small)
@@ -68,6 +78,20 @@ struct FloatingPillView: View {
                 Text("Esc to cancel")
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
+            }
+        case .streaming(let chunkCount):
+            VStack(spacing: 1) {
+                Text("Streaming...")
+                    .font(.system(.caption, design: .rounded, weight: .medium))
+                if chunkCount > 0 {
+                    Text("\(chunkCount) chunk\(chunkCount == 1 ? "" : "s")")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Esc to cancel")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
             }
         case .transcribing:
             Text("Transcribing...")

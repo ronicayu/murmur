@@ -1,11 +1,14 @@
 import SwiftUI
 import Carbon
+import Combine
 import HotKey
 import os
 
 enum AppState: Equatable, Sendable {
     case idle
     case recording
+    /// V3: recording + streaming chunk injection in progress.
+    case streaming(chunkCount: Int)
     case transcribing
     case injecting
     case undoable(text: String, method: InjectionMethod)
@@ -16,6 +19,8 @@ enum AppState: Equatable, Sendable {
         case (.idle, .idle), (.recording, .recording),
              (.transcribing, .transcribing), (.injecting, .injecting):
             return true
+        case (.streaming(let a), .streaming(let b)):
+            return a == b
         case (.undoable(let a, let am), .undoable(let b, let bm)):
             return a == b && am == bm
         case (.error, .error):
@@ -36,6 +41,7 @@ enum AppState: Equatable, Sendable {
         switch self {
         case .idle: return "Ready"
         case .recording: return "Recording..."
+        case .streaming(let n): return n == 0 ? "Streaming..." : "Streaming... (\(n) chunks)"
         case .transcribing: return "Transcribing..."
         case .injecting: return "Inserting text..."
         case .undoable(let text, _): return String(text.prefix(40))
@@ -61,6 +67,14 @@ final class AppCoordinator: ObservableObject {
     let permissions: PermissionsService
     let audioFeedback: AudioFeedbackService
     let pill: FloatingPillController
+
+    // MARK: - V3 Streaming (feature-flag gated)
+
+    private(set) var streamingCoordinator: StreamingTranscriptionCoordinator?
+
+    private var isStreamingEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "streamingInputEnabled")
+    }
 
     /// When true, skips accessibility check (for onboarding test where we show text in-app, not inject)
     var skipAccessibilityCheck = false
@@ -116,6 +130,10 @@ final class AppCoordinator: ObservableObject {
         self.permissions = permissions
         self.audioFeedback = audioFeedback
         self.pill = pill
+        self.streamingCoordinator = StreamingTranscriptionCoordinator(
+            transcription: transcription,
+            injection: injection
+        )
 
         // Defer start to next run loop to ensure StateObject is fully initialized
         Task { @MainActor [weak self] in
@@ -299,6 +317,8 @@ final class AppCoordinator: ObservableObject {
 
         case .cancelRecording:
             guard state == .recording else { return }
+            audio.detachStreamingAccumulator()
+            streamingCoordinator?.cancelSession()
             audio.cancelRecording()
             audioFeedback.playStopRecording()
             pill.hide()
@@ -307,6 +327,16 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func startRecordingFlow() async {
+        if isStreamingEnabled {
+            await startStreamingRecordingFlow()
+        } else {
+            await startV1RecordingFlow()
+        }
+    }
+
+    // MARK: - V1 Recording Flow (unchanged)
+
+    private func startV1RecordingFlow() async {
         do {
             transition(to: .recording)
             audioFeedback.playStartRecording()
@@ -345,7 +375,179 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    // MARK: - V3 Streaming Recording Flow
+
+    private var streamingAccumulator: AudioBufferAccumulator?
+
+    private func startStreamingRecordingFlow() async {
+        do {
+            transition(to: .recording)
+            audioFeedback.playStartRecording()
+            pill.show(state: .streaming(chunkCount: 0), audioLevel: 0)
+
+            audioLevelTask?.cancel()
+            audioLevelTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                for await level in self.audio.audioLevel {
+                    self.currentAudioLevel = level
+                    // Pill update happens via streamingCoordinator published state
+                    if case .streaming(let n) = self.streamingCoordinator?.sessionState {
+                        self.pill.show(state: .streaming(chunkCount: n), audioLevel: level)
+                    }
+                }
+            }
+
+            try await withTimeout(seconds: 5, operation: "start recording") {
+                try await self.audio.startRecording()
+            }
+
+            // Resolve insertion point before any text is injected
+            let startOffset = resolveCurrentCursorOffset()
+            let targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+            let lang = resolveTranscriptionLanguage()
+            let wavURL = audio.currentRecordingURL ?? FileManager.default.temporaryDirectory
+                .appendingPathComponent("murmur_stream_\(UUID().uuidString).wav")
+
+            let acc = streamingCoordinator?.beginSession(
+                language: lang,
+                targetAppPID: targetPID,
+                startOffset: startOffset,
+                fullWavURL: wavURL
+            )
+            streamingAccumulator = acc
+
+            // Attach accumulator to audio tap via AudioService dual-output extension
+            audio.attachStreamingAccumulator(acc)
+
+            maxDurationTask?.cancel()
+            maxDurationTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                for await _ in self.audio.maxDurationReached {
+                    guard self.state == .recording else { continue }
+                    Self.log.info("Max recording duration reached, auto-stopping (streaming)")
+                    await self.stopAndTranscribeStreaming()
+                    break
+                }
+            }
+        } catch {
+            audioLevelTask?.cancel()
+            maxDurationTask?.cancel()
+            streamingCoordinator?.cancelSession()
+            audioFeedback.playError()
+            transition(to: .error(mapError(error)))
+        }
+    }
+
+    private func stopAndTranscribeStreaming() async {
+        audioLevelTask?.cancel()
+        maxDurationTask?.cancel()
+        audioFeedback.playStopRecording()
+
+        audio.detachStreamingAccumulator()
+
+        do {
+            transition(to: .transcribing)
+            pill.show(state: .transcribing)
+
+            let wav = try await withTimeout(seconds: 5, operation: "stop recording") {
+                try await self.audio.stopRecording()
+            }
+
+            // Pass the full WAV URL to the coordinator for the full-pass
+            streamingCoordinator?.updateFullWavURL(wav)
+            streamingCoordinator?.endSession()
+
+            // Wait for coordinator to reach done/cancelled/failed
+            await waitForStreamingDone()
+
+            transition(to: .idle)
+            audioFeedback.playSuccess()
+            pill.hide(after: 1)
+
+        } catch {
+            streamingCoordinator?.cancelSession()
+            let err = mapError(error)
+            transition(to: .error(err))
+            audioFeedback.playError()
+            pill.show(state: .error(err))
+            pill.hide(after: 2)
+        }
+
+        if pendingRecording {
+            pendingRecording = false
+            await startRecordingFlow()
+        }
+    }
+
+    private func waitForStreamingDone() async {
+        guard let coordinator = streamingCoordinator else { return }
+
+        // CR-P2-2: Subscribe to @Published sessionState via AsyncStream instead of polling.
+        // This avoids unnecessary 100ms wake-ups and reacts immediately to state changes.
+        let stream = AsyncStream<StreamingSessionState> { continuation in
+            // Capture the cancellable in a local var so it lives for the stream's lifetime.
+            let cancellable = coordinator.$sessionState.sink { state in
+                continuation.yield(state)
+            }
+            continuation.onTermination = { _ in
+                cancellable.cancel()
+            }
+        }
+
+        // DA-P1-5: Show "Refining…" pill progress and abandon after 30s.
+        let deadline = Date().addingTimeInterval(30)
+        var warningSent = false
+
+        for await state in stream {
+            switch state {
+            case .done, .cancelled, .failed:
+                return
+            case .finalizing:
+                // Show progress in pill after the warning threshold.
+                if !warningSent,
+                   let startedAt = coordinator.finalizingStartedAt,
+                   Date().timeIntervalSince(startedAt) >= StreamingTranscriptionCoordinator.fullPassWarningSeconds {
+                    warningSent = true
+                    // Pill shows a "Still refining" hint via statusText — no separate pill state needed.
+                    Self.log.info("waitForStreamingDone: full-pass taking >15s, user notified via pill")
+                }
+                // Abandon if overall deadline exceeded.
+                if Date() >= deadline {
+                    coordinator.cancelSession()
+                    return
+                }
+            default:
+                break
+            }
+        }
+    }
+
+    private func resolveCurrentCursorOffset() -> Int {
+        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return 0 }
+        let axApp = AXUIElementCreateApplication(frontmost.processIdentifier)
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+              let focused = focusedRef else { return 0 }
+        let element = focused as! AXUIElement  // swiftlint:disable:this force_cast
+        var selRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &selRef) == .success,
+              let selValue = selRef else { return 0 }
+        var cfRange = CFRange()
+        guard AXValueGetValue(selValue as! AXValue, .cfRange, &cfRange) else { return 0 }  // swiftlint:disable:this force_cast
+        return cfRange.location + cfRange.length
+    }
+
+    // MARK: - V1 Stop & Transcribe (unchanged logic, extracted)
+
     private func stopAndTranscribe() async {
+        if isStreamingEnabled {
+            await stopAndTranscribeStreaming()
+            return
+        }
+        await stopAndTranscribeV1()
+    }
+
+    private func stopAndTranscribeV1() async {
         audioLevelTask?.cancel()
         maxDurationTask?.cancel()
         audioFeedback.playStopRecording()
@@ -375,6 +577,10 @@ final class AppCoordinator: ObservableObject {
             if transcriptionHistory.count > maxHistoryCount {
                 transcriptionHistory.removeLast()
             }
+
+            // Increment V1 usage counter for discovery badge
+            V1UsageCounter.increment()
+
             let undoableState = AppState.undoable(text: result.text, method: method)
             transition(to: undoableState)
             audioFeedback.playSuccess()
