@@ -51,6 +51,22 @@ except ImportError:
         return text
     log.warning("opencc not installed — traditional Chinese will not be converted")
 
+MIN_AUDIO_DURATION = 0.3  # seconds — below this, models hallucinate
+MIN_AUDIO_RMS = 0.001     # RMS energy — below this, it's silence
+
+
+def validate_audio(audio, sr: int) -> str | None:
+    """Return an error string if audio is too short or silent, else None."""
+    import numpy as np
+    duration = len(audio) / sr
+    if duration < MIN_AUDIO_DURATION:
+        return f"Audio too short ({duration:.2f}s < {MIN_AUDIO_DURATION}s)"
+    rms = float(np.sqrt(np.mean(np.array(audio, dtype=np.float32) ** 2)))
+    if rms < MIN_AUDIO_RMS:
+        return f"Audio is silence (RMS {rms:.6f} < {MIN_AUDIO_RMS})"
+    return None
+
+
 # Shared state
 backend = None  # "onnx", "huggingface", or "whisper"
 processor = None
@@ -166,6 +182,11 @@ def transcribe_onnx(wav_path: str, language: str = "en"):
     audio = load_audio(wav_path, sampling_rate=16000)
     duration = len(audio) / 16000
     log.info(f"Audio: {len(audio)} samples, {duration:.2f}s")
+
+    err = validate_audio(audio, 16000)
+    if err:
+        log.warning(f"Audio validation failed: {err}")
+        return {"text": "", "language": "en", "duration_ms": 0}
 
     # CohereAsrProcessor requires an explicit language argument.
     # When "auto", default to "en" — the model transcribes multilingual
@@ -324,6 +345,11 @@ def transcribe_huggingface(wav_path: str, language: str = "en"):
 
     log.info(f"Final audio: {len(audio)} samples, {len(audio)/sr:.2f}s")
 
+    err = validate_audio(audio, sr)
+    if err:
+        log.warning(f"Audio validation failed: {err}")
+        return {"text": "", "language": "en", "duration_ms": 0}
+
     # CohereAsrProcessor requires explicit language; default to "en" for auto-detect
     proc_lang = "en" if language == "auto" else language
     inputs = processor(audio, sampling_rate=sr, return_tensors="pt", language=proc_lang)
@@ -430,6 +456,11 @@ def transcribe_whisper(wav_path: str, language: str = "en"):
         sr = 16000
 
     log.info(f"Audio: {len(audio)} samples, {len(audio)/sr:.2f}s")
+
+    err = validate_audio(audio, sr)
+    if err:
+        log.warning(f"Audio validation failed: {err}")
+        return {"text": "", "language": "en", "duration_ms": 0}
 
     inputs = processor(audio, sampling_rate=sr, return_tensors="pt")
 

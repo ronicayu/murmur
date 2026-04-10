@@ -151,6 +151,11 @@ final class TranscriptionService: TranscriptionServiceProtocol {
             throw MurmurError.transcriptionFailed("No text in response")
         }
 
+        // Empty text means audio was too short/silent or hallucination was detected
+        guard !text.isEmpty else {
+            throw MurmurError.silenceDetected
+        }
+
         // Length limit on injected text (S2 mitigation)
         let sanitizedText = String(text.prefix(10_000))
 
