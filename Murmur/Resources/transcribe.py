@@ -332,13 +332,29 @@ def transcribe_huggingface(wav_path: str, language: str = "en"):
     input_features = inputs.input_features.to(device=device, dtype=hf_model.dtype)
     log.info(f"Input features shape: {input_features.shape}, dtype: {input_features.dtype}")
 
+    # Pass decoder_input_ids (language prompt) from the processor
+    generate_kwargs = {"max_new_tokens": 448, "repetition_penalty": 1.2}
+    if "decoder_input_ids" in inputs:
+        generate_kwargs["decoder_input_ids"] = inputs.decoder_input_ids.to(device=device)
+        log.info(f"Decoder prompt IDs: {inputs.decoder_input_ids.flatten().tolist()}")
+
     t0 = time.time()
     with torch.no_grad():
-        generated_ids = hf_model.generate(input_features, max_new_tokens=448)
+        generated_ids = hf_model.generate(input_features, **generate_kwargs)
     inference_time = time.time() - t0
     log.info(f"Inference took {inference_time:.2f}s, generated {generated_ids.shape[1]} tokens")
 
     text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+
+    # Detect hallucination: if output has heavy repetition, return empty
+    words = text.split()
+    if len(words) > 10:
+        from collections import Counter
+        freq = Counter(words)
+        most_common_count = freq.most_common(1)[0][1]
+        if most_common_count > len(words) * 0.3:
+            log.warning(f"Hallucination detected: '{words[0]}' repeated {most_common_count}/{len(words)} times")
+            text = ""
     log.info(f"Transcription: '{text[:200]}'")
 
     elapsed_ms = int((time.time() - start) * 1000)
