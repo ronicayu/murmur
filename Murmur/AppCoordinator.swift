@@ -169,9 +169,107 @@ final class AppCoordinator: ObservableObject {
     func stop() {
         hotkeyTask?.cancel()
         audioLevelTask?.cancel()
+        longTranscribeTask?.cancel()
         hotkey.unregister()
         audio.cancelRecording()
         Task { await transcription.killProcess() }
+    }
+
+    // MARK: - Window Transcription Coordination
+
+    /// Called by TranscriptionWindowModel when the user initiates transcription
+    /// in the transcription window. Transitions the coordinator to .transcribing
+    /// so the global hotkey guard blocks new recordings (voice input paused).
+    ///
+    /// Must only be called when coordinator is currently .idle or .error.
+    func beginWindowTranscription() {
+        guard state == .idle || state.isError else { return }
+        transition(to: .transcribing)
+    }
+
+    /// Called by TranscriptionWindowModel when window transcription ends
+    /// (success, cancel, or error). Releases the .transcribing hold so
+    /// voice input (hotkey) resumes.
+    func endWindowTranscription() {
+        guard state == .transcribing else { return }
+        transition(to: .idle)
+    }
+
+    // MARK: - Long Transcription
+
+    /// Task handle for an in-flight transcribeLong operation.
+    /// Cancel this to abort chunked transcription and resume voice input.
+    private(set) var longTranscribeTask: Task<Void, Never>?
+
+    /// Transcribe a long audio file using chunked processing.
+    ///
+    /// - Pauses voice input (hotkey suppressed while state == .transcribing).
+    /// - Reports progress via `onProgress` callback on the Main actor.
+    /// - Resumes voice input (state → .idle) on completion, error, or cancellation.
+    ///
+    /// Only one call may run at a time; a second call cancels the first.
+    func transcribeLong(
+        audioURL: URL,
+        onProgress: @escaping @MainActor (TranscriptionProgress) -> Void
+    ) {
+        // Cancel any prior long transcription
+        longTranscribeTask?.cancel()
+
+        longTranscribeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            // Pause voice input — hotkey guard already blocks new recordings while .transcribing
+            self.transition(to: .transcribing)
+            self.pill.show(state: .transcribing)
+
+            let lang = self.resolveTranscriptionLanguage()
+
+            do {
+                let result = try await self.transcription.transcribeLong(
+                    audioURL: audioURL,
+                    language: lang,
+                    onProgress: { progress in
+                        Task { @MainActor in onProgress(progress) }
+                    }
+                )
+
+                self.transition(to: .injecting)
+                self.pill.show(state: .injecting)
+
+                let method = try await withTimeout(seconds: 5, operation: "text injection") {
+                    try await self.injection.inject(text: result.text)
+                }
+
+                self.lastTranscription = result.text
+                self.lastLanguage = result.language
+                self.transcriptionHistory.insert(
+                    (text: result.text, language: result.language, date: Date()), at: 0
+                )
+                if self.transcriptionHistory.count > self.maxHistoryCount {
+                    self.transcriptionHistory.removeLast()
+                }
+
+                let undoableState = AppState.undoable(text: result.text, method: method)
+                self.transition(to: undoableState)
+                self.audioFeedback.playSuccess()
+                self.pill.show(state: undoableState)
+                self.pill.hide(after: 2)
+
+            } catch is CancellationError {
+                // P1-3 fix: match on the error type, not Task.isCancelled.
+                // Task.isCancelled in a catch block queries the *current task's*
+                // cancellation flag, which may be true even when the thrown error
+                // is a real failure that arrived before the cancel signal.
+                self.transition(to: .idle)
+                self.pill.hide()
+            } catch {
+                let err = self.mapError(error)
+                self.transition(to: .error(err))
+                self.audioFeedback.playError()
+                self.pill.show(state: .error(err))
+                self.pill.hide(after: 2)
+            }
+        }
     }
 
     // MARK: - Event Handling

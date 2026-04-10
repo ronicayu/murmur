@@ -1,0 +1,24 @@
+# Phase 0 spike — dev/test dependencies only
+# Install: pip install -r Murmur/Scripts/requirements-dev.txt
+#
+# These are NOT bundled with the app. For production deps see:
+#   Murmur/Resources/requirements.txt
+
+# Audio I/O — required by phase0_spike.py, phase0_chunk_test.py, prepare_test_audio.py
+soundfile>=0.12.0
+numpy>=1.24.0
+
+# Accuracy measurement
+jiwer==3.0.4
+
+# Memory monitoring
+psutil==6.1.1
+
+# VAD (optional — energy-based fallback used if absent)
+webrtcvad==2.0.10
+
+# Progress bars (optional — used by prepare_test_audio.py)
+tqdm==4.67.1
+
+# Test audio download
+requests==2.32.3

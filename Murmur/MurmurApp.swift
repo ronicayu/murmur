@@ -5,8 +5,10 @@ import Combine
 struct MurmurApp: App {
     @StateObject private var modelManager: ModelManager
     @StateObject private var coordinator: AppCoordinator
+    @StateObject private var historyService: TranscriptionHistoryService
     @State private var settingsWindow: NSWindow?
     @State private var onboardingWindow: NSWindow?
+    @State private var transcriptionWindowController: TranscriptionWindowController?
     @State private var launched = false
 
     init() {
@@ -16,13 +18,15 @@ struct MurmurApp: App {
         let ts = TranscriptionService(modelPath: modelPath)
         _modelManager = StateObject(wrappedValue: mm)
         _coordinator = StateObject(wrappedValue: AppCoordinator(transcription: ts))
+        _historyService = StateObject(wrappedValue: TranscriptionHistoryService())
     }
 
     var body: some Scene {
         MenuBarExtra {
             MenuBarView(
                 coordinator: coordinator,
-                onOpenSettings: { showSettings() }
+                onOpenSettings: { showSettings() },
+                onOpenTranscription: { showTranscriptionWindow() }
             )
         } label: {
             Label("Murmur", systemImage: menuBarIconName)
@@ -30,6 +34,14 @@ struct MurmurApp: App {
                 .onAppear {
                     guard !launched else { return }
                     launched = true
+                    // Initialise window controller (registers Cmd+Shift+T hotkey)
+                    transcriptionWindowController = TranscriptionWindowController(
+                        historyService: historyService,
+                        coordinator: coordinator
+                    )
+                    // Scan for orphaned recordings from prior crash
+                    historyService.scanAndRecoverOrphans()
+
                     if !UserDefaults.standard.bool(forKey: "onboardingCompleted") {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                             showOnboarding()
@@ -45,8 +57,16 @@ struct MurmurApp: App {
                         coordinator.preloadModelInBackground()
                     }
                 }
+                // Listen for settings notification from Transcription window
+                .onReceive(NotificationCenter.default.publisher(for: .openSettings)) { _ in
+                    showSettings()
+                }
         }
         .menuBarExtraStyle(.window)
+    }
+
+    private func showTranscriptionWindow() {
+        transcriptionWindowController?.openOrFocus()
     }
 
     private var menuBarIconName: String {

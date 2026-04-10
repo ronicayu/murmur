@@ -1,6 +1,20 @@
 import Foundation
 import os
 
+// MARK: - os_unfair_lock helpers (Swift-friendly wrappers)
+
+/// A non-recursive unfair lock wrapping os_unfair_lock.
+/// Used to guard single-shot continuation resume (prevents double-resume UB).
+private final class UnfairLock: @unchecked Sendable {
+    private var _lock = os_unfair_lock()
+
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        os_unfair_lock_lock(&_lock)
+        defer { os_unfair_lock_unlock(&_lock) }
+        return try body()
+    }
+}
+
 enum DetectedLanguage: String, Sendable {
     case english = "en"
     case chinese = "zh"
@@ -13,11 +27,139 @@ struct TranscriptionResult: Sendable {
     let durationMs: Int
 }
 
+/// Reports per-chunk progress during a long transcription.
+struct TranscriptionProgress: Sendable {
+    let currentChunk: Int
+    let totalChunks: Int
+    let partialText: String
+}
+
 protocol TranscriptionServiceProtocol {
     func transcribe(audioURL: URL, language: String) async throws -> TranscriptionResult
+    func transcribeLong(
+        audioURL: URL,
+        language: String,
+        onProgress: @escaping (TranscriptionProgress) -> Void
+    ) async throws -> TranscriptionResult
     func preloadModel() async throws
     func unloadModel() async
     var isModelLoaded: Bool { get }
+}
+
+// MARK: - JSONLineParser
+//
+// Reads newline-delimited JSON from a Pipe until it receives a `{"type":"result",...}` line.
+// Each `{"type":"progress",...}` line triggers the onProgress callback.
+// This helper is extracted from the actor so it can be unit-tested independently.
+
+struct JSONLineParser {
+    let pipe: Pipe
+
+    /// Read JSON lines from the pipe's stdout handle until a type=result arrives.
+    /// Calls onProgress for each type=progress line.
+    /// Throws MurmurError.transcriptionFailed on error fields or premature EOF.
+    ///
+    /// Thread-safety: the `didResume` flag (guarded by `resumeLock`) ensures the
+    /// continuation is fulfilled exactly once even when Task cancellation and a
+    /// concurrent EOF on the DispatchQueue thread race to resume it.
+    func readUntilResult(
+        onProgress: @escaping (TranscriptionProgress) -> Void
+    ) async throws -> TranscriptionResult {
+        return try await withCheckedThrowingContinuation { continuation in
+            // P0 fix: guard against double-resume from concurrent cancellation
+            // handler (killProcessFromOutside) + DispatchQueue EOF path.
+            let resumeLock = UnfairLock()
+            var didResume = false
+
+            func safeResume(with result: Result<TranscriptionResult, Error>) {
+                resumeLock.withLock {
+                    guard !didResume else { return }
+                    didResume = true
+                    continuation.resume(with: result)
+                }
+            }
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                let handle = pipe.fileHandleForReading
+                var buffer = Data()
+
+                while true {
+                    let chunk = handle.availableData
+                    if chunk.isEmpty {
+                        // EOF before result — process was killed or pipe was closed
+                        safeResume(with: .failure(MurmurError.transcriptionFailed(
+                            "Python stdout closed before result event"
+                        )))
+                        return
+                    }
+                    buffer.append(chunk)
+
+                    // Process all complete lines in buffer
+                    while let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                        let lineData = buffer[buffer.startIndex..<newlineIndex]
+                        buffer.removeSubrange(buffer.startIndex...newlineIndex)
+
+                        guard !lineData.isEmpty else { continue }
+
+                        guard
+                            let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+                        else {
+                            safeResume(with: .failure(MurmurError.transcriptionFailed(
+                                "Invalid JSON from Python"
+                            )))
+                            return
+                        }
+
+                        // Error from Python
+                        if let errMsg = json["error"] as? String {
+                            safeResume(with: .failure(MurmurError.transcriptionFailed(errMsg)))
+                            return
+                        }
+
+                        let eventType = json["type"] as? String
+
+                        if eventType == "progress" {
+                            let progress = TranscriptionProgress(
+                                currentChunk: json["chunk"] as? Int ?? 0,
+                                totalChunks: json["total"] as? Int ?? 0,
+                                partialText: json["text"] as? String ?? ""
+                            )
+                            onProgress(progress)
+
+                        } else if eventType == "result" {
+                            guard let text = json["text"] as? String else {
+                                safeResume(with: .failure(MurmurError.transcriptionFailed(
+                                    "No text in result event"
+                                )))
+                                return
+                            }
+                            let langStr = json["language"] as? String ?? "unknown"
+                            let language = DetectedLanguage(rawValue: langStr) ?? .unknown
+                            let durationMs = json["duration_ms"] as? Int ?? 0
+                            safeResume(with: .success(TranscriptionResult(
+                                text: text,
+                                language: language,
+                                durationMs: durationMs
+                            )))
+                            return
+
+                        } else {
+                            // P2-1 fix: unknown event type — log and continue rather
+                            // than crashing. Keeps forward-compatibility with new
+                            // Python-side diagnostic events (e.g. heartbeat).
+                            // swiftlint:disable:next no_direct_standard_out_logs
+                            os_log(
+                                .info,
+                                "JSONLineParser: unknown event type '%{public}@' — skipping",
+                                eventType ?? "<nil>"
+                            )
+                            // continue inner while loop
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Manages a long-lived Python subprocess for transcription.
@@ -114,6 +256,12 @@ actor TranscriptionService: TranscriptionServiceProtocol {
     }
 
     func transcribe(audioURL: URL, language: String = "en") async throws -> TranscriptionResult {
+        // C1 guard: reject short transcription while a long transcription holds the pipe.
+        // Concurrent access would interleave stdin writes and corrupt the JSON protocol.
+        guard !_isLongRunning else {
+            throw MurmurError.transcriptionFailed("Long transcription in progress")
+        }
+
         if !_isModelLoaded {
             try await preloadModel()
         }
@@ -158,6 +306,84 @@ actor TranscriptionService: TranscriptionServiceProtocol {
         _ = try? await send(command: ["cmd": "unload"])
         _isModelLoaded = false
         logger.info("Model unloaded")
+    }
+
+    // MARK: - Long Transcription
+
+    /// True while a transcribeLong call is in flight. Enforces max-1 concurrency.
+    private var _isLongRunning = false
+
+    /// Transcribe a long audio file using chunked processing.
+    ///
+    /// Sends `{"cmd":"transcribe_long",...}` to Python and reads multiple JSON
+    /// lines until a `{"type":"result",...}` arrives. Each `{"type":"progress",...}`
+    /// line triggers `onProgress`.
+    ///
+    /// - Parameters:
+    ///   - audioURL: Path to the audio file (wav, m4a, mp3, etc.)
+    ///   - language: BCP-47 language code, or "auto"
+    ///   - onProgress: Called on each chunk completion with partial text.
+    /// - Returns: Final `TranscriptionResult` when all chunks are done.
+    /// - Throws: `MurmurError.transcriptionFailed("transcribeLong already running")` if
+    ///   another long transcription is already in flight.
+    ///   `MurmurError.transcriptionFailed(...)` on Python errors or protocol violations.
+    func transcribeLong(
+        audioURL: URL,
+        language: String,
+        onProgress: @escaping (TranscriptionProgress) -> Void
+    ) async throws -> TranscriptionResult {
+        guard !_isLongRunning else {
+            throw MurmurError.transcriptionFailed("transcribeLong already running")
+        }
+        _isLongRunning = true
+        defer { _isLongRunning = false }
+
+        if !_isModelLoaded {
+            try await preloadModel()
+        }
+
+        try ensureProcessRunning()
+
+        guard let stdinPipe, let stdoutPipe else {
+            throw MurmurError.transcriptionFailed("No pipe to Python process")
+        }
+
+        let command: [String: Any] = [
+            "cmd": "transcribe_long",
+            "audio_path": audioURL.path,
+            "language": language,
+            "chunk_sec": 30,
+            "overlap_sec": 5,
+        ]
+
+        let data = try JSONSerialization.data(withJSONObject: command)
+        var line = data
+        line.append(contentsOf: [0x0A]) // newline
+
+        do {
+            try stdinPipe.fileHandleForWriting.write(contentsOf: line)
+        } catch {
+            killProcess()
+            throw MurmurError.transcriptionFailed("Python process died unexpectedly")
+        }
+
+        logger.info("transcribeLong: sent command for \(audioURL.lastPathComponent)")
+
+        let parser = JSONLineParser(pipe: stdoutPipe)
+
+        return try await withTaskCancellationHandler {
+            let result = try await parser.readUntilResult(onProgress: onProgress)
+            // P2-2 fix: truncate to 10_000 chars, consistent with transcribe()
+            let sanitizedText = String(result.text.prefix(10_000))
+            logger.info("transcribeLong: complete — \(sanitizedText.prefix(80))")
+            return TranscriptionResult(
+                text: sanitizedText,
+                language: result.language,
+                durationMs: result.durationMs
+            )
+        } onCancel: { [weak self] in
+            self?.killProcessFromOutside()
+        }
     }
 
     // MARK: - Subprocess Management

@@ -5,6 +5,7 @@ struct MenuBarView: View {
     @ObservedObject var coordinator: AppCoordinator
     @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
     var onOpenSettings: () -> Void = {}
+    var onOpenTranscription: () -> Void = {}
 
     /// Quick-access languages shown as capsule buttons in the menu bar
     private static let quickLanguages: [(code: String, label: String)] = [
@@ -38,6 +39,10 @@ struct MenuBarView: View {
                 Divider().padding(.horizontal, 8)
             }
 
+            // Open Transcription
+            openTranscriptionButton
+            Divider().padding(.horizontal, 8)
+
             // Actions
             menuButton(icon: "keyboard", label: hotkeyLabel) {
                 onOpenSettings()
@@ -61,6 +66,42 @@ struct MenuBarView: View {
             .padding(.bottom, 4)
         }
         .frame(width: 260)
+    }
+
+    // MARK: - Open Transcription
+
+    private var openTranscriptionButton: some View {
+        Button {
+            onOpenTranscription()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "waveform")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16, alignment: .center)
+                Text("Open Transcription")
+                    .font(.system(.callout, design: .rounded))
+                Spacer()
+                // Active session indicator
+                if coordinator.state == .transcribing {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 8, height: 8)
+                } else if case .recording = coordinator.state {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 8, height: 8)
+                        .symbolEffect(.pulse)
+                }
+                Text("⌘⇧T")
+                    .font(.system(.caption2, design: .rounded))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(MenuRowButtonStyle())
+        .padding(.horizontal, 6)
+        .padding(.vertical, 1)
     }
 
     // MARK: - Language Quick-Switcher

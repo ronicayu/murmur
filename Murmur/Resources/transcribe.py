@@ -14,6 +14,7 @@ import sys
 import time
 import os
 import logging
+import subprocess
 
 # Prevent OMP duplicate library crash on macOS with Homebrew Python + torch/onnxruntime.
 # Python 3.14 pthread changes break OMP's pthread_mutex_init with explicit thread counts.
@@ -495,6 +496,328 @@ def transcribe_whisper(wav_path: str, language: str = "en"):
 
 
 # ---------------------------------------------------------------------------
+# Chunked transcription helpers (serial, low-RAM)
+# ---------------------------------------------------------------------------
+
+# Average spoken words per second — used for overlap trimming heuristic.
+# English: ~2.5 wps; Mandarin: ~3.5 syllables/s but tokens differ.
+# A conservative 2 wps gives a safe lower bound for trimming.
+_WORDS_PER_SECOND = 2.0
+
+
+def compute_chunk_boundaries(
+    total_samples: int,
+    chunk_samples: int,
+    overlap_samples: int,
+) -> list[tuple[int, int]]:
+    """
+    Return a list of (start, end) sample-index pairs for serial chunk processing.
+
+    Rules:
+    - Each chunk is chunk_samples long (except possibly the last).
+    - Adjacent chunks overlap by overlap_samples samples.
+    - The final chunk end is clamped to total_samples.
+    - A single-chunk result is returned when total_samples <= chunk_samples.
+    """
+    if total_samples <= 0:
+        return []
+
+    step = chunk_samples - overlap_samples
+    if step <= 0:
+        raise ValueError(f"overlap_samples ({overlap_samples}) must be < chunk_samples ({chunk_samples})")
+
+    boundaries = []
+    start = 0
+    while start < total_samples:
+        end = min(start + chunk_samples, total_samples)
+        boundaries.append((start, end))
+        if end == total_samples:
+            break
+        start += step
+
+    return boundaries
+
+
+def estimate_words_in_duration(duration_sec: float) -> int:
+    """
+    Estimate the number of words spoken in duration_sec at _WORDS_PER_SECOND.
+
+    Returns 0 for non-positive durations.
+    """
+    if duration_sec <= 0.0:
+        return 0
+    return max(1, int(duration_sec * _WORDS_PER_SECOND))
+
+
+def _load_audio_any_format(audio_path: str) -> "np.ndarray":
+    """
+    Load audio from any supported format (wav, m4a, mp3, ogg, flac) as a
+    mono float32 numpy array at 16 kHz.
+
+    m4a and other non-wav formats are decoded via ffmpeg piped to wav.
+    Falls back to soundfile for natively supported formats.
+    """
+    import numpy as np
+
+    ext = os.path.splitext(audio_path)[1].lower()
+
+    if ext in (".wav",):
+        # Fast path: soundfile handles wav natively
+        try:
+            import soundfile as sf
+            audio, sr = sf.read(audio_path)
+            if len(np.array(audio).shape) > 1:
+                audio = np.mean(audio, axis=1)
+            if sr != 16000:
+                import librosa
+                audio = librosa.resample(audio.astype(np.float32), orig_sr=sr, target_sr=16000)
+            return audio.astype(np.float32)
+        except Exception as e:
+            log.warning(f"soundfile failed for {audio_path}: {e}, trying ffmpeg")
+
+    # Universal path: ffmpeg -> 16 kHz mono PCM s16le -> numpy
+    ffmpeg_cmd = [
+        "ffmpeg", "-y",
+        "-i", audio_path,
+        "-ar", "16000",
+        "-ac", "1",
+        "-f", "s16le",
+        "-acodec", "pcm_s16le",
+        "pipe:1",
+    ]
+    try:
+        result = subprocess.run(
+            ffmpeg_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg failed (rc={result.returncode}): {result.stderr.decode(errors='replace')[:400]}"
+            )
+        raw = np.frombuffer(result.stdout, dtype=np.int16)
+        return raw.astype(np.float32) / 32768.0
+    except FileNotFoundError:
+        raise RuntimeError("ffmpeg not found — install via: brew install ffmpeg")
+
+
+def _decode_single_chunk_onnx(
+    chunk_audio: "np.ndarray",
+    language: str,
+) -> str:
+    """
+    Run encoder + autoregressive decoder on a single audio chunk.
+
+    Returns the decoded text string (empty string if chunk is silent/too short).
+    """
+    import numpy as np
+
+    global processor, encoder_sess, decoder_sess, gen_config
+
+    err = validate_audio(chunk_audio, 16000)
+    if err:
+        log.debug(f"Chunk skipped: {err}")
+        return ""
+
+    proc_lang = "en" if language == "auto" else language
+    inputs = processor(chunk_audio, sampling_rate=16000, return_tensors="np", language=proc_lang)
+    input_features = inputs["input_features"].astype(np.float32)
+
+    decoder_prompt = inputs["decoder_input_ids"].flatten().tolist()
+
+    # Encode
+    enc_out = encoder_sess.run(None, {"input_features": input_features})
+    encoder_hidden = enc_out[0]
+
+    # Decode (autoregressive with KV cache)
+    eos_id = gen_config["eos_token_id"]
+    generated = list(decoder_prompt)
+
+    past_kv = {}
+    for i in range(NUM_DECODER_LAYERS):
+        for part in ("decoder", "encoder"):
+            past_kv[f"past_key_values.{i}.{part}.key"] = np.zeros((1, 8, 0, 128), dtype=np.float16)
+            past_kv[f"past_key_values.{i}.{part}.value"] = np.zeros((1, 8, 0, 128), dtype=np.float16)
+
+    use_cache = False
+    max_tokens = 448
+
+    for step in range(max_tokens):
+        if not use_cache:
+            cur_ids = np.array([generated], dtype=np.int64)
+            cur_len = len(generated)
+        else:
+            cur_ids = np.array([[generated[-1]]], dtype=np.int64)
+            cur_len = 1
+
+        past_dec_len = past_kv["past_key_values.0.decoder.key"].shape[2]
+
+        feed = {
+            "input_ids": cur_ids,
+            "attention_mask": np.ones((1, past_dec_len + cur_len), dtype=np.int64),
+            "position_ids": np.arange(past_dec_len, past_dec_len + cur_len, dtype=np.int64).reshape(1, -1),
+            "num_logits_to_keep": np.array(1, dtype=np.int64),
+            "encoder_hidden_states": encoder_hidden,
+        }
+        feed.update(past_kv)
+
+        outputs = decoder_sess.run(None, feed)
+        logits = outputs[0]
+        next_token = int(np.argmax(logits[0, -1]))
+        generated.append(next_token)
+
+        if next_token == eos_id:
+            break
+
+        idx = 1
+        for i in range(NUM_DECODER_LAYERS):
+            past_kv[f"past_key_values.{i}.decoder.key"] = outputs[idx].astype(np.float16)
+            past_kv[f"past_key_values.{i}.decoder.value"] = outputs[idx + 1].astype(np.float16)
+            past_kv[f"past_key_values.{i}.encoder.key"] = outputs[idx + 2].astype(np.float16)
+            past_kv[f"past_key_values.{i}.encoder.value"] = outputs[idx + 3].astype(np.float16)
+            idx += 4
+
+        use_cache = True
+
+    text = processor.tokenizer.decode(generated, skip_special_tokens=True).strip()
+    return text
+
+
+def transcribe_onnx_chunked(
+    audio_path: str,
+    language: str = "en",
+    chunk_sec: int = 30,
+    overlap_sec: int = 5,
+) -> dict:
+    """
+    Transcribe a long audio file by processing one 30-second chunk at a time.
+
+    Memory footprint is bounded to model baseline + one chunk's tensors (~100 MB).
+    Progress events are written to stdout as newline-delimited JSON so the
+    Swift host can update its UI:
+        {"type": "progress", "chunk": 3, "total": 10, "text": "<partial text>"}
+
+    Final return value (also written to stdout as a result event):
+        {"type": "result", "text": "...", "language": "en", "duration_ms": 12345, "chunks": 10}
+
+    Overlap handling: the first chunk is kept in full. For each subsequent chunk,
+    the leading estimate_words_in_duration(overlap_sec) words are discarded,
+    which corresponds (approximately) to the overlap region already transcribed
+    by the previous chunk.
+    """
+    import numpy as np
+
+    start_time = time.time()
+
+    log.info(f"[chunked] Loading audio: {audio_path}")
+    audio = _load_audio_any_format(audio_path)
+    total_samples = len(audio)
+    duration_sec_total = total_samples / 16000
+    log.info(f"[chunked] Audio: {total_samples} samples, {duration_sec_total:.2f}s")
+
+    chunk_samples = chunk_sec * 16000
+    overlap_samples = overlap_sec * 16000
+
+    boundaries = compute_chunk_boundaries(total_samples, chunk_samples, overlap_samples)
+    total_chunks = len(boundaries)
+    log.info(f"[chunked] {total_chunks} chunks (chunk={chunk_sec}s, overlap={overlap_sec}s)")
+
+    # C6: character-based trimming rate for Chinese (empirically ~4 chars/sec for
+    # conversational speech; word-based split() is ineffective on CJK text).
+    CHINESE_CHARS_PER_SEC = 4
+
+    accumulated_texts: list[str] = []
+    words_to_trim = estimate_words_in_duration(float(overlap_sec))
+    chars_to_trim = int(overlap_sec * CHINESE_CHARS_PER_SEC)
+
+    def _is_cjk_dominant(text: str) -> bool:
+        """Return True when more than 30 % of alphabetic chars are CJK codepoints."""
+        cjk = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+        alpha = sum(1 for c in text if c.isalpha())
+        return alpha > 0 and cjk / alpha > 0.3
+
+    def _trim_overlap(text: str) -> str:
+        """
+        Remove the leading overlap region from a non-first chunk.
+
+        Strategy:
+        - CJK-dominant text: trim the first `chars_to_trim` characters.
+          Chinese transcription output has no inter-word spaces so split() is
+          ineffective — character count is the correct unit.
+        - Latin / mixed text: trim the first `words_to_trim` whitespace tokens,
+          preserving the existing word-based heuristic.
+
+        Returns an empty string when the entire chunk falls within the overlap.
+        """
+        if _is_cjk_dominant(text):
+            if len(text) > chars_to_trim:
+                return text[chars_to_trim:]
+            return ""
+        else:
+            words = text.split()
+            if len(words) > words_to_trim:
+                return " ".join(words[words_to_trim:])
+            return ""
+
+    for chunk_idx, (start, end) in enumerate(boundaries):
+        chunk_audio = audio[start:end]
+        log.info(f"[chunked] Chunk {chunk_idx+1}/{total_chunks}: samples [{start}:{end}]")
+
+        chunk_text = _decode_single_chunk_onnx(chunk_audio, language)
+
+        # Trim overlap region from the start of non-first chunks
+        if chunk_idx > 0 and chunk_text:
+            chunk_text = _trim_overlap(chunk_text)
+
+        if chunk_text:
+            accumulated_texts.append(chunk_text)
+
+        # P1-2: join chunks with paragraph breaks instead of a single space.
+        # Each chunk is ~30 seconds of speech; a blank line between chunks
+        # produces readable paragraphs without requiring timestamp data.
+        partial_text = "\n\n".join(accumulated_texts)
+
+        # Language detection on partial text
+        chinese_chars = sum(1 for c in partial_text if "\u4e00" <= c <= "\u9fff")
+        total_alpha = sum(1 for c in partial_text if c.isalpha())
+        detected_lang = "zh" if total_alpha > 0 and chinese_chars / max(total_alpha, 1) > 0.3 else "en"
+
+        progress_event = {
+            "type": "progress",
+            "chunk": chunk_idx + 1,
+            "total": total_chunks,
+            "text": partial_text,
+        }
+        sys.stdout.write(json.dumps(progress_event) + "\n")
+        sys.stdout.flush()
+        log.info(f"[chunked] Progress {chunk_idx+1}/{total_chunks}: '{chunk_text[:80]}'")
+
+    full_text = "\n\n".join(accumulated_texts).strip()
+
+    # Final language detection
+    chinese_chars = sum(1 for c in full_text if "\u4e00" <= c <= "\u9fff")
+    total_alpha = sum(1 for c in full_text if c.isalpha())
+    detected_lang = "zh" if total_alpha > 0 and chinese_chars / max(total_alpha, 1) > 0.3 else "en"
+
+    if detected_lang == "zh":
+        full_text = to_simplified(full_text)
+
+    elapsed_ms = int((time.time() - start_time) * 1000)
+
+    result = {
+        "type": "result",
+        "text": full_text,
+        "language": detected_lang,
+        "duration_ms": elapsed_ms,
+        "chunks": total_chunks,
+    }
+
+    log.info(f"[chunked] Done: {total_chunks} chunks, {elapsed_ms}ms, text='{full_text[:200]}'")
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -564,6 +887,23 @@ def main():
                 response = load_model(cmd["model_path"])
             elif action == "transcribe":
                 response = transcribe(cmd["wav_path"], language=cmd.get("language", "auto"))
+            elif action == "transcribe_long":
+                # P1-2 fix: distinguish "model not loaded" from "wrong backend".
+                # HuggingFace/Whisper backends leave encoder_sess=None, which
+                # previously returned a misleading "Model not loaded" error.
+                if backend is None:
+                    response = {"error": "Model not loaded — send 'load' command first"}
+                elif backend != "onnx":
+                    response = {"error": f"transcribe_long requires ONNX backend (current: {backend})"}
+                elif encoder_sess is None or decoder_sess is None:
+                    response = {"error": "ONNX model not fully loaded — send 'load' command first"}
+                else:
+                    response = transcribe_onnx_chunked(
+                        cmd["audio_path"],
+                        language=cmd.get("language", "en"),
+                        chunk_sec=int(cmd.get("chunk_sec", 30)),
+                        overlap_sec=int(cmd.get("overlap_sec", 5)),
+                    )
             elif action == "unload":
                 response = unload_model()
             else:
