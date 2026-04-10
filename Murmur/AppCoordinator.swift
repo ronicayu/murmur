@@ -1,4 +1,5 @@
 import SwiftUI
+import Carbon
 import HotKey
 import os
 
@@ -243,8 +244,8 @@ final class AppCoordinator: ObservableObject {
             let wav = try await withTimeout(seconds: 5, operation: "stop recording") {
                 try await self.audio.stopRecording()
             }
+            let lang = resolveTranscriptionLanguage()
             let result = try await withTimeout(seconds: 120, operation: "transcription") {
-                let lang = UserDefaults.standard.string(forKey: "transcriptionLanguage") ?? "en"
                 return try await self.transcription.transcribe(audioURL: wav, language: lang)
             }
 
@@ -350,6 +351,35 @@ final class AppCoordinator: ObservableObject {
             NSEvent.removeMonitor(monitor)
             undoMonitor = nil
         }
+    }
+
+    /// When language is "auto", resolve to the active input method's language.
+    /// e.g., Pinyin/Wubi → "zh", ABC/US → "en", Kotoeri → "ja"
+    private func resolveTranscriptionLanguage() -> String {
+        let stored = UserDefaults.standard.string(forKey: "transcriptionLanguage") ?? "auto"
+        guard stored == "auto" else { return stored }
+
+        if let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
+           let ptr = TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages),
+           let languages = Unmanaged<CFArray>.fromOpaque(ptr).takeUnretainedValue() as? [String],
+           let primary = languages.first {
+            // Map input source language codes to our supported codes
+            let prefix = String(primary.prefix(2))
+            switch prefix {
+            case "zh": return "zh"
+            case "ja": return "ja"
+            case "ko": return "ko"
+            case "fr": return "fr"
+            case "de": return "de"
+            case "es": return "es"
+            case "pt": return "pt"
+            case "it": return "it"
+            case "vi": return "vi"
+            case "ar": return "ar"
+            default: return "en"
+            }
+        }
+        return "en"
     }
 
     private func mapError(_ error: Error) -> MurmurError {
