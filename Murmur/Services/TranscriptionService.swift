@@ -48,8 +48,10 @@ final class TranscriptionService: TranscriptionServiceProtocol {
         let changed = modelPath != newPath
         modelPath = newPath
         lock.unlock()
-        if changed && isModelLoaded {
-            // Kill the process so it reloads with the new model path
+        if changed {
+            // Always kill the process on path change so the new model loads cleanly.
+            // Previously only killed when isModelLoaded was true, which left stale
+            // processes running after a backend switch interrupted a preload.
             killProcess()
         }
     }

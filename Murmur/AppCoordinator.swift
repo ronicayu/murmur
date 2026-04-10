@@ -71,15 +71,22 @@ final class AppCoordinator: ObservableObject {
         preloadModelInBackground()
     }
 
-    /// Preload the model so the first transcription is instant
+    /// Preload the model so the first transcription is instant.
+    /// Cancels any in-flight preload to avoid concurrent `send()` calls
+    /// that would corrupt the JSON protocol.
+    private var preloadTask: Task<Void, Never>?
+
     func preloadModelInBackground() {
-        Task.detached { [weak self] in
+        preloadTask?.cancel()
+        preloadTask = Task.detached { [weak self] in
             guard let self else { return }
             do {
                 try await self.transcription.preloadModel()
                 Self.log.info("Model preloaded successfully")
             } catch {
-                Self.log.warning("Model preload failed (will retry on first use): \(error)")
+                if !Task.isCancelled {
+                    Self.log.warning("Model preload failed (will retry on first use): \(error)")
+                }
             }
         }
     }
