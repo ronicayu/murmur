@@ -48,11 +48,17 @@ fi
 echo "→ Signing..."
 codesign --force --deep --sign - "$APP"
 
-# 4. Create DMG
+# 4. Create DMG with Applications shortcut (drag-to-install)
 echo "→ Creating DMG..."
+rm -rf dist/dmg-stage
+mkdir -p dist/dmg-stage
+cp -R "$APP" dist/dmg-stage/
+ln -s /Applications dist/dmg-stage/Applications
+
 rm -f "dist/Murmur-${VERSION}.dmg"
-hdiutil create -volname "Murmur" -srcfolder "$APP" \
+hdiutil create -volname "Murmur" -srcfolder dist/dmg-stage \
     -ov -format UDZO "dist/Murmur-${VERSION}.dmg" 2>/dev/null
+rm -rf dist/dmg-stage
 
 echo ""
 echo "Done!"

@@ -51,11 +51,19 @@ jobs:
           # Ad-hoc sign
           codesign --force --deep --sign - "$APP"
 
-      - name: Create DMG
+      - name: Create DMG with Applications shortcut
         working-directory: Murmur
         run: |
-          hdiutil create -volname "Murmur" -srcfolder dist/Murmur.app \
+          # Create a staging folder with the app and an Applications symlink
+          DMG_STAGE="dist/dmg-stage"
+          rm -rf "$DMG_STAGE"
+          mkdir -p "$DMG_STAGE"
+          cp -R dist/Murmur.app "$DMG_STAGE/"
+          ln -s /Applications "$DMG_STAGE/Applications"
+
+          hdiutil create -volname "Murmur" -srcfolder "$DMG_STAGE" \
             -ov -format UDZO "dist/Murmur-${{ steps.version.outputs.VERSION }}.dmg"
+          rm -rf "$DMG_STAGE"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
