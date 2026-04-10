@@ -336,11 +336,13 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     init(
         transcription: TranscriptionServiceProtocol,
         injection: TextInjectionServiceProtocol & StreamingTextInjectionProtocol,
-        cpuMonitor: CPULoadMonitor = CPULoadMonitor()
+        cpuMonitor: CPULoadMonitor = CPULoadMonitor(),
+        fullPassTimeoutOverride: TimeInterval? = nil
     ) {
         self.transcription = transcription
         self.injection = injection
         self.cpuMonitor = cpuMonitor
+        self.fullPassTimeoutSeconds = fullPassTimeoutOverride ?? 30.0
     }
 
     // MARK: - Public API
@@ -535,7 +537,8 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     // MARK: - Full-pass
 
     /// Seconds after which a stalled full-pass transcription is abandoned.
-    private static let fullPassTimeoutSeconds: TimeInterval = 30.0
+    /// Overridable at init-time for unit tests (pass a short value to keep tests fast).
+    let fullPassTimeoutSeconds: TimeInterval
     /// After this many seconds, the pill should show a "still refining" warning.
     static let fullPassWarningSeconds: TimeInterval = 15.0
 
@@ -557,6 +560,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
             case failed
         }
 
+        let timeoutSeconds = self.fullPassTimeoutSeconds
         let passResult: FullPassResult = await withTaskGroup(of: FullPassResult.self) { group in
             group.addTask {
                 do {
@@ -567,7 +571,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
                 }
             }
             group.addTask {
-                try? await Task.sleep(for: .seconds(Self.fullPassTimeoutSeconds))
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
                 return .timedOut
             }
             // Take whichever finishes first.
@@ -579,7 +583,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         let result: TranscriptionResult
         switch passResult {
         case .timedOut:
-            logger.warning("StreamingCoordinator: full-pass exceeded \(Int(Self.fullPassTimeoutSeconds))s — keeping streaming version")
+            logger.warning("StreamingCoordinator: full-pass exceeded \(Int(timeoutSeconds))s — keeping streaming version")
             transition(to: .done)
             return
         case .failed:
