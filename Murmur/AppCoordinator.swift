@@ -479,46 +479,64 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    /// Hard backstop timeout for waitForStreamingDone, independent of state emissions.
+    /// Prevents UI hang if coordinator gets stuck without emitting new state (NEW-P1-2).
+    private static let streamingDoneBackstopSeconds: TimeInterval = 35
+
     private func waitForStreamingDone() async {
         guard let coordinator = streamingCoordinator else { return }
 
-        // CR-P2-2: Subscribe to @Published sessionState via AsyncStream instead of polling.
-        // This avoids unnecessary 100ms wake-ups and reacts immediately to state changes.
-        let stream = AsyncStream<StreamingSessionState> { continuation in
-            // Capture the cancellable in a local var so it lives for the stream's lifetime.
-            let cancellable = coordinator.$sessionState.sink { state in
-                continuation.yield(state)
+        // NEW-P1-2: Wrap the entire Combine-based wait in a backstop timeout.
+        // If the coordinator stalls with no state emission (task starvation, deadlock),
+        // the for-await loop never evaluates the deadline check. This outer timeout
+        // guarantees we always return within a bounded time.
+        await withTaskGroup(of: Void.self) { group in
+            // Backstop: cancel the group after the hard deadline.
+            group.addTask {
+                try? await Task.sleep(for: .seconds(Self.streamingDoneBackstopSeconds))
+                guard !Task.isCancelled else { return }
+                Self.log.warning("waitForStreamingDone: backstop timeout (\(Self.streamingDoneBackstopSeconds)s) — forcing cancel")
+                await MainActor.run { coordinator.cancelSession() }
             }
-            continuation.onTermination = { _ in
-                cancellable.cancel()
-            }
-        }
 
-        // DA-P1-5: Show "Refining…" pill progress and abandon after 30s.
-        let deadline = Date().addingTimeInterval(30)
-        var warningSent = false
+            // Main wait: subscribe to state changes.
+            group.addTask { @MainActor in
+                let stream = AsyncStream<StreamingSessionState> { continuation in
+                    let cancellable = coordinator.$sessionState.sink { state in
+                        continuation.yield(state)
+                    }
+                    continuation.onTermination = { _ in
+                        cancellable.cancel()
+                    }
+                }
 
-        for await state in stream {
-            switch state {
-            case .done, .cancelled, .failed:
-                return
-            case .finalizing:
-                // Show progress in pill after the warning threshold.
-                if !warningSent,
-                   let startedAt = coordinator.finalizingStartedAt,
-                   Date().timeIntervalSince(startedAt) >= StreamingTranscriptionCoordinator.fullPassWarningSeconds {
-                    warningSent = true
-                    // Pill shows a "Still refining" hint via statusText — no separate pill state needed.
-                    Self.log.info("waitForStreamingDone: full-pass taking >15s, user notified via pill")
+                let deadline = Date().addingTimeInterval(30)
+                var warningSent = false
+
+                for await state in stream {
+                    switch state {
+                    case .done, .cancelled, .failed:
+                        return
+                    case .finalizing:
+                        if !warningSent,
+                           let startedAt = coordinator.finalizingStartedAt,
+                           Date().timeIntervalSince(startedAt) >= StreamingTranscriptionCoordinator.fullPassWarningSeconds {
+                            warningSent = true
+                            Self.log.info("waitForStreamingDone: full-pass taking >15s, user notified via pill")
+                        }
+                        if Date() >= deadline {
+                            coordinator.cancelSession()
+                            return
+                        }
+                    default:
+                        break
+                    }
                 }
-                // Abandon if overall deadline exceeded.
-                if Date() >= deadline {
-                    coordinator.cancelSession()
-                    return
-                }
-            default:
-                break
             }
+
+            // Whichever finishes first cancels the other.
+            await group.next()
+            group.cancelAll()
         }
     }
 

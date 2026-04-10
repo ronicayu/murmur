@@ -513,6 +513,18 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
                 try await self.injection.appendText(textToInject)
                 // Use UTF-16 code unit count to match AX kAXSelectedTextRangeAttribute units.
                 self.rangeTracker?.recordInjection(length: textToInject.utf16.count)
+
+                // NEW-P1-1: Post-inject cursor verification.
+                // appendText involves a ~1500ms clipboard round-trip; the user may move the cursor
+                // during that window. Check again after injection lands to catch late edits.
+                if let expectedNext = self.rangeTracker?.expectedNextOffset {
+                    let actualOffset = self.resolveCurrentCursorOffsetAX()
+                    if actualOffset != nil && actualOffset != expectedNext {
+                        self.rangeTracker?.invalidate()
+                        self.logger.warning("StreamingCoordinator: post-inject cursor mismatch (expected=\(expectedNext), actual=\(actualOffset!)) — tracker invalidated")
+                    }
+                }
+
                 self.logger.info("StreamingCoordinator: chunk \(self.chunkCount) injected (\(textToInject.utf16.count) UTF-16 units)")
             } catch {
                 self.logger.warning("StreamingCoordinator: append failed: \(error)")
