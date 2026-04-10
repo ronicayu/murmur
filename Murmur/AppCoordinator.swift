@@ -460,9 +460,19 @@ final class AppCoordinator: ObservableObject {
             // Wait for coordinator to reach done/cancelled/failed
             await waitForStreamingDone()
 
-            transition(to: .idle)
-            audioFeedback.playSuccess()
-            pill.hide(after: 1)
+            // UT-P0-2: If full-pass replaced streamed text, show undoable state so user
+            // knows text was refined and can Cmd+Z to revert.
+            if let replacedText = streamingCoordinator?.fullPassReplacedText {
+                let undoableState = AppState.undoable(text: replacedText, method: .accessibility)
+                transition(to: undoableState)
+                audioFeedback.playSuccess()
+                pill.show(state: undoableState)
+                pill.hide(after: 3)
+            } else {
+                transition(to: .idle)
+                audioFeedback.playSuccess()
+                pill.hide(after: 1)
+            }
 
         } catch {
             streamingCoordinator?.cancelSession()

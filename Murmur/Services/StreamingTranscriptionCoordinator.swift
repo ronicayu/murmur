@@ -322,6 +322,8 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     private var focusAbandonTask: Task<Void, Never>?
     /// DA-P1-5: Timestamp when full-pass finalizing phase started (for pill progress).
     private(set) var finalizingStartedAt: Date?
+    /// UT-P0-2: If full-pass replaced streamed text, holds the replacement text for undoable UI.
+    private(set) var fullPassReplacedText: String?
 
     private static let chunkSampleRate: Double = 16000
     private static let chunkSeconds: Double = 3.0
@@ -619,6 +621,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
                         length: tracker.totalLength,
                         with: fullText
                     )
+                    fullPassReplacedText = fullText
                     logger.info("StreamingCoordinator: replaced \(tracker.totalLength) UTF-16 units with full-pass result")
                 } catch {
                     logger.warning("StreamingCoordinator: replaceRange failed — keeping streaming version: \(error)")

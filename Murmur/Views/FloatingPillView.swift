@@ -21,10 +21,8 @@ struct FloatingPillView: View {
     private var pillAccessibilityLabel: String {
         switch state {
         case .recording: return "Recording audio. Press Escape to cancel."
-        case .streaming(let n):
-            return n == 0
-                ? "Streaming voice input. Press Escape to cancel."
-                : "Streaming voice input, \(n) chunks transcribed. Press Escape to cancel."
+        case .streaming:
+            return "Streaming voice input. Press Escape to cancel."
         case .transcribing: return "Transcribing audio"
         case .injecting: return "Inserting text"
         case .undoable(let text, _): return "Transcribed: \(text). Press Command Z to undo."
@@ -79,19 +77,13 @@ struct FloatingPillView: View {
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
             }
-        case .streaming(let chunkCount):
+        case .streaming:
             VStack(spacing: 1) {
-                Text("Streaming...")
+                Text("Listening...")
                     .font(.system(.caption, design: .rounded, weight: .medium))
-                if chunkCount > 0 {
-                    Text("\(chunkCount) chunk\(chunkCount == 1 ? "" : "s")")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Esc to cancel")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                }
+                Text("Esc to cancel")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
             }
         case .transcribing:
             Text("Transcribing...")
@@ -100,10 +92,13 @@ struct FloatingPillView: View {
             Text("Inserting text...")
                 .font(.system(.caption, design: .rounded, weight: .medium))
         case .undoable(let text, _):
-            HStack(spacing: 4) {
+            VStack(spacing: 1) {
                 Text(text.prefix(30))
                     .font(.system(.caption, design: .rounded))
                     .lineLimit(1)
+                Text("⌘Z to undo")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
             }
         case .error(let err):
             Text(err.localizedDescription)
