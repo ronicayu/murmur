@@ -18,5 +18,7 @@
     <string>APPL</string>
     <key>CFBundleExecutable</key>
     <string>Murmur</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
 </dict>
 </plist>
