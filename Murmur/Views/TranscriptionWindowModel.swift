@@ -148,6 +148,11 @@ final class TranscriptionWindowModel: ObservableObject {
                     estimatedDuration = 0
                 }
 
+                // Update the history entry with the actual duration now that recording is done
+                if let id = activeEntryID, estimatedDuration > 0 {
+                    try? historyService.updateDuration(id: id, duration: estimatedDuration)
+                }
+
                 windowState = .recordingConfirm(
                     duration: estimatedDuration,
                     fileSizeBytes: size,
@@ -279,7 +284,7 @@ final class TranscriptionWindowModel: ObservableObject {
                     status: .completed,
                     m4aPath: nil
                 )
-                try? historyService.completeEntry(id: entryID, text: result.text, language: result.language.rawValue)
+                try? historyService.completeEntry(id: entryID, text: result.text, language: result.language.rawValue, audioDuration: dur)
 
                 // Delete the m4a after successful transcription
                 if FileManager.default.fileExists(atPath: audioURL.path) {
