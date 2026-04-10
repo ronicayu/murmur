@@ -41,7 +41,7 @@ enum AppState: Equatable, Sendable {
         switch self {
         case .idle: return "Ready"
         case .recording: return "Recording..."
-        case .streaming(let n): return n == 0 ? "Streaming..." : "Streaming... (\(n) chunks)"
+        case .streaming: return "Listening..."
         case .transcribing: return "Transcribing..."
         case .injecting: return "Inserting text..."
         case .undoable(let text, _): return String(text.prefix(40))
@@ -460,10 +460,40 @@ final class AppCoordinator: ObservableObject {
             // Wait for coordinator to reach done/cancelled/failed
             await waitForStreamingDone()
 
-            // UT-P0-2: If full-pass replaced streamed text, show undoable state so user
-            // knows text was refined and can Cmd+Z to revert.
-            if let replacedText = streamingCoordinator?.fullPassReplacedText {
-                let undoableState = AppState.undoable(text: replacedText, method: .accessibility)
+            // Check how the session ended and show appropriate feedback.
+            if let reason = streamingCoordinator?.cancellationReason {
+                switch reason {
+                case .focusAbandoned:
+                    // UT-P1: Notify user that session was abandoned due to app switch.
+                    transition(to: .idle)
+                    audioFeedback.playError()
+                    pill.show(state: .error(MurmurError.sessionAbandoned))
+                    pill.hide(after: 2)
+                case .backstopTimeout:
+                    transition(to: .idle)
+                    audioFeedback.playError()
+                    pill.show(state: .error(MurmurError.timeout(operation: "Streaming")))
+                    pill.hide(after: 2)
+                case .user:
+                    transition(to: .idle)
+                    pill.hide(after: 0.5)
+                }
+            } else if streamingCoordinator?.didTriggerCPUFallback == true {
+                // UT-P1: Inform user that streaming was paused due to high CPU.
+                // Full-pass still ran, so show result normally but with a note.
+                if let replacedText = streamingCoordinator?.fullPassReplacedText {
+                    let undoableState = AppState.undoable(text: replacedText, method: .clipboard)
+                    transition(to: undoableState)
+                    audioFeedback.playSuccess()
+                    pill.show(state: undoableState)
+                    pill.hide(after: 3)
+                } else {
+                    transition(to: .idle)
+                    audioFeedback.playSuccess()
+                    pill.hide(after: 1)
+                }
+            } else if let replacedText = streamingCoordinator?.fullPassReplacedText {
+                let undoableState = AppState.undoable(text: replacedText, method: .clipboard)
                 transition(to: undoableState)
                 audioFeedback.playSuccess()
                 pill.show(state: undoableState)
@@ -506,7 +536,10 @@ final class AppCoordinator: ObservableObject {
                 try? await Task.sleep(for: .seconds(Self.streamingDoneBackstopSeconds))
                 guard !Task.isCancelled else { return }
                 Self.log.warning("waitForStreamingDone: backstop timeout (\(Self.streamingDoneBackstopSeconds)s) — forcing cancel")
-                await MainActor.run { coordinator.cancelSession() }
+                await MainActor.run {
+                    coordinator.cancellationReason = .backstopTimeout
+                    coordinator.cancelSession()
+                }
             }
 
             // Main wait: subscribe to state changes.
@@ -551,18 +584,7 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func resolveCurrentCursorOffset() -> Int {
-        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return 0 }
-        let axApp = AXUIElementCreateApplication(frontmost.processIdentifier)
-        var focusedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
-              let focused = focusedRef else { return 0 }
-        let element = focused as! AXUIElement  // swiftlint:disable:this force_cast
-        var selRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &selRef) == .success,
-              let selValue = selRef else { return 0 }
-        var cfRange = CFRange()
-        guard AXValueGetValue(selValue as! AXValue, .cfRange, &cfRange) else { return 0 }  // swiftlint:disable:this force_cast
-        return cfRange.location + cfRange.length
+        resolveAXCursorOffset() ?? 0
     }
 
     // MARK: - V1 Stop & Transcribe (unchanged logic, extracted)

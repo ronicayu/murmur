@@ -11,6 +11,7 @@ struct SettingsView: View {
     @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
     @AppStorage("streamingInputEnabled") private var streamingInputEnabled: Bool = false
     @AppStorage("streamingDiscoveryBadgeDismissed") private var discoveryBadgeDismissed: Bool = false
+    @AppStorage("streamingFocusAbandonSeconds") private var focusAbandonSeconds: Double = 10.0
 
     @State private var useRightCommand: Bool = true
     @State private var showDeleteConfirmation = false
@@ -143,6 +144,22 @@ struct SettingsView: View {
                                 discoveryBadgeDismissed = true
                             }
                         }
+                }
+
+                if streamingInputEnabled {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Focus timeout:")
+                            Spacer()
+                            Text("\(Int(focusAbandonSeconds))s")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(value: $focusAbandonSeconds, in: 5...30, step: 5)
+                        Text("Cancel session if you switch apps for longer than this.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             } header: {
                 Text("Experimental")

@@ -325,9 +325,21 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     /// UT-P0-2: If full-pass replaced streamed text, holds the replacement text for undoable UI.
     private(set) var fullPassReplacedText: String?
 
+    /// Why the session ended in `.cancelled` state, for UI messaging.
+    enum CancellationReason: Sendable {
+        case user
+        case focusAbandoned
+        case backstopTimeout
+    }
+    internal(set) var cancellationReason: CancellationReason?
+
     private static let chunkSampleRate: Double = 16000
     private static let chunkSeconds: Double = 3.0
-    private static let focusAbandonSeconds: TimeInterval = 10.0
+    /// Seconds before a lost-focus session is abandoned. Configurable via Settings.
+    static var focusAbandonSeconds: TimeInterval {
+        let stored = UserDefaults.standard.double(forKey: "streamingFocusAbandonSeconds")
+        return stored > 0 ? stored : 10.0
+    }
     private static let samplesPerChunk: Int = Int(chunkSampleRate * chunkSeconds)
     private static let replaceWindowSeconds: TimeInterval = 0.5
 
@@ -379,6 +391,8 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         self.pausedPendingChunks = []
         self.isFocusPaused = false
         self.cpuFallbackTriggered = false
+        self.cancellationReason = nil
+        self.fullPassReplacedText = nil
 
         let acc = AudioBufferAccumulator(
             samplesPerChunk: Self.samplesPerChunk,
@@ -663,6 +677,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
                 guard !Task.isCancelled else { return }
                 guard self.isFocusPaused, case .streaming = self.sessionState else { return }
                 self.logger.warning("StreamingCoordinator: focus lost >10s — abandoning session")
+                self.cancellationReason = .focusAbandoned
                 self.cancelSession()
             }
 
@@ -719,23 +734,8 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         sessionState = newState
     }
 
-    /// Query the AX cursor offset (UTF-16 code units) of the focused element.
-    /// Returns nil if the element is not accessible or does not support the attribute.
     private func resolveCurrentCursorOffsetAX() -> Int? {
-        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return nil }
-        let axApp = AXUIElementCreateApplication(frontmost.processIdentifier)
-        var focusedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
-              let focused = focusedRef else { return nil }
-        // swiftlint:disable:next force_cast
-        let element = focused as! AXUIElement
-        var selRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &selRef) == .success,
-              let selValue = selRef else { return nil }
-        var cfRange = CFRange()
-        // swiftlint:disable:next force_cast
-        guard AXValueGetValue(selValue as! AXValue, .cfRange, &cfRange) else { return nil }
-        return cfRange.location + cfRange.length
+        resolveAXCursorOffset()
     }
 
     /// Write a PCM buffer to a temporary WAV file and return its URL.

@@ -9,6 +9,7 @@ enum MurmurError: Error, Sendable {
     case transcriptionFailed(String)
     case injectionFailed(String)
     case timeout(operation: String)
+    case sessionAbandoned
 
     enum Permission: String, Sendable {
         case microphone
@@ -36,6 +37,8 @@ extension MurmurError: LocalizedError {
             return "Could not insert text: \(msg)"
         case .timeout(let op):
             return "\(op) timed out."
+        case .sessionAbandoned:
+            return "Session ended — switched away too long."
         }
     }
 }

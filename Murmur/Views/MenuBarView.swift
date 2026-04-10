@@ -4,6 +4,7 @@ import HotKey
 struct MenuBarView: View {
     @ObservedObject var coordinator: AppCoordinator
     @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
+    @AppStorage("streamingInputEnabled") private var streamingInputEnabled: Bool = false
     var onOpenSettings: () -> Void = {}
     var onOpenTranscription: () -> Void = {}
 
@@ -190,8 +191,15 @@ struct MenuBarView: View {
                 .frame(width: 28, height: 28)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("Murmur")
-                    .font(.system(.headline, design: .rounded))
+                HStack(spacing: 4) {
+                    Text("Murmur")
+                        .font(.system(.headline, design: .rounded))
+                    if streamingInputEnabled, case .idle = coordinator.state {
+                        Text("⚡")
+                            .font(.system(size: 10))
+                            .help("Streaming input enabled")
+                    }
+                }
                 Text(coordinator.state.statusText)
                     .font(.system(.caption, design: .rounded))
                     .foregroundStyle(statusColor)

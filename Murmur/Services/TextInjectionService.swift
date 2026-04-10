@@ -1,6 +1,26 @@
 import AppKit
 import os
 
+/// Resolve the AX cursor offset (UTF-16 code units) of the currently focused element.
+/// Returns the position after the selection (location + length), or nil if inaccessible.
+/// Shared by AppCoordinator and StreamingTranscriptionCoordinator.
+func resolveAXCursorOffset() -> Int? {
+    guard let frontmost = NSWorkspace.shared.frontmostApplication else { return nil }
+    let axApp = AXUIElementCreateApplication(frontmost.processIdentifier)
+    var focusedRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+          let focused = focusedRef else { return nil }
+    // swiftlint:disable:next force_cast
+    let element = focused as! AXUIElement
+    var selRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &selRef) == .success,
+          let selValue = selRef else { return nil }
+    var cfRange = CFRange()
+    // swiftlint:disable:next force_cast
+    guard AXValueGetValue(selValue as! AXValue, .cfRange, &cfRange) else { return nil }
+    return cfRange.location + cfRange.length
+}
+
 enum InjectionMethod: Sendable, Equatable {
     case cgEvent
     case clipboard
@@ -145,6 +165,8 @@ final class TextInjectionService: TextInjectionServiceProtocol, StreamingTextInj
         // Bundle IDs are stable across app updates; executable names are a fallback.
         let incompatibleBundleIDPrefixes: [String] = [
             "com.microsoft.VSCode",
+            "com.microsoft.VSCodeInsiders",
+            "com.vscodium",
             "md.obsidian",
             "com.todesktop.",          // Electron app-builder prefix
             "com.github.GitHubDesktop",
@@ -152,6 +174,13 @@ final class TextInjectionService: TextInjectionServiceProtocol, StreamingTextInj
             "com.slack.Slack",
             "com.tinyspeck.slackmacgap",
             "com.discord",
+            "com.hnc.Discord",         // Discord PTB/Canary variants
+            "com.spotify.client",
+            "com.notion.id",
+            "com.linear",
+            "com.1password",
+            "io.github.nicegram",
+            "com.bitwarden.desktop",
         ]
 
         let bundleID = app.bundleIdentifier ?? ""
