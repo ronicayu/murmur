@@ -456,7 +456,7 @@ final class ModelManager: ObservableObject {
 
         if FileManager.default.fileExists(atPath: bundledPython.path) {
             statusMessage = "Checking setup..."
-            let check = try await runProcess(bundledPython, args: ["-c", "import huggingface_hub, onnxruntime, transformers, torch; print('ok')"])
+            let check = try await runProcess(bundledPython, args: ["-c", "import huggingface_hub, onnxruntime, transformers, torch, opencc; print('ok')"])
             if check.status == 0 {
                 statusMessage = "Ready"
                 return bundledPython
@@ -481,26 +481,69 @@ final class ModelManager: ObservableObject {
             }
         }
 
-        // Install packages one by one for progress visibility
+        // Install all packages from pinned requirements.txt
         let pip = pythonEnvPath.appendingPathComponent("bin/pip3")
-        let packages = [
-            ("huggingface_hub", "Setting up: downloading components (1/8)..."),
-            ("transformers>=5.4.0", "Setting up: downloading components (2/8)..."),
-            ("torch", "Setting up: downloading components (3/8, this may take a minute)..."),
-            ("onnxruntime", "Setting up: downloading components (4/8)..."),
-            ("soundfile", "Setting up: downloading components (5/8)..."),
-            ("librosa", "Setting up: downloading components (6/8)..."),
-            ("accelerate", "Setting up: downloading components (7/8)..."),
-            ("opencc-python-reimplemented", "Setting up: downloading components (8/8)..."),
-        ]
+        statusMessage = "Setting up: installing components..."
 
-        for (pkg, message) in packages {
-            statusMessage = message
-            let result = try await runProcessWithLiveOutput(pip, args: ["install", pkg])
+        // Find requirements.txt — it lives alongside transcribe.py in the app bundle Resources
+        let requirementsPath: String? = {
+            if let bundlePath = Bundle.main.path(forResource: "requirements", ofType: "txt") {
+                return bundlePath
+            }
+            // Fallback: resolve relative to the bundle's Resources directory
+            if let resourcesURL = Bundle.main.resourceURL {
+                let candidate = resourcesURL.appendingPathComponent("requirements.txt")
+                if FileManager.default.fileExists(atPath: candidate.path) {
+                    return candidate.path
+                }
+            }
+            return nil
+        }()
+
+        if let reqPath = requirementsPath {
+            let result = try await runProcessWithLiveOutput(pip, args: ["install", "-r", reqPath])
             if result != 0 {
-                statusMessage = "Error: Setup failed. Please check your internet connection."
-                state = .error("Setup failed — could not install required components")
-                throw MurmurError.transcriptionFailed("pip install \(pkg) failed")
+                // Fall back to individual pinned installs if the requirements file approach fails
+                let packages: [(String, String)] = [
+                    ("huggingface_hub==0.30.2", "Setting up: downloading components (1/8)..."),
+                    ("transformers==4.52.4", "Setting up: downloading components (2/8)..."),
+                    ("torch==2.7.0", "Setting up: downloading components (3/8, this may take a minute)..."),
+                    ("onnxruntime==1.21.1", "Setting up: downloading components (4/8)..."),
+                    ("soundfile==0.13.1", "Setting up: downloading components (5/8)..."),
+                    ("librosa==0.11.0", "Setting up: downloading components (6/8)..."),
+                    ("accelerate==1.7.0", "Setting up: downloading components (7/8)..."),
+                    ("opencc-python-reimplemented==0.1.7", "Setting up: downloading components (8/8)..."),
+                ]
+                for (pkg, message) in packages {
+                    statusMessage = message
+                    let pkgResult = try await runProcessWithLiveOutput(pip, args: ["install", pkg])
+                    if pkgResult != 0 {
+                        statusMessage = "Error: Setup failed. Please check your internet connection."
+                        state = .error("Setup failed — could not install required components")
+                        throw MurmurError.transcriptionFailed("pip install \(pkg) failed")
+                    }
+                }
+            }
+        } else {
+            // requirements.txt not found in bundle — fall back to individual pinned installs
+            let packages: [(String, String)] = [
+                ("huggingface_hub==0.30.2", "Setting up: downloading components (1/8)..."),
+                ("transformers==4.52.4", "Setting up: downloading components (2/8)..."),
+                ("torch==2.7.0", "Setting up: downloading components (3/8, this may take a minute)..."),
+                ("onnxruntime==1.21.1", "Setting up: downloading components (4/8)..."),
+                ("soundfile==0.13.1", "Setting up: downloading components (5/8)..."),
+                ("librosa==0.11.0", "Setting up: downloading components (6/8)..."),
+                ("accelerate==1.7.0", "Setting up: downloading components (7/8)..."),
+                ("opencc-python-reimplemented==0.1.7", "Setting up: downloading components (8/8)..."),
+            ]
+            for (pkg, message) in packages {
+                statusMessage = message
+                let result = try await runProcessWithLiveOutput(pip, args: ["install", pkg])
+                if result != 0 {
+                    statusMessage = "Error: Setup failed. Please check your internet connection."
+                    state = .error("Setup failed — could not install required components")
+                    throw MurmurError.transcriptionFailed("pip install \(pkg) failed")
+                }
             }
         }
 

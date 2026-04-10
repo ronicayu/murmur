@@ -67,7 +67,9 @@ final class AppCoordinator: ObservableObject {
 
     /// Update the transcription backend model path (called when user switches backends)
     func switchModelPath(_ newPath: URL) {
-        transcription.setModelPath(newPath)
+        Task {
+            await transcription.setModelPath(newPath)
+        }
         preloadModelInBackground()
     }
 
@@ -144,12 +146,18 @@ final class AppCoordinator: ObservableObject {
             }
         }
 
-        // Unload model on sleep
+        // Unload model on sleep, re-preload on wake
         NotificationCenter.default.addObserver(
             forName: NSWorkspace.willSleepNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
             Task { await self?.transcription.unloadModel() }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.preloadModelInBackground()
         }
 
         // Preload model in background so first transcription is instant
@@ -163,7 +171,7 @@ final class AppCoordinator: ObservableObject {
         audioLevelTask?.cancel()
         hotkey.unregister()
         audio.cancelRecording()
-        transcription.killProcess()
+        Task { await transcription.killProcess() }
     }
 
     // MARK: - Event Handling

@@ -297,14 +297,13 @@ def load_model_huggingface(model_path: str):
     log.info(f"Model directory contents: {files}")
 
     t0 = time.time()
-    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(model_path)
     log.info(f"Processor loaded in {time.time()-t0:.1f}s")
 
     t0 = time.time()
     hf_model = AutoModelForSpeechSeq2Seq.from_pretrained(
         model_path,
         torch_dtype=dtype,
-        trust_remote_code=True,
     )
     log.info(f"Model loaded in {time.time()-t0:.1f}s")
 

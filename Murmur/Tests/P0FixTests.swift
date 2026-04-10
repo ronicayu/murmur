@@ -45,28 +45,24 @@ final class ModelConfigHashTests: XCTestCase {
 final class TranscriptionServiceLockTests: XCTestCase {
 
     func testConcurrentEnsureProcessAndKillDoesNotCrash() async {
-        // This test verifies that concurrent access to the process doesn't cause a crash.
-        // We can't fully test the TOCTOU fix without a real Python process, but we can
-        // verify that killProcess and setModelPath don't crash under concurrent access.
+        // Actor isolation serializes access — verify no crashes under concurrent calls.
         let service = TranscriptionService(
             modelPath: URL(fileURLWithPath: "/nonexistent"),
             pythonPath: URL(fileURLWithPath: "/nonexistent"),
             scriptPath: URL(fileURLWithPath: "/nonexistent")
         )
 
-        // Rapid concurrent kill calls should not crash
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<100 {
                 group.addTask {
-                    service.killProcess()
+                    await service.killProcess()
                 }
                 group.addTask {
-                    service.setModelPath(URL(fileURLWithPath: "/tmp/test_\(Int.random(in: 0...100))"))
+                    await service.setModelPath(URL(fileURLWithPath: "/tmp/test_\(Int.random(in: 0...100))"))
                 }
             }
         }
 
-        // If we get here without a crash, the lock is working
         XCTAssertFalse(service.isModelLoaded)
     }
 }
