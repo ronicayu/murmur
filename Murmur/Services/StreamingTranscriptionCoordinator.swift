@@ -442,6 +442,17 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         }
     }
 
+    /// Reset the coordinator to idle so it can be reused for the next session.
+    /// Call after the session reaches a terminal state (done/cancelled/failed).
+    func resetToIdle() {
+        if case .idle = sessionState { return }
+        if case .streaming = sessionState {
+            logger.warning("resetToIdle called while streaming — cancelling first")
+            cancelSession()
+        }
+        transition(to: .idle)
+    }
+
     /// Update the full WAV URL after `AudioService.stopRecording()` resolves.
     /// Must be called before `endSession()`.
     func updateFullWavURL(_ url: URL) {

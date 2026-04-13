@@ -332,6 +332,7 @@ final class AppCoordinator: ObservableObject {
             guard state == .recording else { return }
             audio.detachStreamingAccumulator()
             streamingCoordinator?.cancelSession()
+            streamingCoordinator?.resetToIdle()
             audio.cancelRecording()
             audioFeedback.playStopRecording()
             pill.hide()
@@ -525,6 +526,9 @@ final class AppCoordinator: ObservableObject {
             pill.show(state: .error(err))
             pill.hide(after: 2)
         }
+
+        // Reset coordinator so next session can begin
+        streamingCoordinator?.resetToIdle()
 
         if pendingRecording {
             pendingRecording = false
