@@ -341,7 +341,9 @@ private struct MenuRowButtonStyle: ButtonStyle {
     }
 }
 
+#if canImport(PreviewsMacros)
 #Preview("Idle") {
     MenuBarView(coordinator: AppCoordinator())
         .frame(width: 300)
 }
+#endif
