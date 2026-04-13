@@ -14,7 +14,7 @@ Key requirements:
 
 ## Status
 
-This project is in the planning phase. See `docs/plan.md` for the product brief.
+v0.2.0 released. Core features working: voice input (V1 + V3 streaming), audio transcription, native ONNX backend. See `CHANGELOG.md` for details.
 
 ## Team
 

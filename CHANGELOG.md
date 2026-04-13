@@ -8,8 +8,16 @@
 - Pure Swift MelSpectrogramExtractor replacing ONNX mel_extractor dependency
 - 48 QA tests for V3 streaming: edge cases, state machine, focus guard, blocklist
 - V2 audio transcription: record, upload, and transcribe long audio locally
+- Language picker on upload/recording confirm views before transcription
+- "Undo after transcription" toggle in Settings (off by default)
 
 ### Fixed
+- Microphone permission: request OS dialog on first use instead of showing error
+- CI release build: sign with entitlements, run Float16 patch before build
+- Streaming coordinator not resetting to idle after session (second recording broken)
+- Hotkey unresponsive for 5s after transcription (undoable state blocked new recordings)
+- Streaming path missing undo auto-recovery timer (stuck in undoable forever)
+- Audio transcription language hardcoded to English when set to auto-detect
 - Right Command hotkey missed when Murmur is focused
 - 15 pre-existing test failures
 - transcribe.py deployment: auto-sync source script to App Support on launch
