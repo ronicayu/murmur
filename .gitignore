@@ -1,2 +1,7 @@
 .build/
 CLAUDE.md~
+.claude/
+.swiftpm/
+__pycache__/
+dist/
+Murmur/test_fixtures/5min_sample.wav

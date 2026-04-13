@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#312E81"/>
+      <stop offset="100%" stop-color="#6D28D9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- macOS rounded rect -->
+  <rect x="0" y="0" width="1024" height="1024" rx="228" ry="228" fill="url(#bg)"/>
+
+  <!-- Microphone body — pill shape -->
+  <rect x="436" y="280" width="152" height="260" rx="76" ry="76"
+        fill="none" stroke="white" stroke-width="36" stroke-opacity="0.95"/>
+
+  <!-- Mic cradle arc -->
+  <path d="M360 520 Q360 660 512 660 Q664 660 664 520"
+        fill="none" stroke="white" stroke-width="36" stroke-linecap="round" stroke-opacity="0.95"/>
+
+  <!-- Mic stem -->
+  <line x1="512" y1="660" x2="512" y2="740"
+        stroke="white" stroke-width="36" stroke-linecap="round" stroke-opacity="0.95"/>
+
+  <!-- Three soft sound ripples radiating right -->
+  <path d="M640 400 Q680 440 640 480"
+        fill="none" stroke="white" stroke-width="24" stroke-linecap="round" stroke-opacity="0.55"/>
+  <path d="M680 370 Q740 440 680 510"
+        fill="none" stroke="white" stroke-width="22" stroke-linecap="round" stroke-opacity="0.35"/>
+  <path d="M720 340 Q800 440 720 540"
+        fill="none" stroke="white" stroke-width="20" stroke-linecap="round" stroke-opacity="0.18"/>
+</svg>
