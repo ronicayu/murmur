@@ -317,7 +317,11 @@ final class AppCoordinator: ObservableObject {
                 transition(to: .error(.permissionRevoked(.accessibility)))
                 return
             }
-            if state == .idle || state.isError {
+            if state == .idle || state.isError || state.isUndoable {
+                if state.isUndoable {
+                    undoTimer?.cancel()
+                    removeUndoMonitor()
+                }
                 await startRecordingFlow()
             } else if state == .transcribing || state == .injecting {
                 pendingRecording = true
@@ -653,30 +657,7 @@ final class AppCoordinator: ObservableObject {
             audioFeedback.playSuccess()
             pill.show(state: undoableState)
             pill.hide(after: 2)
-
-            // M4: Wire Cmd+Z undo during undoable window
-            removeUndoMonitor()
-            undoMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self,
-                      event.modifierFlags.contains(.command),
-                      event.keyCode == 0x06 /* Z */ else { return }
-                Task { @MainActor in
-                    guard case .undoable = self.state else { return }
-                    try? await self.injection.undoLastInjection()
-                    self.removeUndoMonitor()
-                    self.transition(to: .idle)
-                    Self.log.info("Undo triggered via Cmd+Z")
-                }
-            }
-
-            // Auto-transition from undoable to idle after 5s
-            undoTimer?.cancel()
-            undoTimer = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(5))
-                guard let self, !Task.isCancelled else { return }
-                self.removeUndoMonitor()
-                self.transition(to: .idle)
-            }
+            // Undo timer + Cmd+Z monitor set up automatically by transition(to: .undoable)
         } catch {
             let err = mapError(error)
             transition(to: .error(err))
@@ -698,6 +679,11 @@ final class AppCoordinator: ObservableObject {
         let old = state
         state = newState
         Self.log.info("State: \(String(describing: old)) → \(String(describing: newState))")
+
+        // Auto-transition from undoable to idle after 5s (covers both V1 and streaming)
+        if case .undoable = newState {
+            setupUndoAutoRecovery()
+        }
 
         // Permission errors show a blocking alert; other errors auto-recover
         if case .error(let err) = newState {
@@ -730,6 +716,29 @@ final class AppCoordinator: ObservableObject {
         }
         state = .idle
         pill.hide()
+    }
+
+    private func setupUndoAutoRecovery() {
+        removeUndoMonitor()
+        undoMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self,
+                  event.modifierFlags.contains(.command),
+                  event.keyCode == 0x06 /* Z */ else { return }
+            Task { @MainActor in
+                guard case .undoable = self.state else { return }
+                try? await self.injection.undoLastInjection()
+                self.removeUndoMonitor()
+                self.transition(to: .idle)
+                Self.log.info("Undo triggered via Cmd+Z")
+            }
+        }
+        undoTimer?.cancel()
+        undoTimer = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard let self, !Task.isCancelled else { return }
+            self.removeUndoMonitor()
+            self.transition(to: .idle)
+        }
     }
 
     private func removeUndoMonitor() {
@@ -798,6 +807,10 @@ final class AppCoordinator: ObservableObject {
 private extension AppState {
     var isError: Bool {
         if case .error = self { return true }
+        return false
+    }
+    var isUndoable: Bool {
+        if case .undoable = self { return true }
         return false
     }
 }
