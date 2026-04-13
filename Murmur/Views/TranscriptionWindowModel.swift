@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import Carbon
 import CoreMedia
 import UniformTypeIdentifiers
 import os
@@ -220,8 +221,8 @@ final class TranscriptionWindowModel: ObservableObject {
 
     // MARK: - Transcription
 
-    func beginTranscription(audioURL: URL) {
-        let lang = UserDefaults.standard.string(forKey: "transcriptionLanguage") ?? "auto"
+    func beginTranscription(audioURL: URL, language: String? = nil) {
+        let lang = language ?? UserDefaults.standard.string(forKey: "transcriptionLanguage") ?? "auto"
         windowState = .transcribing(progress: nil)
 
         // P0 fix: pause voice input (global hotkey) for the duration of
@@ -253,9 +254,10 @@ final class TranscriptionWindowModel: ObservableObject {
 
         transcriptionTask = Task {
             do {
+                let resolvedLang = lang == "auto" ? Self.resolveAutoLanguage() : lang
                 let result = try await transcriptionService.transcribeLong(
                     audioURL: audioURL,
-                    language: lang == "auto" ? "en" : lang,
+                    language: resolvedLang,
                     onProgress: { [weak self] progress in
                         Task { @MainActor [weak self] in
                             guard let self else { return }
@@ -332,6 +334,29 @@ final class TranscriptionWindowModel: ObservableObject {
             activeEntryID = nil
         }
         windowState = .idle
+    }
+
+    // MARK: - Language Resolution
+
+    /// Resolve "auto" language from the current keyboard input source.
+    /// Mirrors AppCoordinator.resolveTranscriptionLanguage().
+    static func resolveAutoLanguage() -> String {
+        if let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
+           let ptr = TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages),
+           let languages = Unmanaged<CFArray>.fromOpaque(ptr).takeUnretainedValue() as? [String],
+           let primary = languages.first {
+            let prefix = String(primary.prefix(2))
+            switch prefix {
+            case "zh": return "zh"
+            case "ja": return "ja"
+            case "ko": return "ko"
+            case "fr": return "fr"
+            case "de": return "de"
+            case "es": return "es"
+            default: return "en"
+            }
+        }
+        return "en"
     }
 
     // MARK: - Audio duration helper

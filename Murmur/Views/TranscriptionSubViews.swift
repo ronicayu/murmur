@@ -225,7 +225,10 @@ struct RecordingConfirmView: View {
     let duration: TimeInterval
     let fileSizeBytes: Int64
     let onDiscard: () -> Void
-    let onStart: () -> Void
+    let onStart: (String) -> Void
+
+    @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
+    @State private var selectedLanguage: String = ""
 
     var body: some View {
         VStack(spacing: 24) {
@@ -241,6 +244,8 @@ struct RecordingConfirmView: View {
                 infoRow("Duration", value: durationLabel(duration))
                 infoRow("File size", value: fileSizeLabel(fileSizeBytes))
                 infoRow("Est. time", value: estimatedTimeLabel(duration))
+
+                LanguagePickerRow(selectedLanguage: $selectedLanguage)
             }
             .frame(maxWidth: 360)
             .padding(20)
@@ -251,7 +256,7 @@ struct RecordingConfirmView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(Color(NSColor.systemRed))
 
-                Button("Start Transcription", action: onStart)
+                Button("Start Transcription") { onStart(selectedLanguage) }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
             }
@@ -259,6 +264,7 @@ struct RecordingConfirmView: View {
             Spacer()
         }
         .padding(.horizontal, 40)
+        .onAppear { selectedLanguage = transcriptionLanguage }
     }
 
     private func infoRow(_ label: String, value: String) -> some View {
@@ -309,7 +315,10 @@ struct UploadConfirmView: View {
     let fileURL: URL
     let duration: TimeInterval
     let onCancel: () -> Void
-    let onStart: () -> Void
+    let onStart: (String) -> Void
+
+    @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
+    @State private var selectedLanguage: String = ""
 
     var body: some View {
         VStack(spacing: 24) {
@@ -334,6 +343,8 @@ struct UploadConfirmView: View {
                 infoRow("Duration", value: durationLabel(duration))
                 infoRow("Est. time", value: estimatedTimeLabel(duration))
 
+                LanguagePickerRow(selectedLanguage: $selectedLanguage)
+
                 // Decision-point pause warning (UX spec §4.4.3)
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle")
@@ -354,7 +365,7 @@ struct UploadConfirmView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
 
-                Button("Start Transcription", action: onStart)
+                Button("Start Transcription") { onStart(selectedLanguage) }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
             }
@@ -362,6 +373,7 @@ struct UploadConfirmView: View {
             Spacer()
         }
         .padding(.horizontal, 40)
+        .onAppear { selectedLanguage = transcriptionLanguage }
     }
 
     private func infoRow(_ label: String, value: String) -> some View {
@@ -682,6 +694,41 @@ struct SelectableTextView: NSViewRepresentable {
         if textView.string != text {
             textView.string = text
         }
+    }
+}
+
+// MARK: - LanguagePickerRow
+
+struct LanguagePickerRow: View {
+    @Binding var selectedLanguage: String
+
+    private static let languages: [(code: String, label: String)] = [
+        ("auto", "Auto-detect"),
+        ("zh", "中文"),
+        ("en", "English"),
+        ("ja", "日本語"),
+        ("ko", "한국어"),
+        ("fr", "Français"),
+        ("de", "Deutsch"),
+        ("es", "Español"),
+    ]
+
+    var body: some View {
+        HStack {
+            Text("Language")
+                .font(.system(.body, design: .rounded))
+                .foregroundStyle(.secondary)
+                .frame(width: 100, alignment: .leading)
+            Picker("", selection: $selectedLanguage) {
+                ForEach(Self.languages, id: \.code) { lang in
+                    Text(lang.label).tag(lang.code)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 140)
+            Spacer()
+        }
+        .padding(.vertical, 2)
     }
 }
 
