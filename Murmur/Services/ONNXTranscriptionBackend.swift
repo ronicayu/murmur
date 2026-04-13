@@ -45,57 +45,46 @@ final class ONNXTranscriptionBackend {
     // MARK: - Properties
 
     private let env: ORTEnv
-    private let melSession: ORTSession
     private let encoderSession: ORTSession
     private let decoderSession: ORTSession
+    private let melExtractor = MelSpectrogramExtractor()
 
     // MARK: - Initialization
 
     init(modelDirectory: URL) throws {
-        let melPath = modelDirectory
-            .appendingPathComponent("onnx/mel_extractor.onnx").path
         let encoderPath = modelDirectory
             .appendingPathComponent("onnx/encoder_model_q4f16.onnx").path
         let decoderPath = modelDirectory
             .appendingPathComponent("onnx/decoder_model_merged_q4f16.onnx").path
 
         let fm = FileManager.default
-        guard fm.fileExists(atPath: melPath) else { throw MurmurError.modelNotFound }
         guard fm.fileExists(atPath: encoderPath) else { throw MurmurError.modelNotFound }
         guard fm.fileExists(atPath: decoderPath) else { throw MurmurError.modelNotFound }
 
         let ortEnv = try ORTEnv(loggingLevel: .warning)
-        let melOpts = try ONNXTranscriptionBackend.makeSessionOptions()
         let encoderOpts = try ONNXTranscriptionBackend.makeSessionOptions()
         let decoderOpts = try ONNXTranscriptionBackend.makeSessionOptions()
 
         self.env = ortEnv
-        self.melSession = try ORTSession(env: ortEnv, modelPath: melPath, sessionOptions: melOpts)
         self.encoderSession = try ORTSession(env: ortEnv, modelPath: encoderPath, sessionOptions: encoderOpts)
         self.decoderSession = try ORTSession(env: ortEnv, modelPath: decoderPath, sessionOptions: decoderOpts)
     }
 
     // MARK: - Mel Feature Extraction
 
-    /// Extract mel spectrogram features from raw audio samples using the ONNX mel extractor.
+    /// Extract mel spectrogram features from raw audio samples using the Swift mel extractor.
     /// - Parameter samples: 16kHz mono Float32 audio samples.
-    /// - Returns: `ORTValue` containing mel features of shape `[1, num_frames, 128]`.
+    /// - Returns: `ORTValue` tensor of shape `[1, num_frames, 128]` and the frame count.
     func extractMelFeatures(samples: [Float]) throws -> (ORTValue, Int) {
-        let audioTensor = try makeFloat32Tensor(values: samples, shape: [1, samples.count])
-        let inputs: [String: ORTValue] = ["audio": audioTensor]
-        let outputNames: Set<String> = ["mel_features"]
-        let results = try melSession.run(withInputs: inputs, outputNames: outputNames, runOptions: nil)
-        guard let melFeatures = results["mel_features"] else {
-            throw MurmurError.transcriptionFailed("Mel extractor output not found")
+        let (features, frameCount) = melExtractor.extract(samples: samples)
+        guard frameCount > 0 else {
+            throw MurmurError.transcriptionFailed("Mel extraction produced zero frames")
         }
-        // Get frame count from tensor shape
-        let shapeInfo = try melFeatures.tensorTypeAndShapeInfo()
-        let shape = shapeInfo.shape  // expected [1, num_frames, 128]
-        guard shape.count >= 2 else {
-            throw MurmurError.transcriptionFailed("Unexpected mel shape: \(shape)")
-        }
-        let frameCount = shape[1].intValue
-        return (melFeatures, frameCount)
+        // features is [frameCount × 128] row-major; wrap as [1, frameCount, 128]
+        let tensor = try makeFloat32Tensor(
+            values: features,
+            shape: [1, frameCount, ONNXTranscriptionBackend.melBins])
+        return (tensor, frameCount)
     }
 
     // MARK: - Encode
