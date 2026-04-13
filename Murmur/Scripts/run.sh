@@ -12,7 +12,10 @@ MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 APP_SUPPORT="$HOME/Library/Application Support/Murmur"
 
-# Build first
+# Patch ORT for Float16 support (idempotent)
+bash Scripts/patch-ort-float16.sh
+
+# Build
 swift build
 
 # Create .app structure

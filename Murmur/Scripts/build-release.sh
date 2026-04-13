@@ -10,7 +10,9 @@ cd "$(dirname "$0")/.."
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)
 echo "Building Murmur v${VERSION}..."
 
-# 1. Build release binary
+# 1. Patch ORT + build release binary
+echo "→ Patching ORT for Float16..."
+bash Scripts/patch-ort-float16.sh
 echo "→ Compiling..."
 swift build -c release 2>&1 | tail -3
 

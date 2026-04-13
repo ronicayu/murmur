@@ -15,7 +15,12 @@ struct MurmurApp: App {
         let mm = ModelManager()
         let backend = mm.activeBackend
         let modelPath = mm.modelDirectory(for: backend)
-        let ts = TranscriptionService(modelPath: modelPath)
+        let ts: any TranscriptionServiceProtocol
+        if backend == .onnx {
+            ts = NativeTranscriptionService(modelPath: modelPath)
+        } else {
+            ts = TranscriptionService(modelPath: modelPath)
+        }
         _modelManager = StateObject(wrappedValue: mm)
         _coordinator = StateObject(wrappedValue: AppCoordinator(transcription: ts))
         _historyService = StateObject(wrappedValue: TranscriptionHistoryService())
@@ -49,7 +54,11 @@ struct MurmurApp: App {
                     }
                 }
                 .onReceive(modelManager.$activeBackend) { newBackend in
-                    coordinator.switchModelPath(modelManager.modelDirectory(for: newBackend))
+                    let newPath = modelManager.modelDirectory(for: newBackend)
+                    let newService: any TranscriptionServiceProtocol = newBackend == .onnx
+                        ? NativeTranscriptionService(modelPath: newPath)
+                        : TranscriptionService(modelPath: newPath)
+                    coordinator.replaceTranscriptionService(newService)
                 }
                 .onReceive(modelManager.$state) { newState in
                     // Preload model immediately after download completes

@@ -10,11 +10,15 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/soffes/HotKey.git", from: "0.2.1"),
+        .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", from: "1.20.0"),
     ],
     targets: [
         .executableTarget(
             name: "Murmur",
-            dependencies: ["HotKey"],
+            dependencies: [
+                "HotKey",
+                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
+            ],
             path: ".",
             exclude: ["Package.swift", "Scripts", "Tests"],
             resources: [.copy("Resources")]

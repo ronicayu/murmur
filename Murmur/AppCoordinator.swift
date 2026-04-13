@@ -62,7 +62,7 @@ final class AppCoordinator: ObservableObject {
 
     let hotkey: HotkeyService
     let audio: AudioService
-    let transcription: TranscriptionService
+    private(set) var transcription: any TranscriptionServiceProtocol
     let injection: TextInjectionService
     let permissions: PermissionsService
     let audioFeedback: AudioFeedbackService
@@ -84,6 +84,13 @@ final class AppCoordinator: ObservableObject {
         Task {
             await transcription.setModelPath(newPath)
         }
+        preloadModelInBackground()
+    }
+
+    /// Replace the transcription service (e.g. when switching between ONNX and Python backends)
+    func replaceTranscriptionService(_ newService: any TranscriptionServiceProtocol) {
+        Task { await transcription.killProcess() }
+        transcription = newService
         preloadModelInBackground()
     }
 
@@ -117,7 +124,7 @@ final class AppCoordinator: ObservableObject {
     init(
         hotkey: HotkeyService = HotkeyService(),
         audio: AudioService = AudioService(),
-        transcription: TranscriptionService = TranscriptionService(),
+        transcription: any TranscriptionServiceProtocol = TranscriptionService(),
         injection: TextInjectionService = TextInjectionService(),
         permissions: PermissionsService = PermissionsService(),
         audioFeedback: AudioFeedbackService = AudioFeedbackService(),

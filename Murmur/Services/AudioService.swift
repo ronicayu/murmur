@@ -66,8 +66,19 @@ final class AudioService: AudioServiceProtocol {
 
     // MARK: - Recording
 
+    /// Tracks whether we have an active tap installed on the input node.
+    private var tapInstalled = false
+
     func startRecording() async throws {
-        guard !engine.isRunning else { return }
+        // Tear down any prior session to prevent SIGABRT from duplicate tap.
+        if engine.isRunning {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            tapInstalled = false
+        } else if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
 
         try checkDiskSpace()
 
@@ -75,23 +86,12 @@ final class AudioService: AudioServiceProtocol {
         let url = tempDir.appendingPathComponent("murmur_\(UUID().uuidString).wav")
         currentRecordingURL = url
 
-        let inputNode = engine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-
-        guard format.sampleRate > 0 else {
-            throw MurmurError.microphoneBusy
-        }
-
         let recordFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 16000,
             channels: 1,
             interleaved: false
         )!
-
-        guard let converter = AVAudioConverter(from: format, to: recordFormat) else {
-            throw MurmurError.microphoneBusy
-        }
 
         let file = try AVAudioFile(forWriting: url, settings: recordFormat.settings)
 
@@ -101,16 +101,29 @@ final class AudioService: AudioServiceProtocol {
         rmsAccumulator = []
         lock.unlock()
 
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+        // Pass nil for tap format — AVAudioEngine will use the actual hardware
+        // format. We lazily create the converter on the first callback using the
+        // real buffer format, avoiding the stale-format mismatch that causes
+        // error -10868 ("formats don't match").
+        let inputNode = engine.inputNode
+        var converter: AVAudioConverter?
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
             guard let self else { return }
 
+            // Lazily create converter from the actual tap format
+            let actualFormat = buffer.format
+            if converter == nil {
+                converter = AVAudioConverter(from: actualFormat, to: recordFormat)
+            }
+            guard let conv = converter else { return }
+
             let frameCount = AVAudioFrameCount(
-                Double(buffer.frameLength) * 16000 / format.sampleRate
+                Double(buffer.frameLength) * 16000 / actualFormat.sampleRate
             )
             guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: recordFormat, frameCapacity: frameCount) else { return }
 
             var error: NSError?
-            converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
+            conv.convert(to: convertedBuffer, error: &error) { _, outStatus in
                 outStatus.pointee = .haveData
                 return buffer
             }
@@ -129,6 +142,7 @@ final class AudioService: AudioServiceProtocol {
             }
         }
 
+        tapInstalled = true
         try engine.start()
         recordingStart = Date()
         logger.info("Recording started")
@@ -148,6 +162,7 @@ final class AudioService: AudioServiceProtocol {
         }
 
         engine.inputNode.removeTap(onBus: 0)
+        tapInstalled = false
         engine.stop()
         maxDurationTask?.cancel()
         maxDurationTask = nil
@@ -181,8 +196,11 @@ final class AudioService: AudioServiceProtocol {
     }
 
     func cancelRecording() {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        if engine.isRunning { engine.stop() }
         maxDurationTask?.cancel()
         maxDurationTask = nil
 

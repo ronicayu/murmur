@@ -43,7 +43,18 @@ protocol TranscriptionServiceProtocol {
     ) async throws -> TranscriptionResult
     func preloadModel() async throws
     func unloadModel() async
+    func setModelPath(_ newPath: URL) async
+    func killProcess() async
     var isModelLoaded: Bool { get }
+}
+
+
+// Default no-op implementations for test mocks.
+// Real implementations (TranscriptionService, NativeTranscriptionService) override these
+// as actor-isolated methods which implicitly satisfy the async requirement.
+extension TranscriptionServiceProtocol {
+    func setModelPath(_ newPath: URL) async {}
+    func killProcess() async {}
 }
 
 // MARK: - JSONLineParser
@@ -390,7 +401,7 @@ actor TranscriptionService: TranscriptionServiceProtocol {
         do {
             try stdinPipe.fileHandleForWriting.write(contentsOf: line)
         } catch {
-            killProcess()
+            await killProcess()
             throw MurmurError.transcriptionFailed("Python process died unexpectedly")
         }
 
@@ -466,7 +477,7 @@ actor TranscriptionService: TranscriptionServiceProtocol {
         do {
             try stdinPipe.fileHandleForWriting.write(contentsOf: line)
         } catch {
-            killProcess()
+            await killProcess()
             throw MurmurError.transcriptionFailed("Python process died unexpectedly")
         }
 

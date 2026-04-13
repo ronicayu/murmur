@@ -39,9 +39,7 @@ struct SettingsView: View {
     private var generalTab: some View {
         Form {
             Section("Hotkey") {
-                HStack {
-                    Text("Trigger:")
-                    Spacer()
+                LabeledContent("Trigger") {
                     if useRightCommand {
                         Text("Right Command")
                             .padding(.horizontal, 8)
@@ -53,118 +51,115 @@ struct SettingsView: View {
                             .onChange(of: hotkeyModifiers) { _, _ in applyHotkey() }
                     }
                 }
-                Toggle("Use Right Command key", isOn: $useRightCommand)
-                    .onChange(of: useRightCommand) { _, newValue in
-                        if newValue {
-                            coordinator.hotkey.register(trigger: .rightCommand)
-                            UserDefaults.standard.removeObject(forKey: "hotkeyKeyCode")
-                            UserDefaults.standard.removeObject(forKey: "hotkeyModifiers")
-                            UserDefaults.standard.set(true, forKey: "useRightCommand")
-                        } else {
-                            applyHotkey()
-                            UserDefaults.standard.set(false, forKey: "useRightCommand")
-                        }
-                    }
-            }
-
-            Section("Recording Mode") {
-                Picker("Mode:", selection: $recordingMode) {
-                    Text("Toggle (tap to start, tap to stop)")
-                        .tag(RecordingMode.toggle.rawValue)
-                    Text("Hold (hold to record, release to stop)")
-                        .tag(RecordingMode.hold.rawValue)
-                }
-                .pickerStyle(.radioGroup)
-                .onChange(of: recordingMode) { _, newValue in
-                    if let mode = RecordingMode(rawValue: newValue) {
-                        coordinator.hotkey.setMode(mode)
-                    }
-                }
-            }
-
-            Section("Language") {
-                Picker("Transcription language:", selection: $transcriptionLanguage) {
-                    Text("Auto (detect language)").tag("auto")
-                    Divider()
-                    Text("English").tag("en")
-                    Text("中文 (Chinese)").tag("zh")
-                    Text("日本語 (Japanese)").tag("ja")
-                    Text("한국어 (Korean)").tag("ko")
-                    Text("Français").tag("fr")
-                    Text("Deutsch").tag("de")
-                    Text("Español").tag("es")
-                    Text("Português").tag("pt")
-                    Text("Italiano").tag("it")
-                    Text("Nederlands").tag("nl")
-                    Text("Polski").tag("pl")
-                    Text("Ελληνικά").tag("el")
-                    Text("العربية").tag("ar")
-                    Text("Tiếng Việt").tag("vi")
-                }
-                Text("Auto works best for mixed Chinese/English. Pin a language if auto-detect is wrong.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Behavior") {
-                Toggle("Sound effects", isOn: $soundEffects)
-                Toggle("Launch at login", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { _, newValue in
-                        setLaunchAtLogin(newValue)
-                    }
-            }
-
-            // MARK: - V3 Streaming (beta)
-            Section {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text("Streaming input (beta)")
-                                .font(.body)
-                            if showDiscoveryBadge {
-                                Text("New")
-                                    .font(.caption2.bold())
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 2)
-                                    .background(Color.orange, in: Capsule())
+                LabeledContent("Right Command") {
+                    Toggle("", isOn: $useRightCommand)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .onChange(of: useRightCommand) { _, newValue in
+                            if newValue {
+                                coordinator.hotkey.register(trigger: .rightCommand)
+                                UserDefaults.standard.removeObject(forKey: "hotkeyKeyCode")
+                                UserDefaults.standard.removeObject(forKey: "hotkeyModifiers")
+                                UserDefaults.standard.set(true, forKey: "useRightCommand")
+                            } else {
+                                applyHotkey()
+                                UserDefaults.standard.set(false, forKey: "useRightCommand")
                             }
                         }
-                        Text("See text appear as you speak. Final result replaces streaming preview.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Recording") {
+                LabeledContent("Mode") {
+                    Picker("", selection: $recordingMode) {
+                        Text("Toggle").tag(RecordingMode.toggle.rawValue)
+                        Text("Hold").tag(RecordingMode.hold.rawValue)
                     }
-                    Spacer()
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 160)
+                    .onChange(of: recordingMode) { _, newValue in
+                        if let mode = RecordingMode(rawValue: newValue) {
+                            coordinator.hotkey.setMode(mode)
+                        }
+                    }
+                }
+                LabeledContent("Language") {
+                    Picker("", selection: $transcriptionLanguage) {
+                        Text("Auto").tag("auto")
+                        Divider()
+                        Text("English").tag("en")
+                        Text("中文").tag("zh")
+                        Text("日本語").tag("ja")
+                        Text("한국어").tag("ko")
+                        Divider()
+                        Text("Français").tag("fr")
+                        Text("Deutsch").tag("de")
+                        Text("Español").tag("es")
+                        Text("Português").tag("pt")
+                        Text("Italiano").tag("it")
+                        Text("Nederlands").tag("nl")
+                        Text("Polski").tag("pl")
+                        Text("Ελληνικά").tag("el")
+                        Text("العربية").tag("ar")
+                        Text("Tiếng Việt").tag("vi")
+                    }
+                    .labelsHidden()
+                    .frame(width: 160)
+                }
+                LabeledContent("Sound effects") {
+                    Toggle("", isOn: $soundEffects)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+                LabeledContent("Launch at login") {
+                    Toggle("", isOn: $launchAtLogin)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .onChange(of: launchAtLogin) { _, newValue in
+                            setLaunchAtLogin(newValue)
+                        }
+                }
+            }
+
+            Section("Experimental") {
+                LabeledContent {
                     Toggle("", isOn: $streamingInputEnabled)
                         .labelsHidden()
+                        .toggleStyle(.switch)
                         .onChange(of: streamingInputEnabled) { _, newValue in
                             if newValue {
-                                // Dismiss discovery badge on first enable
                                 V1UsageCounter.dismissDiscoveryBadge()
                                 discoveryBadgeDismissed = true
                             }
                         }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Streaming input")
+                        Text("Beta")
+                            .font(.caption2.bold())
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.12), in: Capsule())
+                    }
                 }
 
                 if streamingInputEnabled {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Focus timeout:")
-                            Spacer()
+                    LabeledContent("Focus timeout") {
+                        HStack(spacing: 8) {
+                            Slider(value: $focusAbandonSeconds, in: 5...30, step: 5)
+                                .frame(width: 120)
                             Text("\(Int(focusAbandonSeconds))s")
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
+                                .frame(width: 28, alignment: .trailing)
                         }
-                        Slider(value: $focusAbandonSeconds, in: 5...30, step: 5)
-                        Text("Cancel session if you switch apps for longer than this.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 }
-            } header: {
-                Text("Experimental")
             }
         }
+        .formStyle(.grouped)
     }
 
     // MARK: - Model Tab
@@ -175,29 +170,19 @@ struct SettingsView: View {
         Form {
             Section("Speech Engine") {
                 engineRow(.onnx)
-                Text(ModelBackend.onnx.description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
 
-            Section {
-                DisclosureGroup("Advanced Engines", isExpanded: $showAdvancedEngines) {
+                DisclosureGroup("Advanced", isExpanded: $showAdvancedEngines) {
                     engineRow(.huggingface)
                     engineRow(.whisper)
-                    if modelManager.activeBackend != .onnx {
-                        Text(modelManager.activeBackend.description)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
                 }
             }
 
-            Section("Speech Model (\(modelManager.activeBackend.shortName))") {
-                LabeledContent("Status:") {
+            Section("Model — \(modelManager.activeBackend.shortName)") {
+                LabeledContent("Status") {
                     modelStatusBadge
                 }
 
-                LabeledContent("Location:") {
+                LabeledContent("Location") {
                     Text(modelManager.modelDirectory.path)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -206,27 +191,25 @@ struct SettingsView: View {
                 }
 
                 if case .downloading(let progress, let speed) = modelManager.state {
-                    if progress >= 0 {
-                        ProgressView(value: progress)
-                    } else {
-                        ProgressView()
-                            .progressViewStyle(.linear)
-                    }
-                    HStack {
-                        if !modelManager.statusMessage.isEmpty {
-                            Text(modelManager.statusMessage)
+                    VStack(spacing: 4) {
+                        if progress >= 0 {
+                            ProgressView(value: progress)
+                        } else {
+                            ProgressView()
+                                .progressViewStyle(.linear)
                         }
-                        Spacer()
-                        if speed > 0 {
-                            Text(formatSpeed(speed))
+                        HStack {
+                            if !modelManager.statusMessage.isEmpty {
+                                Text(modelManager.statusMessage)
+                            }
+                            Spacer()
+                            if speed > 0 {
+                                Text(formatSpeed(speed))
+                            }
                         }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-
-                if case .downloading = modelManager.state {
-                    // Status already shown in progress section
                 } else if !modelManager.statusMessage.isEmpty {
                     Text(modelManager.statusMessage)
                         .font(.caption)
@@ -243,50 +226,49 @@ struct SettingsView: View {
                             showDeleteConfirmation = true
                         }
                         .alert("Delete Model?", isPresented: $showDeleteConfirmation) {
-                            Button("Delete", role: .destructive) {
-                                try? modelManager.delete()
-                            }
+                            Button("Delete", role: .destructive) { try? modelManager.delete() }
                             Button("Cancel", role: .cancel) { }
                         } message: {
-                            Text("The \(modelManager.activeBackend.shortName) model (\(modelManager.activeBackend.sizeDescription)) will be removed. You can re-download it later.")
+                            Text("The \(modelManager.activeBackend.shortName) model (\(modelManager.activeBackend.sizeDescription)) will be removed.")
                         }
                     } else if case .downloading = modelManager.state {
-                        Button("Cancel Download") {
-                            modelManager.cancelDownload()
-                        }
+                        Button("Cancel Download") { modelManager.cancelDownload() }
                     } else {
-                        Button("Download Model") {
-                            Task { try? await modelManager.download() }
-                        }
+                        Button("Download Model") { Task { try? await modelManager.download() } }
+                            .buttonStyle(.borderedProminent)
                     }
 
                     Spacer()
 
                     if modelManager.state == .ready || modelManager.state == .corrupt {
                         Button("Re-download") {
-                            Task {
-                                try? modelManager.delete()
-                                try? await modelManager.download()
-                            }
+                            Task { try? modelManager.delete(); try? await modelManager.download() }
                         }
                     }
                 }
             }
 
-            Section("Folders") {
+            Section {
                 HStack {
                     Button("Open Model Folder") {
                         NSWorkspace.shared.open(modelManager.modelDirectory)
                     }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
                     Spacer()
                     Button("Open Log Folder") {
                         let logDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                             .appendingPathComponent("Murmur")
                         NSWorkspace.shared.open(logDir)
                     }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
                 }
             }
         }
+        .formStyle(.grouped)
     }
 
     @ViewBuilder
