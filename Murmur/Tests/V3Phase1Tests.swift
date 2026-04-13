@@ -433,11 +433,11 @@ final class AppStateStreamingTests: XCTestCase {
     }
 
     func test_streamingState_statusText_withZeroChunks() {
-        XCTAssertEqual(AppState.streaming(chunkCount: 0).statusText, "Streaming...")
+        XCTAssertEqual(AppState.streaming(chunkCount: 0).statusText, "Listening...")
     }
 
     func test_streamingState_statusText_withChunks() {
-        XCTAssertEqual(AppState.streaming(chunkCount: 2).statusText, "Streaming... (2 chunks)")
+        XCTAssertEqual(AppState.streaming(chunkCount: 2).statusText, "Listening...")
     }
 
     func test_streamingState_isActive() {

@@ -38,7 +38,9 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
     private let continuation: AsyncStream<HotkeyEvent>.Continuation
     private var hotKey: HotKey?
     private var flagsMonitor: Any?
+    private var localFlagsMonitor: Any?
     private var escMonitor: Any?
+    private var localEscMonitor: Any?
     private var isRecording = false
     private var mode: RecordingMode = .toggle
     private var rightCmdWasDown = false
@@ -75,8 +77,8 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
             registerKeyCombo(key: key, modifiers: modifiers)
         }
 
-        // Esc to cancel — global so it works when any app is focused
-        escMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        // Esc to cancel — global + local so it works regardless of which app is focused
+        let escHandler: (NSEvent) -> Void = { [weak self] event in
             guard let self else { return }
             self.lock.lock()
             let recording = self.isRecording
@@ -88,6 +90,11 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
                 self.continuation.yield(.cancelRecording)
             }
         }
+        escMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: escHandler)
+        localEscMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            escHandler(event)
+            return event
+        }
     }
 
     /// Convenience for key+modifier combos (custom hotkey)
@@ -98,9 +105,13 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
     func unregister() {
         hotKey = nil
         if let flagsMonitor { NSEvent.removeMonitor(flagsMonitor) }
+        if let localFlagsMonitor { NSEvent.removeMonitor(localFlagsMonitor) }
         if let escMonitor { NSEvent.removeMonitor(escMonitor) }
+        if let localEscMonitor { NSEvent.removeMonitor(localEscMonitor) }
         flagsMonitor = nil
+        localFlagsMonitor = nil
         escMonitor = nil
+        localEscMonitor = nil
     }
 
     func setMode(_ mode: RecordingMode) {
@@ -113,22 +124,32 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
 
     private func registerRightCommand() {
         // Right Command has keyCode 0x36 (54). Detect via flagsChanged events.
-        flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+        // Need both global (other apps) and local (Murmur focused) monitors.
+        let handler: (NSEvent) -> Void = { [weak self] event in
             guard let self else { return }
             let isRightCmd = event.keyCode == 54 // 0x36 = right command
             guard isRightCmd else { return }
 
             let cmdDown = event.modifierFlags.contains(.command)
 
-            if cmdDown && !self.rightCmdWasDown {
-                // Right Cmd pressed
+            self.lock.lock()
+            let wasDown = self.rightCmdWasDown
+            if cmdDown && !wasDown {
                 self.rightCmdWasDown = true
+                self.lock.unlock()
                 self.handleKeyDown()
-            } else if !cmdDown && self.rightCmdWasDown {
-                // Right Cmd released
+            } else if !cmdDown && wasDown {
                 self.rightCmdWasDown = false
+                self.lock.unlock()
                 self.handleKeyUp()
+            } else {
+                self.lock.unlock()
             }
+        }
+        flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged, handler: handler)
+        localFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+            handler(event)
+            return event
         }
     }
 
