@@ -675,13 +675,25 @@ final class AppCoordinator: ObservableObject {
 
     // MARK: - Helpers
 
+    private var isUndoEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "undoAfterTranscription")
+    }
+
     private func transition(to newState: AppState) {
+        // Skip undoable state when undo is disabled
+        let effectiveState: AppState
+        if case .undoable = newState, !isUndoEnabled {
+            effectiveState = .idle
+        } else {
+            effectiveState = newState
+        }
+
         let old = state
-        state = newState
-        Self.log.info("State: \(String(describing: old)) → \(String(describing: newState))")
+        state = effectiveState
+        Self.log.info("State: \(String(describing: old)) → \(String(describing: effectiveState))")
 
         // Auto-transition from undoable to idle after 5s (covers both V1 and streaming)
-        if case .undoable = newState {
+        if case .undoable = effectiveState {
             setupUndoAutoRecovery()
         }
 

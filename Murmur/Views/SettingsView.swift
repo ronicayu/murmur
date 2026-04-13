@@ -12,6 +12,7 @@ struct SettingsView: View {
     @AppStorage("streamingInputEnabled") private var streamingInputEnabled: Bool = false
     @AppStorage("streamingDiscoveryBadgeDismissed") private var discoveryBadgeDismissed: Bool = false
     @AppStorage("streamingFocusAbandonSeconds") private var focusAbandonSeconds: Double = 10.0
+    @AppStorage("undoAfterTranscription") private var undoAfterTranscription: Bool = false
 
     @State private var useRightCommand: Bool = true
     @State private var showDeleteConfirmation = false
@@ -109,6 +110,11 @@ struct SettingsView: View {
                 }
                 LabeledContent("Sound effects") {
                     Toggle("", isOn: $soundEffects)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+                LabeledContent("Undo after transcription") {
+                    Toggle("", isOn: $undoAfterTranscription)
                         .labelsHidden()
                         .toggleStyle(.switch)
                 }
