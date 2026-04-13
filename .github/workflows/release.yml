@@ -56,8 +56,8 @@ jobs:
           BUNDLE=".build/arm64-apple-macosx/release/Murmur_Murmur.bundle"
           [ -d "$BUNDLE" ] && cp -R "$BUNDLE" "$APP/Contents/Resources/" || true
 
-          # Ad-hoc sign
-          codesign --force --deep --sign - "$APP"
+          # Ad-hoc sign with entitlements
+          codesign --force --deep --sign - --entitlements Murmur.entitlements "$APP"
 
       - name: Create DMG with Applications shortcut
         working-directory: Murmur

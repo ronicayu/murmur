@@ -303,7 +303,13 @@ final class AppCoordinator: ObservableObject {
         switch event {
         case .startRecording:
             let status = permissions.checkAll()
-            if status.microphone != .granted {
+            if status.microphone == .notDetermined {
+                let granted = await permissions.requestMicrophone()
+                if !granted {
+                    transition(to: .error(.permissionRevoked(.microphone)))
+                    return
+                }
+            } else if status.microphone != .granted {
                 transition(to: .error(.permissionRevoked(.microphone)))
                 return
             }
