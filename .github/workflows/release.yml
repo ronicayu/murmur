@@ -18,6 +18,14 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
+      - name: Resolve SPM dependencies
+        working-directory: Murmur
+        run: swift package resolve
+
+      - name: Patch ORT for Float16 support
+        working-directory: Murmur
+        run: bash Scripts/patch-ort-float16.sh
+
       - name: Build release binary
         working-directory: Murmur
         run: swift build -c release
