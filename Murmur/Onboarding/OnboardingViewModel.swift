@@ -1,5 +1,6 @@
 import SwiftUI
 import ServiceManagement
+import Combine
 import HotKey
 
 @MainActor
@@ -32,6 +33,7 @@ final class OnboardingViewModel: ObservableObject {
     }
     private var accessibilityPollTask: Task<Void, Never>?
     private var testWatchTask: Task<Void, Never>?
+    private var modelManagerCancellable: AnyCancellable?
 
     init(coordinator: AppCoordinator, modelManager: ModelManager) {
         self.coordinator = coordinator
@@ -40,6 +42,14 @@ final class OnboardingViewModel: ObservableObject {
         let status = coordinator.permissions.checkAll()
         micGranted = status.microphone == .granted
         accessibilityGranted = status.accessibility == .granted
+
+        // Forward ModelManager published-state changes into this view model so
+        // SwiftUI re-renders OnboardingView when download progress/state changes.
+        // (Nested ObservableObjects don't propagate automatically.)
+        modelManagerCancellable = modelManager.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
     }
 
     func nextStep() {
