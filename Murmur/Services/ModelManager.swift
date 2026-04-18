@@ -166,9 +166,24 @@ final class ModelManager: ObservableObject {
         return allExist ? dir : nil
     }
 
-    /// Check if a specific backend's model is downloaded
+    /// Check if a specific backend's model is downloaded.
+    ///
+    /// For the active backend, the state machine is authoritative: returns false
+    /// while a download or verification is in progress, even if files exist on
+    /// disk (HuggingFace writes files incrementally before the copy completes).
+    /// For inactive backends, file existence is the only signal we have.
     func isModelDownloaded(for backend: ModelBackend) -> Bool {
-        modelPath(for: backend) != nil
+        if backend == activeBackend {
+            // Guard against the transient window where HF has written some required
+            // files but the download isn't actually complete yet.
+            switch state {
+            case .downloading, .verifying:
+                return false
+            default:
+                return modelPath(for: backend) != nil
+            }
+        }
+        return modelPath(for: backend) != nil
     }
 
     var pythonEnvPath: URL {
