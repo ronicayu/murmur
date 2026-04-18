@@ -46,7 +46,11 @@ final class OnboardingViewModel: ObservableObject {
         // Forward ModelManager published-state changes into this view model so
         // SwiftUI re-renders OnboardingView when download progress/state changes.
         // (Nested ObservableObjects don't propagate automatically.)
+        // .receive(on: DispatchQueue.main) is a defensive guard: ModelManager is
+        // @MainActor today, but this ensures the sink fires on main even if that
+        // ever changes, preventing silent threading regressions.
         modelManagerCancellable = modelManager.objectWillChange
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
             }
@@ -264,5 +268,7 @@ final class OnboardingViewModel: ObservableObject {
     deinit {
         accessibilityPollTask?.cancel()
         testWatchTask?.cancel()
+        // modelManagerCancellable is intentionally not nil'd here;
+        // AnyCancellable cancels automatically on deallocation (ARC handles it).
     }
 }

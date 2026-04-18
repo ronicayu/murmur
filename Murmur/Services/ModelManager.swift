@@ -135,8 +135,25 @@ final class ModelManager: ObservableObject {
     @Published private(set) var statusMessage: String = ""
     @Published var activeBackend: ModelBackend {
         didSet {
+            // Refuse backend switch while a download or verification is in progress.
+            // The running download's monitor task writes state for the backend that
+            // started the download; letting activeBackend change mid-flight would
+            // mismatch state to the wrong backend and corrupt isModelDownloaded logic.
+            if isDownloadActive {
+                activeBackend = oldValue
+                return
+            }
             UserDefaults.standard.set(activeBackend.rawValue, forKey: "modelBackend")
             refreshState()
+        }
+    }
+
+    /// True while a download or verification is in progress.
+    /// Use this to lock UI controls that must not run concurrently with a download.
+    var isDownloadActive: Bool {
+        switch state {
+        case .downloading, .verifying: return true
+        default: return false
         }
     }
 
@@ -174,13 +191,15 @@ final class ModelManager: ObservableObject {
     /// For inactive backends, file existence is the only signal we have.
     func isModelDownloaded(for backend: ModelBackend) -> Bool {
         if backend == activeBackend {
-            // Guard against the transient window where HF has written some required
-            // files but the download isn't actually complete yet.
+            // The state machine is authoritative for the active backend.
+            // Only .ready means the model is usable; all other states — including
+            // in-progress (.downloading, .verifying) and failed (.corrupt, .error)
+            // — must show as not-downloaded so the UI offers the right action.
             switch state {
-            case .downloading, .verifying:
-                return false
-            default:
+            case .ready:
                 return modelPath(for: backend) != nil
+            default:
+                return false
             }
         }
         return modelPath(for: backend) != nil
