@@ -16,8 +16,13 @@ struct SettingsView: View {
 
     @State private var useRightCommand: Bool = true
     @State private var showDeleteConfirmation = false
+    @State private var showCancelDownloadConfirmation = false
     @State private var hotkeyKey: Key = .space
     @State private var hotkeyModifiers: NSEvent.ModifierFlags = .command
+
+    /// Minimum downloaded bytes before the cancel confirmation dialog is shown.
+    /// Below this threshold a single click is fine — very little data would be lost.
+    private static let cancelConfirmThresholdBytes: Int64 = 100 * 1_000_000 // 100 MB
 
     private var showDiscoveryBadge: Bool {
         V1UsageCounter.shouldShowDiscoveryBadge
@@ -238,7 +243,26 @@ struct SettingsView: View {
                             Text("The \(modelManager.activeBackend.shortName) model (\(modelManager.activeBackend.sizeDescription)) will be removed.")
                         }
                     } else if case .downloading = modelManager.state {
-                        Button("Cancel Download") { modelManager.cancelDownload() }
+                        Button("Cancel Download") {
+                            if modelManager.downloadedBytes >= Self.cancelConfirmThresholdBytes {
+                                showCancelDownloadConfirmation = true
+                            } else {
+                                modelManager.cancelDownload()
+                            }
+                        }
+                        .confirmationDialog(
+                            "Cancel Download?",
+                            isPresented: $showCancelDownloadConfirmation,
+                            titleVisibility: .visible
+                        ) {
+                            Button("Cancel Download", role: .destructive) {
+                                modelManager.cancelDownload()
+                            }
+                            Button("Keep Downloading", role: .cancel) { }
+                        } message: {
+                            let mb = modelManager.downloadedBytes / 1_000_000
+                            Text("You've downloaded \(mb) MB — cancelling will discard it.")
+                        }
                     } else {
                         Button("Download Model") { Task { try? await modelManager.download() } }
                             .buttonStyle(.borderedProminent)
@@ -306,6 +330,7 @@ struct SettingsView: View {
         let isActive: Bool = modelManager.activeBackend == backend
         let isDownloaded: Bool = modelManager.isModelDownloaded(for: backend)
         let switchLocked: Bool = modelManager.isDownloadActive
+        let isLocked: Bool = switchLocked && !isActive
         return Button {
             modelManager.setActiveBackend(backend)
         } label: {
@@ -323,6 +348,11 @@ struct SettingsView: View {
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    if isLocked {
+                        Text("Locked during download")
+                            .font(.caption)
+                            .foregroundStyle(Color.secondary)
+                    }
                 }
                 Spacer()
                 if isActive {
@@ -336,7 +366,8 @@ struct SettingsView: View {
         // Disable switching backends while a download or verification is running.
         // The didSet guard in ModelManager is the authoritative lock; this is a
         // defense-in-depth layer that also gives the user a visual affordance.
-        .disabled(switchLocked && !isActive)
+        .disabled(isLocked)
+        .help(isLocked ? "Locked during download — wait for it to finish or cancel first." : "")
     }
 
     // MARK: - Helpers

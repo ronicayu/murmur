@@ -276,7 +276,7 @@ final class AppCoordinator: ObservableObject {
 
                 let undoableState = AppState.undoable(text: result.text, method: method)
                 self.transition(to: undoableState)
-                self.audioFeedback.playSuccess()
+                // No success chime: inserted text is visually self-evident.
                 self.pill.show(state: undoableState)
                 self.pill.hide(after: 2)
 
@@ -288,11 +288,7 @@ final class AppCoordinator: ObservableObject {
                 self.transition(to: .idle)
                 self.pill.hide()
             } catch {
-                let err = self.mapError(error)
-                self.transition(to: .error(err))
-                self.audioFeedback.playError()
-                self.pill.show(state: .error(err))
-                self.pill.hide(after: 2)
+                self.handleError(self.mapError(error))
             }
         }
     }
@@ -302,6 +298,15 @@ final class AppCoordinator: ObservableObject {
     private func handleHotkeyEvent(_ event: HotkeyEvent) async {
         switch event {
         case .startRecording:
+            // Pre-check: without a downloaded model the streaming pipeline would
+            // silently swallow transcription errors (processChunkBuffer logs and
+            // continues; full-pass transitions to .done on failure). Catch it
+            // here and surface a proper NSAlert before the user wastes a
+            // recording on a session that can't produce text.
+            guard Self.isActiveBackendModelInstalled else {
+                handleError(.modelNotFound)
+                return
+            }
             let status = permissions.checkAll()
             if status.microphone == .notDetermined {
                 let granted = await permissions.requestMicrophone()
@@ -338,7 +343,7 @@ final class AppCoordinator: ObservableObject {
             streamingCoordinator?.cancelSession()
             streamingCoordinator?.resetToIdle()
             audio.cancelRecording()
-            audioFeedback.playStopRecording()
+            // No sound: user just pressed Escape; pill.hide() is the confirmation.
             pill.hide()
             transition(to: .idle)
         }
@@ -459,7 +464,10 @@ final class AppCoordinator: ObservableObject {
     private func stopAndTranscribeStreaming() async {
         audioLevelTask?.cancel()
         maxDurationTask?.cancel()
-        audioFeedback.playStopRecording()
+        // No stop sound: release is user-initiated, already known to the user.
+        // Pill transitions ("Listening..." → "Transcribing...") provide visual
+        // confirmation; V1 success chime still confirms the system event of
+        // transcription completing.
 
         audio.detachStreamingAccumulator()
 
@@ -483,15 +491,9 @@ final class AppCoordinator: ObservableObject {
                 switch reason {
                 case .focusAbandoned:
                     // UT-P1: Notify user that session was abandoned due to app switch.
-                    transition(to: .idle)
-                    audioFeedback.playError()
-                    pill.show(state: .error(MurmurError.sessionAbandoned))
-                    pill.hide(after: 2)
+                    handleError(.sessionAbandoned)
                 case .backstopTimeout:
-                    transition(to: .idle)
-                    audioFeedback.playError()
-                    pill.show(state: .error(MurmurError.timeout(operation: "Streaming")))
-                    pill.hide(after: 2)
+                    handleError(.timeout(operation: "Streaming"))
                 case .user:
                     transition(to: .idle)
                     pill.hide(after: 0.5)
@@ -499,36 +501,29 @@ final class AppCoordinator: ObservableObject {
             } else if streamingCoordinator?.didTriggerCPUFallback == true {
                 // UT-P1: Inform user that streaming was paused due to high CPU.
                 // Full-pass still ran, so show result normally but with a note.
+                // Success sound already fired on .finalizing transition (see waitForStreamingDone).
                 if let replacedText = streamingCoordinator?.fullPassReplacedText {
                     let undoableState = AppState.undoable(text: replacedText, method: .clipboard)
                     transition(to: undoableState)
-                    audioFeedback.playSuccess()
                     pill.show(state: undoableState)
                     pill.hide(after: 3)
                 } else {
                     transition(to: .idle)
-                    audioFeedback.playSuccess()
                     pill.hide(after: 1)
                 }
             } else if let replacedText = streamingCoordinator?.fullPassReplacedText {
                 let undoableState = AppState.undoable(text: replacedText, method: .clipboard)
                 transition(to: undoableState)
-                audioFeedback.playSuccess()
                 pill.show(state: undoableState)
                 pill.hide(after: 3)
             } else {
                 transition(to: .idle)
-                audioFeedback.playSuccess()
                 pill.hide(after: 1)
             }
 
         } catch {
             streamingCoordinator?.cancelSession()
-            let err = mapError(error)
-            transition(to: .error(err))
-            audioFeedback.playError()
-            pill.show(state: .error(err))
-            pill.hide(after: 2)
+            handleError(mapError(error))
         }
 
         // Reset coordinator so next session can begin
@@ -582,6 +577,14 @@ final class AppCoordinator: ObservableObject {
                     case .done, .cancelled, .failed:
                         return
                     case .finalizing:
+                        // Deliberately no success chime on the streaming path.
+                        // Text appears progressively during recording, the stop
+                        // sound already plays on hotkey release, and the pill's
+                        // "Inserted" label covers the visual confirmation. A
+                        // chime here either fires before the tail chunk's text
+                        // (sound → text gap) or after the full-pass (text →
+                        // sound gap, originally 1–15s) — both felt off in
+                        // testing.
                         if !warningSent,
                            let startedAt = coordinator.finalizingStartedAt,
                            Date().timeIntervalSince(startedAt) >= StreamingTranscriptionCoordinator.fullPassWarningSeconds {
@@ -621,7 +624,8 @@ final class AppCoordinator: ObservableObject {
     private func stopAndTranscribeV1() async {
         audioLevelTask?.cancel()
         maxDurationTask?.cancel()
-        audioFeedback.playStopRecording()
+        // No stop sound: release is user-initiated. Success chime on inject
+        // confirms the system event once transcription finishes.
 
         do {
             transition(to: .transcribing)
@@ -654,16 +658,15 @@ final class AppCoordinator: ObservableObject {
 
             let undoableState = AppState.undoable(text: result.text, method: method)
             transition(to: undoableState)
-            audioFeedback.playSuccess()
+            // No success chime: user can see the text appear in their editor
+            // and the "Inserted" pill confirms it. A sound is redundant. Error
+            // path still plays error sound because failures have no visual
+            // equivalent.
             pill.show(state: undoableState)
             pill.hide(after: 2)
             // Undo timer + Cmd+Z monitor set up automatically by transition(to: .undoable)
         } catch {
-            let err = mapError(error)
-            transition(to: .error(err))
-            audioFeedback.playError()
-            pill.show(state: .error(err))
-            pill.hide(after: 2)
+            handleError(mapError(error))
         }
 
         // Drain pending recording
@@ -697,13 +700,18 @@ final class AppCoordinator: ObservableObject {
             setupUndoAutoRecovery()
         }
 
-        // Permission errors show a blocking alert; other errors auto-recover
+        // Permission errors show a blocking alert; other errors auto-recover.
+        // Surface every error to the unified log so user-reported issues can be
+        // diagnosed without repro steps. Read via Console.app, filter by
+        // subsystem=com.murmur.app. String(describing:) prints the enum case and
+        // associated values — more useful than localizedDescription for debugging.
         if case .error(let err) = newState {
+            Self.log.error("Entered error state: \(String(describing: err)) — \(err.localizedDescription)")
             if case .permissionRevoked(let perm) = err {
                 showPermissionAlert(for: perm)
             } else {
                 Task { @MainActor [weak self] in
-                    try? await Task.sleep(for: .seconds(2))
+                    try? await Task.sleep(for: .seconds(Self.errorAutoRecoverySeconds))
                     guard let self else { return }
                     if case .error = self.state {
                         self.state = .idle
@@ -712,6 +720,72 @@ final class AppCoordinator: ObservableObject {
                 }
             }
         }
+    }
+
+    /// How long a transient error pill stays visible before auto-hiding.
+    /// The pill shows the short label (e.g. "Model missing"); full detail is
+    /// in the NSAlert for critical errors and the unified log for everything.
+    private static let errorAutoRecoverySeconds: TimeInterval = 4
+
+    /// Fast readiness check for the currently selected backend — is a
+    /// manifest.json (FU-04 "download + verify completed" marker) present
+    /// on disk for the active backend? Used by the startRecording pre-check
+    /// to avoid wasting a recording session when no model is installed.
+    private static var isActiveBackendModelInstalled: Bool {
+        let saved = UserDefaults.standard.string(forKey: "modelBackend") ?? "onnx"
+        let subdir: String
+        switch saved {
+        case "huggingface": subdir = "Murmur/Models"
+        case "whisper": subdir = "Murmur/Models-Whisper"
+        default: subdir = "Murmur/Models-ONNX"
+        }
+        let manifestURL = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(subdir)
+            .appendingPathComponent("manifest.json")
+        return FileManager.default.fileExists(atPath: manifestURL.path)
+    }
+
+    /// Central error-presentation funnel. Every catch block that maps a thrown
+    /// error into a user-visible failure should go through here.
+    ///
+    /// - Critical errors (model missing, disk full, permission revoked) pop an
+    ///   NSAlert — the user must acknowledge them before continuing.
+    /// - Transient errors (timeouts, silence, transcription failures) flash a
+    ///   short pill with `err.shortMessage` and auto-hide after a few seconds.
+    ///
+    /// Full-detail copy for both paths lives on MurmurError (`errorDescription`
+    /// / `alertTitle` / `shortMessage`) and is also logged via `Self.log.error`
+    /// in `transition(to:)`.
+    private func handleError(_ err: MurmurError) {
+        // transition() logs the error and triggers the permission alert
+        // (which has its own button layout). Nothing else to do for that path.
+        transition(to: .error(err))
+        if case .permissionRevoked = err { return }
+
+        audioFeedback.playError()
+
+        switch err.severity {
+        case .critical:
+            showCriticalErrorAlert(for: err)
+        case .transient:
+            pill.show(state: .error(err))
+            pill.hide(after: Self.errorAutoRecoverySeconds)
+        }
+    }
+
+    private func showCriticalErrorAlert(for err: MurmurError) {
+        // Murmur is LSUIElement (menu-bar only); without an explicit activate,
+        // runModal() can appear behind the focused app or ignore the event.
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = err.alertTitle
+        alert.informativeText = err.errorDescription ?? ""
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        _ = alert.runModal()
+        state = .idle
+        pill.hide()
     }
 
     private func showPermissionAlert(for permission: MurmurError.Permission) {

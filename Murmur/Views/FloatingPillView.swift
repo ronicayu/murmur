@@ -25,8 +25,8 @@ struct FloatingPillView: View {
             return "Streaming voice input. Press Escape to cancel."
         case .transcribing: return "Transcribing audio"
         case .injecting: return "Inserting text"
-        case .undoable(let text, _): return "Transcribed: \(text). Press Command Z to undo."
-        case .error(let err): return "Error: \(err.localizedDescription)"
+        case .undoable: return "Inserted"
+        case .error(let err): return "Error: \(err.shortMessage). \(err.errorDescription ?? "")"
         case .idle: return "Murmur idle"
         }
     }
@@ -91,18 +91,12 @@ struct FloatingPillView: View {
         case .injecting:
             Text("Inserting text...")
                 .font(.system(.caption, design: .rounded, weight: .medium))
-        case .undoable(let text, _):
-            VStack(spacing: 1) {
-                Text(text.prefix(30))
-                    .font(.system(.caption, design: .rounded))
-                    .lineLimit(1)
-                Text("⌘Z to undo")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-            }
+        case .undoable:
+            Text("Inserted")
+                .font(.system(.caption, design: .rounded, weight: .medium))
         case .error(let err):
-            Text(err.localizedDescription)
-                .font(.system(.caption, design: .rounded))
+            Text(err.shortMessage)
+                .font(.system(.caption, design: .rounded, weight: .medium))
                 .foregroundStyle(.orange)
                 .lineLimit(1)
         case .idle:
