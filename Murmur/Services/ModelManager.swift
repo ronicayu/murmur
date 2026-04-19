@@ -4,6 +4,24 @@ import os
 import Combine
 import CryptoKit
 
+/// Ensures a CheckedContinuation is resumed at most once, even when the
+/// resume can be triggered from multiple concurrent contexts (Process.terminationHandler
+/// fires on a background queue; the post-run defensive check runs on the calling actor).
+/// Reference-type so closures can capture & mutate the flag without tripping
+/// Swift's concurrent-capture diagnostics.
+private final class ResumeGuard: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resumed = false
+    /// Atomically claim the single resume opportunity. Returns true the first time,
+    /// false on every subsequent call. Caller is responsible for the actual `continuation.resume(...)`.
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !resumed else { return false }
+        resumed = true
+        return true
+    }
+}
+
 // MARK: - Model Backend
 
 enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
@@ -513,32 +531,26 @@ final class ModelManager: ObservableObject {
 
         // Race fix: attach terminationHandler BEFORE process.run() so that a
         // cache-hit subprocess that exits in milliseconds never escapes the handler.
-        // We use an NSLock-guarded flag so the handler (fires on a background queue)
-        // and the post-run defensive check (runs on the calling actor) cannot both
-        // resume the same continuation.
-        let resumeLock = NSLock()
-        var alreadyResumed = false
+        // ResumeGuard ensures the handler (background queue) and the post-run
+        // defensive check (calling actor) cannot both resume the same continuation.
+        let resumeGuard = ResumeGuard()
 
         // Wait for process exit (M2 fix: don't block main actor).
         // Handler is attached first, then run() is called, then we do a defensive
         // check in case the process already exited before we finished setting up.
         let exitStatus: Int32 = await withCheckedContinuation { continuation in
             process.terminationHandler = { proc in
-                resumeLock.lock()
-                defer { resumeLock.unlock() }
-                guard !alreadyResumed else { return }
-                alreadyResumed = true
-                continuation.resume(returning: proc.terminationStatus)
+                if resumeGuard.claim() {
+                    continuation.resume(returning: proc.terminationStatus)
+                }
             }
 
             do {
                 try process.run()
             } catch {
-                resumeLock.lock()
-                defer { resumeLock.unlock() }
-                guard !alreadyResumed else { return }
-                alreadyResumed = true
-                continuation.resume(returning: Int32(-1))
+                if resumeGuard.claim() {
+                    continuation.resume(returning: Int32(-1))
+                }
                 return
             }
 
@@ -547,11 +559,7 @@ final class ModelManager: ObservableObject {
 
             // Defensive: if the subprocess already exited before we got here
             // (race between handler attach and run completion), resume now.
-            if !process.isRunning {
-                resumeLock.lock()
-                defer { resumeLock.unlock() }
-                guard !alreadyResumed else { return }
-                alreadyResumed = true
+            if !process.isRunning, resumeGuard.claim() {
                 continuation.resume(returning: process.terminationStatus)
             }
         }
@@ -934,27 +942,21 @@ final class ModelManager: ObservableObject {
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
 
-        // Same race fix as download(): attach handler before run().
-        let lock = NSLock()
-        var resumed = false
+        // Same race fix as download(): attach handler before run(). See ResumeGuard.
+        let resumeGuard = ResumeGuard()
         let status: Int32 = await withCheckedContinuation { continuation in
             proc.terminationHandler = { p in
-                lock.lock(); defer { lock.unlock() }
-                guard !resumed else { return }
-                resumed = true
-                continuation.resume(returning: p.terminationStatus)
+                if resumeGuard.claim() {
+                    continuation.resume(returning: p.terminationStatus)
+                }
             }
             do { try proc.run() } catch {
-                lock.lock(); defer { lock.unlock() }
-                guard !resumed else { return }
-                resumed = true
-                continuation.resume(returning: Int32(-1))
+                if resumeGuard.claim() {
+                    continuation.resume(returning: Int32(-1))
+                }
                 return
             }
-            if !proc.isRunning {
-                lock.lock(); defer { lock.unlock() }
-                guard !resumed else { return }
-                resumed = true
+            if !proc.isRunning, resumeGuard.claim() {
                 continuation.resume(returning: proc.terminationStatus)
             }
         }
@@ -994,27 +996,21 @@ final class ModelManager: ObservableObject {
             }
         }
 
-        // Same race fix: attach handler before run().
-        let lock = NSLock()
-        var resumed = false
+        // Same race fix: attach handler before run(). See ResumeGuard.
+        let resumeGuard = ResumeGuard()
         let status: Int32 = await withCheckedContinuation { continuation in
             proc.terminationHandler = { p in
-                lock.lock(); defer { lock.unlock() }
-                guard !resumed else { return }
-                resumed = true
-                continuation.resume(returning: p.terminationStatus)
+                if resumeGuard.claim() {
+                    continuation.resume(returning: p.terminationStatus)
+                }
             }
             do { try proc.run() } catch {
-                lock.lock(); defer { lock.unlock() }
-                guard !resumed else { return }
-                resumed = true
-                continuation.resume(returning: Int32(-1))
+                if resumeGuard.claim() {
+                    continuation.resume(returning: Int32(-1))
+                }
                 return
             }
-            if !proc.isRunning {
-                lock.lock(); defer { lock.unlock() }
-                guard !resumed else { return }
-                resumed = true
+            if !proc.isRunning, resumeGuard.claim() {
                 continuation.resume(returning: proc.terminationStatus)
             }
         }
