@@ -152,6 +152,7 @@ final class ModelManager: ObservableObject {
     @Published private(set) var state: ModelState = .notDownloaded
     @Published private(set) var downloadProgress: Double = 0
     @Published private(set) var downloadSpeed: Int64 = 0 // bytes/sec
+    @Published private(set) var downloadedBytes: Int64 = 0 // total bytes written so far
     @Published private(set) var statusMessage: String = ""
 
     /// The currently selected backend. Use `setActiveBackend(_:)` to change it;
@@ -410,10 +411,12 @@ final class ModelManager: ObservableObject {
         if modelPath != nil {
             state = .ready
             downloadProgress = 0
+            downloadedBytes = 0
             statusMessage = ""
         } else {
             state = .notDownloaded
             downloadProgress = 0
+            downloadedBytes = 0
             let partialSize = directorySize(modelDirectory)
             if partialSize > 0 {
                 statusMessage = "Partial download: \(partialSize / 1_000_000) MB on disk"
@@ -519,6 +522,7 @@ final class ModelManager: ObservableObject {
                 let smoothedSpeed = speedSamples.reduce(0, +) / Int64(speedSamples.count)
 
                 self.downloadSpeed = smoothedSpeed
+                self.downloadedBytes = modelSize
                 // Use indeterminate progress (-1) so the UI shows a spinner, not a stuck bar
                 self.state = .downloading(progress: -1, bytesPerSec: smoothedSpeed)
                 let sizeMB = modelSize / 1_000_000
@@ -689,6 +693,7 @@ final class ModelManager: ObservableObject {
         // (e.g. setActiveBackend guard) will see the updated state.
         state = .notDownloaded
         downloadProgress = 0
+        downloadedBytes = 0
         statusMessage = ""
         logger.info("Download cancelled (subprocess cleanup running in background)")
     }
