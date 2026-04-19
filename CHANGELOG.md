@@ -1,5 +1,23 @@
 # Changelog
 
+<!-- Release process:
+     1. Bump `CFBundleShortVersionString` in `Murmur/Info.plist` to the new version.
+     2. Add a section here describing what changed.
+     3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
+        anyway, but keeping the plist in sync prevents confusion for local builds. -->
+
+## [0.2.2] — 2026-04-19
+
+### Added
+- FU-07: download stall timeout — if the download makes no byte progress for 90 s the app cancels the subprocess and surfaces a critical `.downloadStalled` NSAlert ("Download stopped making progress") so the user can retry after a network hiccup
+- FU-03: subprocess-lifecycle integration tests for `cancelDownload` — real `Process` injection via `__testing_injectDownloadProcess`, covers SIGTERM→SIGKILL escalation, partial-file cleanup, cancel→redownload race
+- Test-only `__testing_setModelDirectory(_:for:)` seam redirects model file ops to a temp dir so integration tests can't delete a developer's real installed model
+
+### Fixed
+- FU-10: 9 `V3AXSelectReplaceTests` that silently failed on any machine without a focused text field now skip with an actionable message instead of failing CI
+- FU-09: `actions/checkout` bumped to `@v5` for Node-24 compatibility (GitHub deprecation)
+- FU-11: `CFBundleShortVersionString` in `Info.plist` kept in sync with shipped version
+
 ## [0.2.1] — 2026-04-19
 
 ### Fixed
