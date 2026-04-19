@@ -35,7 +35,7 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
         // Force active backend to .onnx to have a known required-files set.
         defaults.set(ModelBackend.onnx.rawValue, forKey: backendKey)
         manager = ModelManager()
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
 
         let dir = manager.modelDirectory(for: .onnx)
         let onnxDir = dir.appendingPathComponent("onnx")
@@ -79,8 +79,8 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
 
     func test_activeBackend_notDownloadedState_filesAbsent_returnsFalse() {
         // Arrange — use a fresh manager pointing at .whisper (no files exist for it)
-        manager.activeBackend = .whisper
-        // refreshState() is called by the didSet; .whisper has no planted files so
+        _ = manager.setActiveBackend(.whisper)
+        // refreshState() is called by setActiveBackend; .whisper has no planted files so
         // state will be .notDownloaded
         XCTAssertEqual(manager.state, .notDownloaded,
                        "Precondition: state must be .notDownloaded when no files exist")
@@ -90,7 +90,7 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
                        "Active backend in .notDownloaded state must return false")
 
         // Clean up .whisper switch
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
     }
 
     // MARK: .ready + files absent → false (defensive: state says ready but disk disagrees)
@@ -120,7 +120,7 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
 
     func test_nonActiveBackend_filesPresent_returnsTrue() throws {
         // Arrange — ensure active is .onnx, plant files for .whisper
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
         let whisperDir = manager.modelDirectory(for: .whisper)
         let onnxSubdir = whisperDir.appendingPathComponent("onnx")
         try FileManager.default.createDirectory(at: onnxSubdir, withIntermediateDirectories: true)
@@ -144,7 +144,7 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
         // Arrange — ensure active is .onnx.
         // Use .whisper as the probe: plant no files for it, then verify.
         // We guard against an environment where whisper files already exist.
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
         let whisperDir = manager.modelDirectory(for: .whisper)
         let whisperFilesExist = ModelBackend.whisper.requiredFiles.allSatisfy { file in
             FileManager.default.fileExists(atPath: whisperDir.appendingPathComponent(file).path)
@@ -195,12 +195,12 @@ final class ActiveBackendDidSetGuardTests: XCTestCase {
         try super.setUpWithError()
         defaults.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
         manager = ModelManager()
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
     }
 
     override func tearDownWithError() throws {
         // Restore a known backend
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
         manager = nil
         try super.tearDownWithError()
     }
@@ -214,14 +214,15 @@ final class ActiveBackendDidSetGuardTests: XCTestCase {
         XCTAssertEqual(manager.activeBackend, .onnx)
 
         // Act
-        manager.activeBackend = .whisper
+        let accepted = manager.setActiveBackend(.whisper)
 
         // Assert
+        XCTAssertTrue(accepted)
         XCTAssertEqual(manager.activeBackend, .whisper,
                        "Backend switch must succeed when no download is in progress")
 
         // Cleanup
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
     }
 
     func test_switchBackend_whenIdle_persistsToUserDefaults() {
@@ -229,24 +230,25 @@ final class ActiveBackendDidSetGuardTests: XCTestCase {
         XCTAssertFalse(manager.isDownloadActive)
 
         // Act
-        manager.activeBackend = .huggingface
+        _ = manager.setActiveBackend(.huggingface)
 
         // Assert
         XCTAssertEqual(defaults.string(forKey: "modelBackend"), ModelBackend.huggingface.rawValue,
                        "Successful switch must persist to UserDefaults")
 
         // Cleanup
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
     }
 
     func test_switchBackend_sameValue_doesNotCorruptDefaults() {
         // Arrange
         XCTAssertEqual(manager.activeBackend, .onnx)
 
-        // Act — assigning the same value still triggers didSet; should not corrupt state
-        manager.activeBackend = .onnx
+        // Act — same-value switch should still succeed cleanly
+        let accepted = manager.setActiveBackend(.onnx)
 
         // Assert
+        XCTAssertTrue(accepted)
         XCTAssertEqual(manager.activeBackend, .onnx)
         XCTAssertEqual(defaults.string(forKey: "modelBackend"), ModelBackend.onnx.rawValue)
     }
@@ -318,10 +320,10 @@ final class OnboardingViewModelRepublishTests: XCTestCase {
         // which fires ModelManager.objectWillChange, which the subscription in
         // OnboardingViewModel.init must forward.
         let newBackend: ModelBackend = modelManager.activeBackend == .onnx ? .whisper : .onnx
-        modelManager.activeBackend = newBackend
+        _ = modelManager.setActiveBackend(newBackend)
 
         // Assert — restore backend to avoid polluting other tests
-        defer { modelManager.activeBackend = .onnx }
+        defer { _ = modelManager.setActiveBackend(.onnx) }
 
         wait(for: [expectation], timeout: 1.0)
     }
@@ -342,8 +344,8 @@ final class OnboardingViewModelRepublishTests: XCTestCase {
             .store(in: &cancellables)
 
         // Act — two distinct backend switches
-        modelManager.activeBackend = .whisper
-        modelManager.activeBackend = .onnx
+        _ = modelManager.setActiveBackend(.whisper)
+        _ = modelManager.setActiveBackend(.onnx)
 
         wait(for: [expectation], timeout: 1.0)
     }
@@ -376,8 +378,8 @@ final class OnboardingViewModelRepublishTests: XCTestCase {
         viewModel = nil
 
         // Trigger a ModelManager change after dealloc — must not crash (no zombie sink)
-        modelManager.activeBackend = .whisper
-        defer { modelManager.activeBackend = .onnx }
+        _ = modelManager.setActiveBackend(.whisper)
+        defer { _ = modelManager.setActiveBackend(.onnx) }
 
         // modelManager itself still fires — verify it's healthy
         wait(for: [directExpectation], timeout: 1.0)
@@ -385,5 +387,221 @@ final class OnboardingViewModelRepublishTests: XCTestCase {
             "ModelManager must still publish changes after OnboardingViewModel is gone")
         // The test passing without EXC_BAD_ACCESS is the key assertion: no zombie sink.
         _ = viewModel // suppress unused warning
+    }
+}
+
+// MARK: - C3 + C4: setActiveBackend guard with test seam
+//
+// Uses the DEBUG-only __testing_setState seam to drive ModelManager into
+// .downloading and .verifying without a real subprocess.
+//
+// These tests cover:
+//   C3 — committedBackendChange does NOT fire when a switch is refused, so
+//        MurmurApp.onReceive never replaces the transcription service mid-download.
+//   C4 — The guard is actually exercised; previously there was zero direct test
+//        coverage of the "switch refused while downloading" branch.
+
+@MainActor
+final class SetActiveBackendGuardTests: XCTestCase {
+
+    private var manager: ModelManager!
+    private var cancellables = Set<AnyCancellable>()
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
+        manager = ModelManager()
+        // Ensure we start from a known backend
+        _ = manager.setActiveBackend(.onnx)
+    }
+
+    override func tearDownWithError() throws {
+        // Leave state clean — force back to notDownloaded so subsequent tests
+        // that check isDownloadActive start fresh.
+        manager.__testing_setState(.notDownloaded)
+        _ = manager.setActiveBackend(.onnx)
+        manager = nil
+        cancellables.removeAll()
+        try super.tearDownWithError()
+    }
+
+    // MARK: Refused while .downloading
+
+    func test_setActiveBackend_whileDownloading_returnsFalse() {
+        // Arrange
+        manager.__testing_setState(.downloading(progress: 0.5, bytesPerSec: 100_000))
+        XCTAssertTrue(manager.isDownloadActive, "Precondition: isDownloadActive must be true")
+        XCTAssertEqual(manager.activeBackend, .onnx)
+
+        // Act
+        let accepted = manager.setActiveBackend(.whisper)
+
+        // Assert
+        XCTAssertFalse(accepted, "setActiveBackend must refuse while state == .downloading")
+        XCTAssertEqual(manager.activeBackend, .onnx,
+                       "activeBackend must remain unchanged after refused switch")
+    }
+
+    func test_setActiveBackend_whileDownloading_activeBackendUnchanged() {
+        // Arrange
+        manager.__testing_setState(.downloading(progress: -1, bytesPerSec: 0))
+
+        // Act
+        _ = manager.setActiveBackend(.huggingface)
+
+        // Assert — backend reverted
+        XCTAssertEqual(manager.activeBackend, .onnx)
+    }
+
+    // MARK: Refused while .verifying
+
+    func test_setActiveBackend_whileVerifying_returnsFalse() {
+        // Arrange
+        manager.__testing_setState(.verifying)
+        XCTAssertTrue(manager.isDownloadActive, "Precondition: isDownloadActive must be true")
+
+        // Act
+        let accepted = manager.setActiveBackend(.whisper)
+
+        // Assert
+        XCTAssertFalse(accepted, "setActiveBackend must refuse while state == .verifying")
+        XCTAssertEqual(manager.activeBackend, .onnx,
+                       "activeBackend must remain unchanged after refused switch (verifying)")
+    }
+
+    // MARK: committedBackendChange does NOT fire when refused (C3)
+
+    func test_committedBackendChange_doesNotFireWhenSwitchRefused_downloading() {
+        // Arrange
+        manager.__testing_setState(.downloading(progress: 0.5, bytesPerSec: 50_000))
+
+        var committedFired = false
+        manager.committedBackendChange
+            .sink { _ in committedFired = true }
+            .store(in: &cancellables)
+
+        // Act — attempt refused switch
+        _ = manager.setActiveBackend(.whisper)
+
+        // Assert — the committed publisher must NOT have fired
+        XCTAssertFalse(committedFired,
+            "committedBackendChange must not emit when switch is refused during download")
+    }
+
+    func test_committedBackendChange_doesNotFireWhenSwitchRefused_verifying() {
+        // Arrange
+        manager.__testing_setState(.verifying)
+
+        var committedFired = false
+        manager.committedBackendChange
+            .sink { _ in committedFired = true }
+            .store(in: &cancellables)
+
+        // Act
+        _ = manager.setActiveBackend(.whisper)
+
+        // Assert
+        XCTAssertFalse(committedFired,
+            "committedBackendChange must not emit when switch is refused during verification")
+    }
+
+    // MARK: committedBackendChange DOES fire when switch is accepted
+
+    func test_committedBackendChange_firesWhenSwitchAccepted() {
+        // Arrange — not downloading
+        manager.__testing_setState(.notDownloaded)
+        XCTAssertFalse(manager.isDownloadActive)
+
+        var receivedBackend: ModelBackend?
+        manager.committedBackendChange
+            .sink { receivedBackend = $0 }
+            .store(in: &cancellables)
+
+        // Act
+        let accepted = manager.setActiveBackend(.whisper)
+
+        // Assert
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(receivedBackend, .whisper,
+            "committedBackendChange must emit the new backend when switch is accepted")
+    }
+
+    // MARK: Switch accepted after cancel (state returns to .notDownloaded)
+
+    func test_setActiveBackend_afterCancel_isAccepted() {
+        // Arrange — simulate a cancelled download (state reset to .notDownloaded)
+        manager.__testing_setState(.downloading(progress: 0.5, bytesPerSec: 0))
+        XCTAssertTrue(manager.isDownloadActive)
+
+        // Simulate cancel resetting state
+        manager.__testing_setState(.notDownloaded)
+        XCTAssertFalse(manager.isDownloadActive, "After cancel, isDownloadActive must be false")
+
+        // Act
+        let accepted = manager.setActiveBackend(.whisper)
+
+        // Assert
+        XCTAssertTrue(accepted, "setActiveBackend must succeed after download is cancelled")
+        XCTAssertEqual(manager.activeBackend, .whisper)
+    }
+}
+
+// MARK: - H4: cancelDownload terminates the active process
+
+@MainActor
+final class CancelDownloadTests: XCTestCase {
+
+    private var manager: ModelManager!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
+        manager = ModelManager()
+    }
+
+    override func tearDownWithError() throws {
+        manager = nil
+        try super.tearDownWithError()
+    }
+
+    func test_cancelDownload_setsStateToNotDownloaded() {
+        // Arrange — simulate an in-flight download
+        manager.__testing_setState(.downloading(progress: 0.5, bytesPerSec: 100_000))
+        XCTAssertTrue(manager.isDownloadActive)
+
+        // Act
+        manager.cancelDownload()
+
+        // Assert
+        XCTAssertEqual(manager.state, .notDownloaded,
+            "cancelDownload must synchronously set state to .notDownloaded")
+    }
+
+    func test_cancelDownload_setsIsDownloadActiveToFalse() {
+        // Arrange
+        manager.__testing_setState(.verifying)
+        XCTAssertTrue(manager.isDownloadActive)
+
+        // Act
+        manager.cancelDownload()
+
+        // Assert — isDownloadActive derived from state, so this confirms the state reset
+        XCTAssertFalse(manager.isDownloadActive,
+            "isDownloadActive must be false immediately after cancelDownload()")
+    }
+
+    func test_cancelDownload_allowsSubsequentBackendSwitch() {
+        // Arrange — simulate a cancelled download: isDownloadActive was true, now false
+        manager.__testing_setState(.downloading(progress: 0.3, bytesPerSec: 0))
+        manager.cancelDownload()
+        XCTAssertFalse(manager.isDownloadActive, "Precondition: download must be cancelled")
+
+        // Act — backend switch should now be accepted
+        let accepted = manager.setActiveBackend(.whisper)
+
+        // Assert
+        XCTAssertTrue(accepted,
+            "Backend switch must be accepted immediately after cancelDownload()")
+        XCTAssertEqual(manager.activeBackend, .whisper)
     }
 }
