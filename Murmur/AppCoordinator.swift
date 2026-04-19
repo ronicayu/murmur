@@ -276,7 +276,7 @@ final class AppCoordinator: ObservableObject {
 
                 let undoableState = AppState.undoable(text: result.text, method: method)
                 self.transition(to: undoableState)
-                self.audioFeedback.playSuccess()
+                // No success chime: inserted text is visually self-evident.
                 self.pill.show(state: undoableState)
                 self.pill.hide(after: 2)
 
@@ -658,7 +658,10 @@ final class AppCoordinator: ObservableObject {
 
             let undoableState = AppState.undoable(text: result.text, method: method)
             transition(to: undoableState)
-            audioFeedback.playSuccess()
+            // No success chime: user can see the text appear in their editor
+            // and the "Inserted" pill confirms it. A sound is redundant. Error
+            // path still plays error sound because failures have no visual
+            // equivalent.
             pill.show(state: undoableState)
             pill.hide(after: 2)
             // Undo timer + Cmd+Z monitor set up automatically by transition(to: .undoable)
