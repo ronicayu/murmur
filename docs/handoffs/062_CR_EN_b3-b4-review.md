@@ -200,3 +200,11 @@ The following items from handoffs 060/061 were verified and are sound:
 - Minor: `test_nonActiveBackend_filesAbsent_returnsFalse` uses an early `return` (test
   skip) if whisper files happen to exist on the machine. This is acceptable but should
   ideally use `try XCTSkip(...)` in XCTest for clearer skip reporting. Nit-level.
+
+---
+
+## resolution (2026-04-19)
+
+All CHG:3 items resolved in commits f8d8cba, ebf010c, 0bbaac5, 9b2bfeb.
+Round-2 re-review verdict: **LGTM**.
+See handoff `065_CR_EN_b3-b4-round3-review.md` for full findings.

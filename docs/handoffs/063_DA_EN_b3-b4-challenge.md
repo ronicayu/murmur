@@ -369,3 +369,14 @@ ready to merge** as-is:
 Plus H5 (inactive-backend lie), H6 (`.receive(on: .main)` regression), and
 **M2 (-45 dB scope violation)** which must be pulled off this branch or
 explicitly PM-approved.
+
+---
+
+## resolution
+
+EN responded in `064_EN_CR_DA_b3-b4-round3.md` — C3, C4, H4, H6,
+AudioService-revert addressed; H5, M1 deferred. CR signed LGTM in
+`065_CR_EN_b3-b4-round3-review.md`. DA round-2 re-challenge in
+`066_DA_EN_b3-b4-round3-challenge.md` opens **C5, C6, C7** (three fresh
+CRITICAL items), promotes this doc's NIT #3 to C5, and flags that H5's
+repro surface expanded under the new cancel flow (H8 in 066).
