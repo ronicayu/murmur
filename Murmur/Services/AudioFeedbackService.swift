@@ -5,7 +5,7 @@ import AppKit
 final class AudioFeedbackService {
     /// Default playback volume for all feedback sounds. System sounds at 1.0 are
     /// noticeably loud relative to media playback; feedback should be unobtrusive.
-    private static let defaultVolume: Float = 0.3
+    private static let defaultVolume: Float = 0.18
 
     var isEnabled: Bool {
         UserDefaults.standard.object(forKey: "soundEffects") as? Bool ?? true

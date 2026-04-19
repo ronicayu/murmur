@@ -556,7 +556,7 @@ final class AppCoordinator: ObservableObject {
             }
 
             // Main wait: subscribe to state changes.
-            group.addTask { @MainActor [weak self] in
+            group.addTask { @MainActor in
                 let stream = AsyncStream<StreamingSessionState> { continuation in
                     let cancellable = coordinator.$sessionState.sink { state in
                         continuation.yield(state)
@@ -568,21 +568,20 @@ final class AppCoordinator: ObservableObject {
 
                 let deadline = Date().addingTimeInterval(30)
                 var warningSent = false
-                var successPlayed = false
 
                 for await state in stream {
                     switch state {
                     case .done, .cancelled, .failed:
                         return
                     case .finalizing:
-                        // Play the success chime as soon as the streamed text is
-                        // final (all chunks injected; full-pass refinement starts).
-                        // Previously fired only after the full pass completed,
-                        // leaving a 1–15s gap between text appearing and sound.
-                        if !successPlayed {
-                            successPlayed = true
-                            self?.audioFeedback.playSuccess()
-                        }
+                        // Deliberately no success chime on the streaming path.
+                        // Text appears progressively during recording, the stop
+                        // sound already plays on hotkey release, and the pill's
+                        // "Inserted" label covers the visual confirmation. A
+                        // chime here either fires before the tail chunk's text
+                        // (sound → text gap) or after the full-pass (text →
+                        // sound gap, originally 1–15s) — both felt off in
+                        // testing.
                         if !warningSent,
                            let startedAt = coordinator.finalizingStartedAt,
                            Date().timeIntervalSince(startedAt) >= StreamingTranscriptionCoordinator.fullPassWarningSeconds {
