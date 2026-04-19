@@ -15,6 +15,12 @@ struct OnboardingView: View {
     @StateObject private var viewModel: OnboardingViewModel
     let onComplete: () -> Void
 
+    @State private var showCancelDownloadConfirmation = false
+
+    /// Minimum downloaded bytes before the cancel confirmation dialog is shown.
+    /// Mirrors the same constant in SettingsView — keep in sync.
+    private static let cancelConfirmThresholdBytes: Int64 = 100 * 1_000_000 // 100 MB
+
     init(coordinator: AppCoordinator, modelManager: ModelManager, onComplete: @escaping () -> Void) {
         _viewModel = StateObject(wrappedValue: OnboardingViewModel(
             coordinator: coordinator,
@@ -329,11 +335,28 @@ struct OnboardingView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
             } else if case .downloading = viewModel.modelManager.state {
-                Button("Cancel") {
-                    viewModel.modelManager.cancelDownload()
+                Button("Cancel Download") {
+                    if viewModel.modelManager.downloadedBytes >= Self.cancelConfirmThresholdBytes {
+                        showCancelDownloadConfirmation = true
+                    } else {
+                        viewModel.modelManager.cancelDownload()
+                    }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
+                .confirmationDialog(
+                    "Cancel Download?",
+                    isPresented: $showCancelDownloadConfirmation,
+                    titleVisibility: .visible
+                ) {
+                    Button("Cancel Download", role: .destructive) {
+                        viewModel.modelManager.cancelDownload()
+                    }
+                    Button("Keep Downloading", role: .cancel) { }
+                } message: {
+                    let mb = viewModel.modelManager.downloadedBytes / 1_000_000
+                    Text("You've downloaded \(mb) MB — cancelling will discard it.")
+                }
             } else {
                 Button("Download") {
                     Task { await viewModel.downloadModel() }
@@ -525,6 +548,7 @@ struct OnboardingView: View {
         let isSelected: Bool = viewModel.modelManager.activeBackend == backend
         let isDownloaded: Bool = viewModel.modelManager.isModelDownloaded(for: backend)
         let switchLocked: Bool = viewModel.modelManager.isDownloadActive
+        let isLocked: Bool = switchLocked && !isSelected
         let fillColor: Color = isSelected ? Color.accentColor.opacity(0.08) : Color.clear
         let strokeColor: Color = isSelected ? Color.accentColor.opacity(0.3) : Color.secondary.opacity(0.2)
 
@@ -537,7 +561,7 @@ struct OnboardingView: View {
                     .foregroundStyle(backendColor(backend))
                     .frame(width: 32)
 
-                backendCardContent(backend, isDownloaded: isDownloaded)
+                backendCardContent(backend, isDownloaded: isDownloaded, isLocked: isLocked)
 
                 Spacer()
                 if isSelected {
@@ -553,11 +577,12 @@ struct OnboardingView: View {
         // Mirror the SettingsView.engineRow disabled pattern (CR-M1):
         // lock non-selected cards while a download or verification is running.
         // The setActiveBackend guard is still authoritative; this is defense-in-depth.
-        .disabled(switchLocked && !isSelected)
+        .disabled(isLocked)
+        .help(isLocked ? "Locked during download — wait for it to finish or cancel first." : "")
     }
 
     @ViewBuilder
-    private func backendCardContent(_ backend: ModelBackend, isDownloaded: Bool) -> some View {
+    private func backendCardContent(_ backend: ModelBackend, isDownloaded: Bool, isLocked: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Text(backend.displayName)
@@ -588,6 +613,11 @@ struct OnboardingView: View {
                 Text("Download: \(backend.sizeDescription)")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+            }
+            if isLocked {
+                Text("Locked during download")
+                    .font(.caption)
+                    .foregroundStyle(Color.secondary)
             }
         }
     }
