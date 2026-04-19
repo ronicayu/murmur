@@ -614,6 +614,13 @@ final class SetActiveBackendGuardTests: XCTestCase {
 //
 // The test seam `__testing_runCleanupAfterCancel(for:)` directly invokes the
 // cleanup logic so we can drive it without a real subprocess.
+//
+// SAFETY NOTE: Both tests write a sentinel file into and then potentially delete
+// manager.modelDirectory(for: .onnx) — the same path that holds a real user
+// ONNX model when one is installed. setUp therefore skips the entire class when
+// real model files are already present (modelPath(for: .onnx) != nil), preventing
+// any destructive operation on a developer's pre-downloaded model.
+// Approach (b) from the QA fix request (073/072): XCTSkipIf in setUp.
 
 @MainActor
 final class CancelDownloadCleanupRaceTests: XCTestCase {
@@ -625,6 +632,16 @@ final class CancelDownloadCleanupRaceTests: XCTestCase {
         try super.setUpWithError()
         UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
         manager = ModelManager()
+
+        // Guard: if a real ONNX model is already installed on this machine, skip
+        // the entire class. Both tests manipulate (and one deletes) the directory
+        // that modelDirectory(for: .onnx) resolves to. Running them against a
+        // pre-existing model would destroy the developer's downloaded model.
+        try XCTSkipIf(
+            manager.modelPath(for: .onnx) != nil,
+            "Real ONNX model present on this machine — skipping CancelDownloadCleanupRaceTests " +
+            "to protect pre-downloaded model files. Run on a machine without the ONNX model installed."
+        )
 
         // Plant a sentinel file in the real ONNX model directory (as resolved by
         // ModelManager.modelDirectory(for:)) so we can verify whether removeItem
@@ -639,7 +656,10 @@ final class CancelDownloadCleanupRaceTests: XCTestCase {
 
     override func tearDownWithError() throws {
         // Clean up the sentinel directory we may have created.
-        try? FileManager.default.removeItem(at: tempModelDir)
+        // tempModelDir is nil when setUp skipped (XCTSkipIf throws before assignment).
+        if let dir = tempModelDir {
+            try? FileManager.default.removeItem(at: dir)
+        }
         manager = nil
         try super.tearDownWithError()
     }
