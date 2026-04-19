@@ -1,5 +1,6 @@
 import SwiftUI
 import ServiceManagement
+import Combine
 import HotKey
 
 @MainActor
@@ -32,6 +33,7 @@ final class OnboardingViewModel: ObservableObject {
     }
     private var accessibilityPollTask: Task<Void, Never>?
     private var testWatchTask: Task<Void, Never>?
+    private var modelManagerCancellable: AnyCancellable?
 
     init(coordinator: AppCoordinator, modelManager: ModelManager) {
         self.coordinator = coordinator
@@ -40,6 +42,18 @@ final class OnboardingViewModel: ObservableObject {
         let status = coordinator.permissions.checkAll()
         micGranted = status.microphone == .granted
         accessibilityGranted = status.accessibility == .granted
+
+        // Forward ModelManager published-state changes into this view model so
+        // SwiftUI re-renders OnboardingView when download progress/state changes.
+        // (Nested ObservableObjects don't propagate automatically.)
+        // ModelManager is @MainActor, so objectWillChange always fires on the main
+        // thread. Do NOT add .receive(on: DispatchQueue.main) — that schedules the
+        // sink on the *next* runloop tick, introducing a one-frame lag between
+        // ModelManager state changes and OnboardingView re-renders (DA H6).
+        modelManagerCancellable = modelManager.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
     }
 
     func nextStep() {
@@ -55,7 +69,7 @@ final class OnboardingViewModel: ObservableObject {
             nextStep()
         case .modelChoice:
             // Always use ONNX during onboarding — advanced backends are in Settings
-            modelManager.activeBackend = .onnx
+            modelManager.setActiveBackend(.onnx)
             step = .modelChoice
             nextStep()
         case .huggingfaceLogin:
@@ -71,7 +85,7 @@ final class OnboardingViewModel: ObservableObject {
     }
 
     func selectBackend(_ backend: ModelBackend) {
-        modelManager.activeBackend = backend
+        modelManager.setActiveBackend(backend)
     }
 
     func requestMicrophone() async {
@@ -254,5 +268,7 @@ final class OnboardingViewModel: ObservableObject {
     deinit {
         accessibilityPollTask?.cancel()
         testWatchTask?.cancel()
+        // modelManagerCancellable is intentionally not nil'd here;
+        // AnyCancellable cancels automatically on deallocation (ARC handles it).
     }
 }

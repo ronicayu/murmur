@@ -305,8 +305,9 @@ struct SettingsView: View {
     private func engineRow(_ backend: ModelBackend) -> some View {
         let isActive: Bool = modelManager.activeBackend == backend
         let isDownloaded: Bool = modelManager.isModelDownloaded(for: backend)
+        let switchLocked: Bool = modelManager.isDownloadActive
         return Button {
-            modelManager.activeBackend = backend
+            modelManager.setActiveBackend(backend)
         } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
@@ -332,6 +333,10 @@ struct SettingsView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // Disable switching backends while a download or verification is running.
+        // The didSet guard in ModelManager is the authoritative lock; this is a
+        // defense-in-depth layer that also gives the user a visual affordance.
+        .disabled(switchLocked && !isActive)
     }
 
     // MARK: - Helpers

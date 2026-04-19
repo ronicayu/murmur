@@ -524,6 +524,7 @@ struct OnboardingView: View {
     private func backendCard(_ backend: ModelBackend) -> some View {
         let isSelected: Bool = viewModel.modelManager.activeBackend == backend
         let isDownloaded: Bool = viewModel.modelManager.isModelDownloaded(for: backend)
+        let switchLocked: Bool = viewModel.modelManager.isDownloadActive
         let fillColor: Color = isSelected ? Color.accentColor.opacity(0.08) : Color.clear
         let strokeColor: Color = isSelected ? Color.accentColor.opacity(0.3) : Color.secondary.opacity(0.2)
 
@@ -549,6 +550,10 @@ struct OnboardingView: View {
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(strokeColor, lineWidth: 1))
         }
         .buttonStyle(.plain)
+        // Mirror the SettingsView.engineRow disabled pattern (CR-M1):
+        // lock non-selected cards while a download or verification is running.
+        // The setActiveBackend guard is still authoritative; this is defense-in-depth.
+        .disabled(switchLocked && !isSelected)
     }
 
     @ViewBuilder

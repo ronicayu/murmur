@@ -79,29 +79,29 @@ final class ModelManagerBackendSwitchTests: XCTestCase {
         let manager = ModelManager()
         let original = manager.activeBackend
 
-        manager.activeBackend = .whisper
+        _ = manager.setActiveBackend(.whisper)
         XCTAssertEqual(UserDefaults.standard.string(forKey: "modelBackend"), "whisper")
 
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
         XCTAssertEqual(UserDefaults.standard.string(forKey: "modelBackend"), "onnx")
 
-        manager.activeBackend = original
+        _ = manager.setActiveBackend(original)
     }
 
     @MainActor
     func testModelDirectoryChangesWithBackend() {
         let manager = ModelManager()
 
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
         let onnxDir = manager.modelDirectory
         XCTAssert(onnxDir.path.contains("Models-ONNX"))
 
-        manager.activeBackend = .huggingface
+        _ = manager.setActiveBackend(.huggingface)
         let hfDir = manager.modelDirectory
         XCTAssert(hfDir.path.contains("Models"))
         XCTAssertFalse(hfDir.path.contains("ONNX"))
 
-        manager.activeBackend = .whisper
+        _ = manager.setActiveBackend(.whisper)
         let whisperDir = manager.modelDirectory
         XCTAssert(whisperDir.path.contains("Models-Whisper"))
 
@@ -109,30 +109,30 @@ final class ModelManagerBackendSwitchTests: XCTestCase {
         XCTAssertNotEqual(onnxDir, whisperDir)
         XCTAssertNotEqual(hfDir, whisperDir)
 
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
     }
 
     @MainActor
     func testHashKeysArePerBackendAfterSwitch() {
         let manager = ModelManager()
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
         let onnxKey = "modelConfigHash_\(ModelBackend.onnx.rawValue)"
-        manager.activeBackend = .whisper
+        _ = manager.setActiveBackend(.whisper)
         let whisperKey = "modelConfigHash_\(ModelBackend.whisper.rawValue)"
         XCTAssertNotEqual(onnxKey, whisperKey)
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
     }
 
     @MainActor
     func testRefreshStateAfterBackendSwitch() {
         let manager = ModelManager()
 
-        manager.activeBackend = .whisper
+        _ = manager.setActiveBackend(.whisper)
         if manager.modelPath(for: .whisper) == nil {
             XCTAssertEqual(manager.state, .notDownloaded)
         }
 
-        manager.activeBackend = .onnx
+        _ = manager.setActiveBackend(.onnx)
         if manager.modelPath(for: .onnx) != nil {
             XCTAssertEqual(manager.state, .ready)
         }
