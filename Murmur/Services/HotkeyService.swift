@@ -37,10 +37,9 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
     let events: AsyncStream<HotkeyEvent>
     private let continuation: AsyncStream<HotkeyEvent>.Continuation
     private var hotKey: HotKey?
+    private var cancelHotKey: HotKey?
     private var flagsMonitor: Any?
     private var localFlagsMonitor: Any?
-    private var escMonitor: Any?
-    private var localEscMonitor: Any?
     private var isRecording = false
     private var mode: RecordingMode = .toggle
     private var rightCmdWasDown = false
@@ -53,16 +52,19 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
         )
     }
 
-    /// Programmatically emit an event (e.g., from onboarding record button).
+    /// Programmatically emit an event (e.g., from onboarding record button, pill cancel button).
     func emit(_ event: HotkeyEvent) {
-        if event == .startRecording {
+        switch event {
+        case .startRecording:
             lock.lock()
             isRecording = true
             lock.unlock()
-        } else if event == .stopRecording {
+            registerCancelHotKey()
+        case .stopRecording, .cancelRecording:
             lock.lock()
             isRecording = false
             lock.unlock()
+            unregisterCancelHotKey()
         }
         continuation.yield(event)
     }
@@ -76,25 +78,28 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
         case .keyCombo(let key, let modifiers):
             registerKeyCombo(key: key, modifiers: modifiers)
         }
+    }
 
-        // Esc to cancel — global + local so it works regardless of which app is focused
-        let escHandler: (NSEvent) -> Void = { [weak self] event in
+    /// Register/unregister Esc as a Carbon hotkey only while recording is active.
+    /// NSEvent global monitor for `.keyDown` is unreliable across macOS versions
+    /// (sometimes returns a non-nil handle but never fires); Carbon hotkeys are not.
+    private func registerCancelHotKey() {
+        cancelHotKey = HotKey(key: .escape, modifiers: [])
+        cancelHotKey?.keyDownHandler = { [weak self] in
             guard let self else { return }
             self.lock.lock()
-            let recording = self.isRecording
+            let wasRecording = self.isRecording
+            self.isRecording = false
             self.lock.unlock()
-            if recording && event.keyCode == 53 /* Esc */ {
-                self.lock.lock()
-                self.isRecording = false
-                self.lock.unlock()
+            if wasRecording {
                 self.continuation.yield(.cancelRecording)
             }
+            self.unregisterCancelHotKey()
         }
-        escMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: escHandler)
-        localEscMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            escHandler(event)
-            return event
-        }
+    }
+
+    private func unregisterCancelHotKey() {
+        cancelHotKey = nil
     }
 
     /// Convenience for key+modifier combos (custom hotkey)
@@ -104,14 +109,11 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
 
     func unregister() {
         hotKey = nil
+        cancelHotKey = nil
         if let flagsMonitor { NSEvent.removeMonitor(flagsMonitor) }
         if let localFlagsMonitor { NSEvent.removeMonitor(localFlagsMonitor) }
-        if let escMonitor { NSEvent.removeMonitor(escMonitor) }
-        if let localEscMonitor { NSEvent.removeMonitor(localEscMonitor) }
         flagsMonitor = nil
         localFlagsMonitor = nil
-        escMonitor = nil
-        localEscMonitor = nil
     }
 
     func setMode(_ mode: RecordingMode) {
@@ -176,6 +178,12 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
         let nowRecording = isRecording
         lock.unlock()
 
+        if nowRecording && !wasRecording {
+            registerCancelHotKey()
+        } else if !nowRecording && wasRecording {
+            unregisterCancelHotKey()
+        }
+
         if currentMode == .toggle {
             continuation.yield(nowRecording ? .startRecording : .stopRecording)
         } else if !wasRecording {
@@ -193,6 +201,7 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
         lock.unlock()
 
         if currentMode == .hold && wasRecording {
+            unregisterCancelHotKey()
             continuation.yield(.stopRecording)
         }
     }

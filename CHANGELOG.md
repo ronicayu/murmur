@@ -6,6 +6,15 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.2.3] — 2026-04-20
+
+### Added
+- Language indicator on the recording pill: a small badge (e.g. `EN`, `ZH`) sits between the state icon and the "Recording…" text so the user can confirm which language the model will transcribe in before speaking. When the language setting is `Auto`, the badge gets a trailing middle dot (e.g. `EN·`, `ZH·`) to signal that the value came from the active macOS keyboard input source rather than a fixed Settings choice.
+- Cancel button on the recording pill (`xmark.circle.fill`). Clicking goes through the same `.cancelRecording` path as the Esc shortcut.
+
+### Fixed
+- Esc-to-cancel-recording now works reliably across macOS versions. The previous implementation used `NSEvent.addGlobalMonitorForEvents(matching: .keyDown)`, which silently fails to deliver events on some installs while the `flagsChanged` monitor keeps working — so right-cmd-to-record worked but Esc didn't. Replaced with a Carbon `RegisterEventHotKey` registration (via the existing `HotKey` package) that's installed when recording starts and torn down when it ends. Side effect: Esc is exclusively grabbed by Murmur during a recording.
+
 ## [0.2.2] — 2026-04-19
 
 ### Added
