@@ -58,4 +58,31 @@ final class LanguageBadgeTests: XCTestCase {
         let result = LanguageBadge.badgeText(resolvedCode: "xx", storedSetting: "auto")
         XCTAssertEqual(result, "??·")
     }
+
+    // MARK: - FloatingPillView.isRecordingState guard
+
+    func test_isRecordingState_trueForRecordingAndStreaming() {
+        // Arrange & Act
+        let recordingView = FloatingPillView(state: .recording, audioLevel: 0, languageBadge: "EN")
+        let streamingView = FloatingPillView(state: .streaming(chunkCount: 3), audioLevel: 0, languageBadge: "ZH·")
+        // Assert
+        XCTAssertTrue(recordingView.isRecordingState)
+        XCTAssertTrue(streamingView.isRecordingState)
+    }
+
+    func test_isRecordingState_falseForAllNonRecordingStates() {
+        // Arrange
+        let states: [AppState] = [
+            .idle,
+            .transcribing,
+            .injecting,
+            .undoable(text: "hello", method: .clipboard),
+            .error(.silenceDetected),
+        ]
+        // Act & Assert
+        for state in states {
+            let view = FloatingPillView(state: state, audioLevel: 0, languageBadge: "EN")
+            XCTAssertFalse(view.isRecordingState, "Expected isRecordingState == false for state \(state)")
+        }
+    }
 }

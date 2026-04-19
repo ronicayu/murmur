@@ -77,3 +77,13 @@ All 6 criteria require running the macOS app with an active microphone and switc
 **Decisions not pre-decided in spec:**
 - `activeBadge` is stored as an instance property on `AppCoordinator` so the audio-level task closures (which run asynchronously after `startV1RecordingFlow` returns) can reference the resolved value. No new UserDefaults key; cleared implicitly on next recording start.
 - In `startStreamingRecordingFlow`, the initial `pill.show` before `resolveTranscriptionLanguage()` runs (before the recording start timeout) shows no badge; the badge-bearing refresh fires immediately after resolution. This is correct — the language isn't known until that point in the streaming flow.
+
+**Round 2 changes (2026-04-20, after CR #087 + QA #088):**
+- CR #1 (blocking): Moved `resolveTranscriptionLanguage()` and `activeBadge` assignment before the first `pill.show` in `startStreamingRecordingFlow` — mirrors V1 flow. Removed the now-redundant second `pill.show` and duplicate resolution block. `lang` is reused for `beginSession`.
+- CR #2 (blocking): Extracted `private static let transcriptionLanguageKey = "transcriptionLanguage"` on `AppCoordinator`. All three call sites (V1 flow, V3 flow, `resolveTranscriptionLanguage()`) now use `Self.transcriptionLanguageKey`.
+- CR #3 (should-fix): Changed `var languageBadge: String? = nil` to `let languageBadge: String?` on `FloatingPillView`. Added explicit memberwise-style `init(state:audioLevel:languageBadge:)` with default `nil` to preserve call-site compatibility (Swift excludes `let` properties with defaults from the synthesized memberwise init).
+- CR #4 (nit): Renamed `// MARK: - BadgeView` to `// MARK: - LanguageBadgeView` in `LanguageBadge.swift`.
+- QA #1 (blocking): Made `isRecordingState` `internal` (removed `private`). Added 2 new unit tests in `LanguageBadgeTests.swift`: `test_isRecordingState_trueForRecordingAndStreaming` and `test_isRecordingState_falseForAllNonRecordingStates` (covers all 5 non-recording states).
+- QA #2 (follow-up): V3 streaming timing integration test deferred — AppCoordinator stub infrastructure not available in this session. Noted in handoff 089.
+
+**Test results (round 2):** 11 LanguageBadgeTests pass (9 original + 2 new). All other tests unchanged.

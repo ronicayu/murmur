@@ -3,7 +3,13 @@ import SwiftUI
 struct FloatingPillView: View {
     let state: AppState
     let audioLevel: Float
-    var languageBadge: String? = nil
+    let languageBadge: String?
+
+    init(state: AppState, audioLevel: Float, languageBadge: String? = nil) {
+        self.state = state
+        self.audioLevel = audioLevel
+        self.languageBadge = languageBadge
+    }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -27,7 +33,7 @@ struct FloatingPillView: View {
         .accessibilityLabel(pillAccessibilityLabel)
     }
 
-    private var isRecordingState: Bool {
+    var isRecordingState: Bool {
         switch state {
         case .recording, .streaming: return true
         default: return false

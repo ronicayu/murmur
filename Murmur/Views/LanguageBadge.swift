@@ -30,7 +30,7 @@ enum LanguageBadge {
     }
 }
 
-// MARK: - BadgeView
+// MARK: - LanguageBadgeView
 
 /// A small, low-contrast label showing the active transcription language code.
 struct LanguageBadgeView: View {
