@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.2.1] — 2026-04-19
+
+### Fixed
+- B3: onboarding UI didn't refresh when model download completed
+- B4: `isModelDownloaded` returned true mid-download before files were complete
+- Backend switch during active download silently torn down the running subprocess (C3); `activeBackend` is now gated by `setActiveBackend(_:)`
+- `cancelDownload()` was a no-op — `downloadTask` was declared but never assigned (H4)
+- `Process.terminate()` sent SIGTERM without waiting; now escalates to SIGKILL after 2s (C6)
+- Cancel→redownload race where the cleanup Task deleted files the new download was writing (C8)
+- Termination-handler race in `download()`: handler now attached before `run()` with defensive post-run check
+- Monitor task overwrote `.ready` with a stale `.downloading` write after the subprocess exited
+
+### Added
+- FU-04 manifest verification: `manifest.json` (SHA-256 + size per file) written after every successful download; hot-path checks (size only) gate `isModelDownloaded`; `verify()` re-hashes on demand; one-time migration generates the manifest for existing on-disk models
+- Engine row disabled during active download (Settings and onboarding)
+
+### Changed
+- Download progress label no longer shows misleading "Finalizing" mid-transfer
+- Progress size tracking scoped to the model directory only (previously conflated with unrelated `~/.cache/huggingface` data)
+
 ## [0.2.0] — 2026-04-13
 
 ### Added
