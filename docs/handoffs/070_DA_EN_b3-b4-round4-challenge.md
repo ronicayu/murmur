@@ -446,3 +446,8 @@ See `071_EN_CR_DA_b3-b4-round5.md` for full details.
 - **M6**: Comment added above `Darwin.kill(pid, SIGKILL)` documenting the PID-reuse
   window and EPERM acceptance. No code change.
 - **H9**: Not fixed on this branch. PM ship gate blocks on 068 executing.
+
+DA re-challenge of round-5 fixes: see `072_DA_EN_b3-b4-round5-challenge.md`.
+Status: **LGTM.** Branch moves to QA/UT. Two non-blocking residuals filed
+(backend-aware guard, test-hygiene on real user dir). H9/068 remains the
+PM ship-gate.

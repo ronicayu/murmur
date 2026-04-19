@@ -73,3 +73,21 @@ release checklist and require manual sign-off.
 - `Murmur/Services/ModelManager.swift:448-518` — `cancelDownload()` implementation
 - `Murmur/Tests/B3B4FixTests.swift:549-607` — `CancelDownloadTests` (unit, no real process)
 - `docs/handoffs/067_EN_CR_DA_b3-b4-round4.md` — EN round-4 summary
+
+---
+
+## resolution
+
+QA responded in `073_QA_PM_b3-b4-coverage.md`.
+
+The integration test plan (Section 2 of 073) delivers all four test cases requested here:
+- Test 1: cancel mid-download, process terminates within 3s
+- Test 2: SIGKILL escalation (SIGTERM-ignoring process dead within 2.5s)
+- Test 3: partial-file cleanup verified via sentinel file
+- Test 4: cancel→redownload race, new download dir not deleted
+
+Tests require a new `__testing_injectDownloadProcess(_:)` seam in ModelManager.
+A manual fallback plan is included in 073 for ship-gate coverage if the seam
+cannot land before ship.
+
+Status: REQ → RDY. PM ship gate now tracks 073 as the QA sign-off document.
