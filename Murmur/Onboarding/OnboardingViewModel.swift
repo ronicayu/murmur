@@ -46,11 +46,11 @@ final class OnboardingViewModel: ObservableObject {
         // Forward ModelManager published-state changes into this view model so
         // SwiftUI re-renders OnboardingView when download progress/state changes.
         // (Nested ObservableObjects don't propagate automatically.)
-        // .receive(on: DispatchQueue.main) is a defensive guard: ModelManager is
-        // @MainActor today, but this ensures the sink fires on main even if that
-        // ever changes, preventing silent threading regressions.
+        // ModelManager is @MainActor, so objectWillChange always fires on the main
+        // thread. Do NOT add .receive(on: DispatchQueue.main) — that schedules the
+        // sink on the *next* runloop tick, introducing a one-frame lag between
+        // ModelManager state changes and OnboardingView re-renders (DA H6).
         modelManagerCancellable = modelManager.objectWillChange
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
             }
@@ -69,7 +69,7 @@ final class OnboardingViewModel: ObservableObject {
             nextStep()
         case .modelChoice:
             // Always use ONNX during onboarding — advanced backends are in Settings
-            modelManager.activeBackend = .onnx
+            modelManager.setActiveBackend(.onnx)
             step = .modelChoice
             nextStep()
         case .huggingfaceLogin:
@@ -85,7 +85,7 @@ final class OnboardingViewModel: ObservableObject {
     }
 
     func selectBackend(_ backend: ModelBackend) {
-        modelManager.activeBackend = backend
+        modelManager.setActiveBackend(backend)
     }
 
     func requestMicrophone() async {

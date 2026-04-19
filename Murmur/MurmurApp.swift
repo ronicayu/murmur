@@ -53,7 +53,12 @@ struct MurmurApp: App {
                         }
                     }
                 }
-                .onReceive(modelManager.$activeBackend) { newBackend in
+                .onReceive(modelManager.committedBackendChange) { newBackend in
+                    // committedBackendChange only fires when setActiveBackend(_:) accepts
+                    // the switch — never during an active download. This prevents the
+                    // previous pattern (subscribing to $activeBackend) from tearing down
+                    // the transcription service mid-download when a refused switch
+                    // published a transient @Published willSet value.
                     let newPath = modelManager.modelDirectory(for: newBackend)
                     let newService: any TranscriptionServiceProtocol = newBackend == .onnx
                         ? NativeTranscriptionService(modelPath: newPath)

@@ -1,5 +1,6 @@
 import Foundation
 import os
+import Combine
 import CryptoKit
 
 // MARK: - Model Backend
@@ -133,19 +134,34 @@ final class ModelManager: ObservableObject {
     @Published private(set) var downloadProgress: Double = 0
     @Published private(set) var downloadSpeed: Int64 = 0 // bytes/sec
     @Published private(set) var statusMessage: String = ""
-    @Published var activeBackend: ModelBackend {
-        didSet {
-            // Refuse backend switch while a download or verification is in progress.
-            // The running download's monitor task writes state for the backend that
-            // started the download; letting activeBackend change mid-flight would
-            // mismatch state to the wrong backend and corrupt isModelDownloaded logic.
-            if isDownloadActive {
-                activeBackend = oldValue
-                return
-            }
-            UserDefaults.standard.set(activeBackend.rawValue, forKey: "modelBackend")
-            refreshState()
+
+    /// The currently selected backend. Use `setActiveBackend(_:)` to change it;
+    /// direct assignment is intentionally not exposed so callers must go through
+    /// the guard that refuses switches during active downloads.
+    @Published private(set) var activeBackend: ModelBackend
+
+    /// Emits only when a backend switch is *accepted* (i.e. not refused by the
+    /// download-in-progress guard). Observers that need to react to a committed
+    /// backend change — such as `MurmurApp` replacing the transcription service —
+    /// should subscribe here instead of `$activeBackend`, to avoid acting on
+    /// attempted-but-reverted switches.
+    let committedBackendChange = PassthroughSubject<ModelBackend, Never>()
+
+    /// Attempt to switch the active backend.
+    ///
+    /// - Returns: `true` if the switch was accepted and persisted; `false` if a
+    ///   download or verification is in progress and the switch was refused.
+    @discardableResult
+    func setActiveBackend(_ backend: ModelBackend) -> Bool {
+        guard !isDownloadActive else {
+            logger.warning("Refused backend switch \(self.activeBackend.rawValue) → \(backend.rawValue) — download in progress")
+            return false
         }
+        activeBackend = backend
+        UserDefaults.standard.set(backend.rawValue, forKey: "modelBackend")
+        committedBackendChange.send(backend)
+        refreshState()
+        return true
     }
 
     /// True while a download or verification is in progress.
@@ -159,6 +175,7 @@ final class ModelManager: ObservableObject {
 
     private let logger = Logger(subsystem: "com.murmur.app", category: "model")
     private var downloadTask: Task<Void, Never>?
+    private var activeDownloadProcess: Process?
     private var urlSession: URLSession?
     private var resumeData: Data?
 
@@ -213,6 +230,8 @@ final class ModelManager: ObservableObject {
     init() {
         let saved = UserDefaults.standard.string(forKey: "modelBackend")
             .flatMap(ModelBackend.init(rawValue:)) ?? .onnx
+        // Assign directly here — we are in init, no guard needed, and setActiveBackend
+        // is not callable before self is fully initialized.
         self.activeBackend = saved
 
         // One-time migration: move the old shared "modelConfigHash" key to the
@@ -318,6 +337,9 @@ final class ModelManager: ObservableObject {
 
         try process.run()
 
+        // Store reference so cancelDownload() can terminate the process immediately.
+        activeDownloadProcess = process
+
         // Monitor download activity: show downloaded size and speed.
         // We don't know the exact total, so we show an indeterminate progress
         // and only set 100% when the process confirms success.
@@ -362,6 +384,7 @@ final class ModelManager: ObservableObject {
             }
         }
         monitorTask.cancel()
+        activeDownloadProcess = nil
 
         // Read stdout for JSON result (our script always prints JSON)
         let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
@@ -417,12 +440,27 @@ final class ModelManager: ObservableObject {
     }
 
     func cancelDownload() {
+        // Terminate the Python snapshot_download process immediately so it stops
+        // writing to the model directory. Without this, the process continues as a
+        // zombie even after state is reset to .notDownloaded, and any subsequent
+        // download or backend switch can race against the still-running subprocess.
+        if let proc = activeDownloadProcess, proc.isRunning {
+            proc.terminate()
+            logger.info("Terminated active download process (pid: \(proc.processIdentifier))")
+        }
+        activeDownloadProcess = nil
+
         downloadTask?.cancel()
         downloadTask = nil
-        // Keep partial downloads — huggingface_hub resumes from where it left off
-        let partialSize = directorySize(modelDirectory)
+
+        // Set state synchronously before returning so isDownloadActive is false
+        // immediately — callers that check isDownloadActive right after cancel
+        // (e.g. the didSet guard) will see the updated state.
         state = .notDownloaded
         downloadProgress = 0
+
+        // Keep partial downloads — huggingface_hub resumes from where it left off
+        let partialSize = directorySize(modelDirectory)
         if partialSize > 0 {
             statusMessage = "Download paused — \(partialSize / 1_000_000) MB saved, will resume"
             logger.info("Download cancelled, \(partialSize) bytes preserved for resume")
@@ -683,4 +721,25 @@ final class ModelManager: ObservableObject {
         }
         return total
     }
+
+    // MARK: - Test Seams (DEBUG only)
+
+#if DEBUG
+    /// Force the internal state to a specific value for unit testing.
+    ///
+    /// This is the *only* way tests can drive the manager into `.downloading`,
+    /// `.verifying`, `.corrupt`, or `.error` without running a real download.
+    /// Never call this in production code.
+    func __testing_setState(_ newState: ModelState) {
+        state = newState
+    }
+
+    /// Force the activeBackend without going through the download guard.
+    ///
+    /// Used by tests that need to set up a specific backend without triggering
+    /// refreshState() side-effects that would require real files on disk.
+    func __testing_setActiveBackend(_ backend: ModelBackend) {
+        activeBackend = backend
+    }
+#endif
 }

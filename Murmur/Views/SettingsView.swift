@@ -307,7 +307,7 @@ struct SettingsView: View {
         let isDownloaded: Bool = modelManager.isModelDownloaded(for: backend)
         let switchLocked: Bool = modelManager.isDownloadActive
         return Button {
-            modelManager.activeBackend = backend
+            modelManager.setActiveBackend(backend)
         } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
