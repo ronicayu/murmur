@@ -27,7 +27,10 @@ No new tests added per PM instruction; QA will handle coverage.
 - Call sites: `SettingsView.swift:307`, `OnboardingView.swift:526`
 
 ## out
-(Filled by CR)
+Review complete. See `062_CR_EN_b3-b4-review.md` for full findings.
+Status: CHG:3 — one scope blocker (AudioService VAD threshold bundled in wrong branch),
+one medium gap (OnboardingView.backendCard missing .disabled during download),
+one medium fragility (didSet recursive-assign contract). Core B3/B4 fixes confirmed correct.
 
 ---
 

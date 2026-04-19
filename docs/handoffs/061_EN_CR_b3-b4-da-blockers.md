@@ -67,4 +67,8 @@ the actor annotations don't silently break main-thread safety.
 - `@EN/impl#h1` — `Murmur/Onboarding/OnboardingViewModel.swift` (.receive(on:))
 
 ## out
-(Filled by CR)
+Review complete. See `062_CR_EN_b3-b4-review.md` for full findings.
+Status: CHG:3 — C1/C2/H3/H1 changes all confirmed correct. Three new issues found:
+scope blocker (AudioService -60→-45 dB threshold change unrelated to B3/B4, bundled in
+1fc6cbd), medium gap (OnboardingView.backendCard not disabled during download, unlike
+SettingsView), medium fragility (didSet recursive-assign on @Published needs hardening).
