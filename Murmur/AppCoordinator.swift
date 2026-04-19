@@ -288,11 +288,7 @@ final class AppCoordinator: ObservableObject {
                 self.transition(to: .idle)
                 self.pill.hide()
             } catch {
-                let err = self.mapError(error)
-                self.transition(to: .error(err))
-                self.audioFeedback.playError()
-                self.pill.show(state: .error(err))
-                self.pill.hide(after: Self.errorAutoRecoverySeconds)
+                self.handleError(self.mapError(error))
             }
         }
     }
@@ -483,15 +479,9 @@ final class AppCoordinator: ObservableObject {
                 switch reason {
                 case .focusAbandoned:
                     // UT-P1: Notify user that session was abandoned due to app switch.
-                    transition(to: .idle)
-                    audioFeedback.playError()
-                    pill.show(state: .error(MurmurError.sessionAbandoned))
-                    pill.hide(after: Self.errorAutoRecoverySeconds)
+                    handleError(.sessionAbandoned)
                 case .backstopTimeout:
-                    transition(to: .idle)
-                    audioFeedback.playError()
-                    pill.show(state: .error(MurmurError.timeout(operation: "Streaming")))
-                    pill.hide(after: Self.errorAutoRecoverySeconds)
+                    handleError(.timeout(operation: "Streaming"))
                 case .user:
                     transition(to: .idle)
                     pill.hide(after: 0.5)
@@ -521,11 +511,7 @@ final class AppCoordinator: ObservableObject {
 
         } catch {
             streamingCoordinator?.cancelSession()
-            let err = mapError(error)
-            transition(to: .error(err))
-            audioFeedback.playError()
-            pill.show(state: .error(err))
-            pill.hide(after: Self.errorAutoRecoverySeconds)
+            handleError(mapError(error))
         }
 
         // Reset coordinator so next session can begin
@@ -665,11 +651,7 @@ final class AppCoordinator: ObservableObject {
             pill.hide(after: 2)
             // Undo timer + Cmd+Z monitor set up automatically by transition(to: .undoable)
         } catch {
-            let err = mapError(error)
-            transition(to: .error(err))
-            audioFeedback.playError()
-            pill.show(state: .error(err))
-            pill.hide(after: Self.errorAutoRecoverySeconds)
+            handleError(mapError(error))
         }
 
         // Drain pending recording
@@ -725,10 +707,49 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    /// How long an error pill stays visible before auto-hiding. Long enough for
-    /// a user to read "Transcription model not found. Please run onboarding."
-    /// without rushing.
-    private static let errorAutoRecoverySeconds: TimeInterval = 5
+    /// How long a transient error pill stays visible before auto-hiding.
+    /// The pill shows the short label (e.g. "Model missing"); full detail is
+    /// in the NSAlert for critical errors and the unified log for everything.
+    private static let errorAutoRecoverySeconds: TimeInterval = 4
+
+    /// Central error-presentation funnel. Every catch block that maps a thrown
+    /// error into a user-visible failure should go through here.
+    ///
+    /// - Critical errors (model missing, disk full, permission revoked) pop an
+    ///   NSAlert — the user must acknowledge them before continuing.
+    /// - Transient errors (timeouts, silence, transcription failures) flash a
+    ///   short pill with `err.shortMessage` and auto-hide after a few seconds.
+    ///
+    /// Full-detail copy for both paths lives on MurmurError (`errorDescription`
+    /// / `alertTitle` / `shortMessage`) and is also logged via `Self.log.error`
+    /// in `transition(to:)`.
+    private func handleError(_ err: MurmurError) {
+        // transition() logs the error and triggers the permission alert
+        // (which has its own button layout). Nothing else to do for that path.
+        transition(to: .error(err))
+        if case .permissionRevoked = err { return }
+
+        audioFeedback.playError()
+
+        switch err.severity {
+        case .critical:
+            showCriticalErrorAlert(for: err)
+        case .transient:
+            pill.show(state: .error(err))
+            pill.hide(after: Self.errorAutoRecoverySeconds)
+        }
+    }
+
+    private func showCriticalErrorAlert(for err: MurmurError) {
+        let alert = NSAlert()
+        alert.messageText = err.alertTitle
+        alert.informativeText = err.errorDescription ?? ""
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        _ = alert.runModal()
+        state = .idle
+        pill.hide()
+    }
 
     private func showPermissionAlert(for permission: MurmurError.Permission) {
         let alert = NSAlert()

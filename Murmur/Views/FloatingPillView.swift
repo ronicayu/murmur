@@ -26,7 +26,7 @@ struct FloatingPillView: View {
         case .transcribing: return "Transcribing audio"
         case .injecting: return "Inserting text"
         case .undoable: return "Inserted"
-        case .error(let err): return "Error: \(err.localizedDescription)"
+        case .error(let err): return "Error: \(err.shortMessage). \(err.errorDescription ?? "")"
         case .idle: return "Murmur idle"
         }
     }
@@ -95,12 +95,10 @@ struct FloatingPillView: View {
             Text("Inserted")
                 .font(.system(.caption, design: .rounded, weight: .medium))
         case .error(let err):
-            Text(err.localizedDescription)
-                .font(.system(.caption, design: .rounded))
+            Text(err.shortMessage)
+                .font(.system(.caption, design: .rounded, weight: .medium))
                 .foregroundStyle(.orange)
-                .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 260, alignment: .leading)
+                .lineLimit(1)
         case .idle:
             EmptyView()
         }
