@@ -220,7 +220,12 @@ final class ModelManager: ObservableObject {
     }
 
     func modelDirectory(for backend: ModelBackend) -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        #if DEBUG
+        if let override = modelDirectoryOverrides[backend] {
+            return override
+        }
+        #endif
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(backend.modelSubdirectory)
     }
 
@@ -1116,6 +1121,35 @@ final class ModelManager: ObservableObject {
     // guard is enforced at runtime, not just by convention.
 
 #if DEBUG
+    /// Override the model directory resolved by `modelDirectory(for:)` for a
+    /// specific backend. Integration tests use this to redirect file operations
+    /// to a temp directory instead of the user's real Application Support path.
+    ///
+    /// NEVER call this from non-test code.
+    private var modelDirectoryOverrides: [ModelBackend: URL] = [:]
+
+    func __testing_setModelDirectory(_ url: URL, for backend: ModelBackend) {
+        assert(
+            NSClassFromString("XCTestCase") != nil,
+            "__testing_setModelDirectory invoked outside XCTest — this is a test seam and must only be called from unit tests"
+        )
+        modelDirectoryOverrides[backend] = url
+    }
+
+    /// Inject a pre-launched Process as the active download process, so that
+    /// integration tests can exercise the SIGTERM → poll → SIGKILL → cleanup
+    /// path without running a real model download.
+    ///
+    /// The process must already be running (proc.run() called) before injection.
+    /// NEVER call this from non-test code.
+    func __testing_injectDownloadProcess(_ proc: Process) {
+        assert(
+            NSClassFromString("XCTestCase") != nil,
+            "__testing_injectDownloadProcess invoked outside XCTest — this is a test seam and must only be called from unit tests"
+        )
+        self.activeDownloadProcess = proc
+    }
+
     /// Force the internal state to a specific value for unit testing.
     ///
     /// This is the *only* way tests can drive the manager into `.downloading`,
