@@ -605,7 +605,19 @@ final class SetActiveBackendGuardTests: XCTestCase {
     }
 }
 
-// MARK: - H4: cancelDownload terminates the active process
+// MARK: - H4 + C6: cancelDownload terminates the active process
+//
+// These tests verify the synchronous state-reset guarantees of cancelDownload().
+// The SIGKILL escalation path (C6 fix) is NOT exercised here because
+// activeDownloadProcess is nil in the unit test harness — no real Process is
+// running. The SIGKILL path requires a real subprocess and is tracked as a
+// QA integration test in handoff 068_QA_EN_b3-b4-integration-ask.md.
+//
+// What IS tested:
+//   - State resets to .notDownloaded synchronously (UI unlocks immediately).
+//   - isDownloadActive becomes false synchronously.
+//   - A backend switch is accepted right after cancel.
+//   - statusMessage is cleared synchronously.
 
 @MainActor
 final class CancelDownloadTests: XCTestCase {
@@ -662,5 +674,18 @@ final class CancelDownloadTests: XCTestCase {
         XCTAssertTrue(accepted,
             "Backend switch must be accepted immediately after cancelDownload()")
         XCTAssertEqual(manager.activeBackend, .whisper)
+    }
+
+    func test_cancelDownload_clearsStatusMessage() {
+        // Arrange
+        manager.__testing_setState(.downloading(progress: 0.5, bytesPerSec: 100_000))
+
+        // Act
+        manager.cancelDownload()
+
+        // Assert — statusMessage must be cleared synchronously so no stale
+        // "Downloading..." text lingers in UI after cancel.
+        XCTAssertEqual(manager.statusMessage, "",
+            "cancelDownload must clear statusMessage synchronously")
     }
 }

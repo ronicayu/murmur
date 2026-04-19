@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import os
 import Combine
 import CryptoKit
@@ -180,7 +181,9 @@ final class ModelManager: ObservableObject {
     }
 
     private let logger = Logger(subsystem: "com.murmur.app", category: "model")
-    private var downloadTask: Task<Void, Never>?
+    // Note: downloadTask was removed (M3 — it was never assigned by download() so
+    // downloadTask?.cancel() in cancelDownload() was always a no-op). The actual
+    // subprocess is cancelled via activeDownloadProcess.terminate() + SIGKILL escalation.
     private var activeDownloadProcess: Process?
     private var urlSession: URLSession?
     private var resumeData: Data?
@@ -446,34 +449,92 @@ final class ModelManager: ObservableObject {
     }
 
     func cancelDownload() {
-        // Terminate the Python snapshot_download process immediately so it stops
-        // writing to the model directory. Without this, the process continues as a
-        // zombie even after state is reset to .notDownloaded, and any subsequent
-        // download or backend switch can race against the still-running subprocess.
+        // --- Subprocess termination with SIGKILL escalation ---
+        //
+        // Process.terminate() sends SIGTERM asynchronously. Python cannot service
+        // the signal until the current C-extension call returns (TLS read, file I/O,
+        // zlib), which can take 1-3 seconds. During that window the process is still
+        // writing to the model directory, which could corrupt the partial-file state
+        // (see C6 in handoff 066).
+        //
+        // Strategy:
+        //   1. Send SIGTERM synchronously (unblocks Python on next bytecode dispatch).
+        //   2. Synchronously reset UI state so isDownloadActive is false immediately.
+        //   3. In a background Task, wait up to 2 seconds for the process to exit.
+        //      If it hasn't, escalate to SIGKILL via Darwin.kill to guarantee no
+        //      further file writes. The background Task owns cleanup of the model
+        //      directory after the process is confirmed dead.
+        //
+        // QA integration note: the SIGKILL path is not exercised by unit tests
+        // (activeDownloadProcess is nil in the test harness). A real-subprocess
+        // integration test is tracked in handoff 068_QA_EN_b3-b4-integration-ask.md.
+
+        let capturedBackend = activeBackend
+        let capturedModelDir = modelDirectory(for: capturedBackend)
+
         if let proc = activeDownloadProcess, proc.isRunning {
+            let pid = proc.processIdentifier
             proc.terminate()
-            logger.info("Terminated active download process (pid: \(proc.processIdentifier))")
+            logger.info("Sent SIGTERM to download process (pid: \(pid))")
+
+            // Background Task: wait for exit, escalate to SIGKILL, then clean up
+            // the partial model directory so isModelDownloaded(for:) cannot
+            // falsely return true for an incomplete download (H5 mitigation).
+            Task.detached { [logger] in
+                let exited = await Self.waitForProcessExit(proc, timeoutSeconds: 2.0)
+                if !exited {
+                    // Process survived SIGTERM window — force-kill to guarantee no
+                    // further writes to the model directory.
+                    Darwin.kill(pid, SIGKILL)
+                    logger.warning("Escalated to SIGKILL for download process (pid: \(pid))")
+                    // Brief grace period for the OS to reclaim file handles before
+                    // we attempt directory removal.
+                    try? await Task.sleep(for: .milliseconds(100))
+                } else {
+                    logger.info("Download process exited cleanly after SIGTERM (pid: \(pid))")
+                }
+
+                // H5 mitigation: delete partial model directory now that the
+                // subprocess is guaranteed to be dead and no longer writing.
+                // This prevents isModelDownloaded(for: capturedBackend) from
+                // falsely returning true if the partial write happened to include
+                // all required file names (they may still be corrupt/truncated).
+                do {
+                    if FileManager.default.fileExists(atPath: capturedModelDir.path) {
+                        try FileManager.default.removeItem(at: capturedModelDir)
+                        logger.info("Removed partial model directory after cancel: \(capturedModelDir.path)")
+                    }
+                } catch {
+                    logger.error("Failed to remove partial model directory: \(error)")
+                }
+            }
         }
         activeDownloadProcess = nil
 
-        downloadTask?.cancel()
-        downloadTask = nil
-
         // Set state synchronously before returning so isDownloadActive is false
         // immediately — callers that check isDownloadActive right after cancel
-        // (e.g. the didSet guard) will see the updated state.
+        // (e.g. setActiveBackend guard) will see the updated state.
         state = .notDownloaded
         downloadProgress = 0
+        statusMessage = ""
+        logger.info("Download cancelled (subprocess cleanup running in background)")
+    }
 
-        // Keep partial downloads — huggingface_hub resumes from where it left off
-        let partialSize = directorySize(modelDirectory)
-        if partialSize > 0 {
-            statusMessage = "Download paused — \(partialSize / 1_000_000) MB saved, will resume"
-            logger.info("Download cancelled, \(partialSize) bytes preserved for resume")
-        } else {
-            statusMessage = ""
+    /// Polls until `proc.isRunning` is false or `timeoutSeconds` elapses.
+    ///
+    /// `Process.waitUntilExit()` is a blocking call and must not be called on the
+    /// main actor. This helper polls at 100ms intervals on a non-isolated context
+    /// so callers can await it safely from a `Task.detached` block.
+    ///
+    /// - Returns: `true` if the process exited within the timeout, `false` otherwise.
+    private static func waitForProcessExit(_ proc: Process, timeoutSeconds: Double) async -> Bool {
+        let pollInterval = Duration.milliseconds(100)
+        let maxIterations = Int(timeoutSeconds * 10) // 10 polls per second
+        for _ in 0..<maxIterations {
+            if !proc.isRunning { return true }
+            try? await Task.sleep(for: pollInterval)
         }
-        logger.info("Download cancelled")
+        return !proc.isRunning
     }
 
     func verify() async throws -> Bool {
@@ -729,14 +790,32 @@ final class ModelManager: ObservableObject {
     }
 
     // MARK: - Test Seams (DEBUG only)
+    //
+    // These functions are compiled only in DEBUG builds and are intentionally
+    // named with a `__testing_` prefix to make misuse obvious at call sites.
+    //
+    // Access guard (C7): each seam asserts at runtime that it is being called
+    // from within an XCTest run. This prevents accidental invocation from debug
+    // menus, LLDB scripts, or future features in non-test Debug code paths.
+    // The check is `NSClassFromString("XCTestCase") != nil`, which is true only
+    // when the XCTest framework is loaded (i.e. during `swift test` runs).
+    //
+    // This is "option (b)" from handoff 066 C7: keeps `internal` access level
+    // (required for @testable import) but adds a structural safety check so the
+    // guard is enforced at runtime, not just by convention.
 
 #if DEBUG
     /// Force the internal state to a specific value for unit testing.
     ///
     /// This is the *only* way tests can drive the manager into `.downloading`,
     /// `.verifying`, `.corrupt`, or `.error` without running a real download.
-    /// Never call this in production code.
+    /// NEVER call this from non-test code. The runtime assertion below enforces
+    /// this structurally in all Debug builds.
     func __testing_setState(_ newState: ModelState) {
+        assert(
+            NSClassFromString("XCTestCase") != nil,
+            "__testing_setState invoked outside XCTest — this is a test seam and must only be called from unit tests"
+        )
         state = newState
     }
 
@@ -744,7 +823,12 @@ final class ModelManager: ObservableObject {
     ///
     /// Used by tests that need to set up a specific backend without triggering
     /// refreshState() side-effects that would require real files on disk.
+    /// NEVER call this from non-test code.
     func __testing_setActiveBackend(_ backend: ModelBackend) {
+        assert(
+            NSClassFromString("XCTestCase") != nil,
+            "__testing_setActiveBackend invoked outside XCTest — this is a test seam and must only be called from unit tests"
+        )
         activeBackend = backend
     }
 #endif
