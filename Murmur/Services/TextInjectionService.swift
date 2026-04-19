@@ -265,19 +265,30 @@ final class TextInjectionService: TextInjectionServiceProtocol, StreamingTextInj
         keyDown.post(tap: .cghidEventTap)
         keyUp.post(tap: .cghidEventTap)
 
-        // Restore clipboard after delay, but only if nothing else has written to it
-        try await Task.sleep(for: .milliseconds(1500))
-        guard pasteboard.changeCount == savedChangeCount + 1 else {
-            // Clipboard was modified by the user or another app — skip restore
-            return
-        }
-        pasteboard.clearContents()
-        for itemTypes in savedItems {
-            let item = NSPasteboardItem()
-            for (typeStr, data) in itemTypes {
-                item.setData(data, forType: NSPasteboard.PasteboardType(typeStr))
+        // Restore the user's clipboard asynchronously so inject() can return
+        // immediately after the paste event is posted. Blocking here for 1.5 s
+        // made AppCoordinator's "Inserted" pill lag 1.5 s behind the visible
+        // text insertion.
+        //
+        // The sleep exists to give the target app time to consume the
+        // clipboard BEFORE we overwrite it — in practice Cmd+V is handled
+        // within a few tens of ms, but we keep the conservative wait.
+        Task.detached {
+            try? await Task.sleep(for: .milliseconds(1500))
+            await MainActor.run {
+                guard pasteboard.changeCount == savedChangeCount + 1 else {
+                    // Clipboard was modified by the user or another app — skip restore.
+                    return
+                }
+                pasteboard.clearContents()
+                for itemTypes in savedItems {
+                    let item = NSPasteboardItem()
+                    for (typeStr, data) in itemTypes {
+                        item.setData(data, forType: NSPasteboard.PasteboardType(typeStr))
+                    }
+                    pasteboard.writeObjects([item])
+                }
             }
-            pasteboard.writeObjects([item])
         }
     }
 }
