@@ -98,7 +98,9 @@ struct FloatingPillView: View {
             Text(err.localizedDescription)
                 .font(.system(.caption, design: .rounded))
                 .foregroundStyle(.orange)
-                .lineLimit(1)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 260, alignment: .leading)
         case .idle:
             EmptyView()
         }

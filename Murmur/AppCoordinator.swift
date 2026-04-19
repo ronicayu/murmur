@@ -292,7 +292,7 @@ final class AppCoordinator: ObservableObject {
                 self.transition(to: .error(err))
                 self.audioFeedback.playError()
                 self.pill.show(state: .error(err))
-                self.pill.hide(after: 2)
+                self.pill.hide(after: Self.errorAutoRecoverySeconds)
             }
         }
     }
@@ -486,12 +486,12 @@ final class AppCoordinator: ObservableObject {
                     transition(to: .idle)
                     audioFeedback.playError()
                     pill.show(state: .error(MurmurError.sessionAbandoned))
-                    pill.hide(after: 2)
+                    pill.hide(after: Self.errorAutoRecoverySeconds)
                 case .backstopTimeout:
                     transition(to: .idle)
                     audioFeedback.playError()
                     pill.show(state: .error(MurmurError.timeout(operation: "Streaming")))
-                    pill.hide(after: 2)
+                    pill.hide(after: Self.errorAutoRecoverySeconds)
                 case .user:
                     transition(to: .idle)
                     pill.hide(after: 0.5)
@@ -525,7 +525,7 @@ final class AppCoordinator: ObservableObject {
             transition(to: .error(err))
             audioFeedback.playError()
             pill.show(state: .error(err))
-            pill.hide(after: 2)
+            pill.hide(after: Self.errorAutoRecoverySeconds)
         }
 
         // Reset coordinator so next session can begin
@@ -669,7 +669,7 @@ final class AppCoordinator: ObservableObject {
             transition(to: .error(err))
             audioFeedback.playError()
             pill.show(state: .error(err))
-            pill.hide(after: 2)
+            pill.hide(after: Self.errorAutoRecoverySeconds)
         }
 
         // Drain pending recording
@@ -703,13 +703,18 @@ final class AppCoordinator: ObservableObject {
             setupUndoAutoRecovery()
         }
 
-        // Permission errors show a blocking alert; other errors auto-recover
+        // Permission errors show a blocking alert; other errors auto-recover.
+        // Surface every error to the unified log so user-reported issues can be
+        // diagnosed without repro steps. Read via Console.app, filter by
+        // subsystem=com.murmur.app. String(describing:) prints the enum case and
+        // associated values — more useful than localizedDescription for debugging.
         if case .error(let err) = newState {
+            Self.log.error("Entered error state: \(String(describing: err)) — \(err.localizedDescription)")
             if case .permissionRevoked(let perm) = err {
                 showPermissionAlert(for: perm)
             } else {
                 Task { @MainActor [weak self] in
-                    try? await Task.sleep(for: .seconds(2))
+                    try? await Task.sleep(for: .seconds(Self.errorAutoRecoverySeconds))
                     guard let self else { return }
                     if case .error = self.state {
                         self.state = .idle
@@ -719,6 +724,11 @@ final class AppCoordinator: ObservableObject {
             }
         }
     }
+
+    /// How long an error pill stays visible before auto-hiding. Long enough for
+    /// a user to read "Transcription model not found. Please run onboarding."
+    /// without rushing.
+    private static let errorAutoRecoverySeconds: TimeInterval = 5
 
     private func showPermissionAlert(for permission: MurmurError.Permission) {
         let alert = NSAlert()
