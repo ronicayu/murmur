@@ -33,6 +33,15 @@ Murmur lives in your menu bar. It uses [Cohere Transcribe](https://cohere.com/bl
 
 Download the latest DMG from [Releases](../../releases), drag to Applications, launch.
 
+### First launch (macOS security prompt)
+
+Because Murmur isn't notarized by Apple yet, macOS will block it the first time you open it with a message like *"Murmur cannot be opened because Apple cannot check it for malicious software."*
+
+1. Open **System Settings → Privacy & Security**
+2. Scroll to the **Security** section — you'll see `"Murmur" was blocked…`
+3. Click **Open Anyway** and confirm with your password
+4. Subsequent launches won't prompt again
+
 ### Build from source
 
 ```bash
