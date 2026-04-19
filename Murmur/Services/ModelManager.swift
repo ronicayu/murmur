@@ -153,6 +153,12 @@ final class ModelManager: ObservableObject {
     ///   download or verification is in progress and the switch was refused.
     @discardableResult
     func setActiveBackend(_ backend: ModelBackend) -> Bool {
+        // Short-circuit: same backend requested — nothing to do. Return true because
+        // the desired state is already in effect. Do NOT fire committedBackendChange;
+        // any observer (e.g. MurmurApp.onReceive) would tear down and rebuild the
+        // transcription service unnecessarily, wasting resources and potentially
+        // killing an in-flight preload.
+        guard backend != activeBackend else { return true }
         guard !isDownloadActive else {
             logger.warning("Refused backend switch \(self.activeBackend.rawValue) → \(backend.rawValue) — download in progress")
             return false

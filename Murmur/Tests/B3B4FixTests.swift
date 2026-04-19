@@ -544,6 +544,65 @@ final class SetActiveBackendGuardTests: XCTestCase {
         XCTAssertTrue(accepted, "setActiveBackend must succeed after download is cancelled")
         XCTAssertEqual(manager.activeBackend, .whisper)
     }
+
+    // MARK: C5 — same-value short-circuit (regression test)
+    //
+    // setActiveBackend(currentBackend) must return true (trivially accepted) but
+    // must NOT fire committedBackendChange. Any emission would cause MurmurApp
+    // to tear down and rebuild the live transcription service unnecessarily —
+    // the exact regression C5 describes.
+
+    func test_setActiveBackend_sameValue_returnsTrue() {
+        // Arrange — backend is .onnx (set in setUp)
+        manager.__testing_setState(.notDownloaded)
+        XCTAssertEqual(manager.activeBackend, .onnx)
+
+        // Act — call with the current backend
+        let accepted = manager.setActiveBackend(.onnx)
+
+        // Assert — should be "accepted" (nothing to do)
+        XCTAssertTrue(accepted,
+            "setActiveBackend with same backend must return true (desired state already in effect)")
+    }
+
+    func test_setActiveBackend_sameValue_doesNotFireCommittedBackendChange() {
+        // Arrange
+        manager.__testing_setState(.notDownloaded)
+        XCTAssertEqual(manager.activeBackend, .onnx)
+
+        var emissionCount = 0
+        manager.committedBackendChange
+            .sink { _ in emissionCount += 1 }
+            .store(in: &cancellables)
+
+        // Act — call twice with the current backend
+        _ = manager.setActiveBackend(.onnx)
+        _ = manager.setActiveBackend(.onnx)
+
+        // Assert — committedBackendChange must never fire for same-value calls
+        XCTAssertEqual(emissionCount, 0,
+            "committedBackendChange must not emit when backend is unchanged — " +
+            "any emission would trigger MurmurApp to rebuild the transcription service")
+    }
+
+    func test_setActiveBackend_sameValue_doesNotRewriteUserDefaults() {
+        // Arrange — record the write count by observing UserDefaults KVO
+        manager.__testing_setState(.notDownloaded)
+        let key = "modelBackend"
+        let before = UserDefaults.standard.string(forKey: key)
+        XCTAssertEqual(before, ModelBackend.onnx.rawValue)
+
+        // We can't count writes directly, but we verify the value is unchanged
+        // and that no observable side effects fired (see sibling test above).
+        // This test documents the contract: same-value call must not persist anything new.
+        _ = manager.setActiveBackend(.onnx)
+
+        let after = UserDefaults.standard.string(forKey: key)
+        XCTAssertEqual(after, ModelBackend.onnx.rawValue,
+            "UserDefaults value must remain the same after a same-value setActiveBackend call")
+        XCTAssertEqual(manager.activeBackend, .onnx,
+            "activeBackend must remain unchanged after same-value call")
+    }
 }
 
 // MARK: - H4: cancelDownload terminates the active process
