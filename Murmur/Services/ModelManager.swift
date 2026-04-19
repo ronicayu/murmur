@@ -200,6 +200,14 @@ final class ModelManager: ObservableObject {
     }
 
     private let logger = Logger(subsystem: "com.murmur.app", category: "model")
+
+    // FU-07: Stall timeout — if downloadedBytes does not increase for this many
+    // seconds, the download is considered stalled. HuggingFace downloads on a
+    // normal connection always make some progress every 60s, even on a slow link.
+    // 90s gives a grace period for momentary network hiccups without leaving the
+    // user stuck indefinitely.
+    private static let stallTimeoutSeconds: TimeInterval = 90
+
     // Note: downloadTask was removed (M3 — it was never assigned by download() so
     // downloadTask?.cancel() in cancelDownload() was always a no-op). The actual
     // subprocess is cancelled via activeDownloadProcess.terminate() + SIGKILL escalation.
@@ -506,6 +514,9 @@ final class ModelManager: ObservableObject {
             var lastSize: Int64 = 0
             var speedSamples: [Int64] = []
             let maxSamples = 5
+            // FU-07: Track when bytes last increased. Initialise to "now" so the
+            // first poll interval doesn't immediately fire a false stall.
+            var lastProgressAt = Date()
 
             while !Task.isCancelled && process.isRunning {
                 try? await Task.sleep(for: .seconds(1))
@@ -520,6 +531,25 @@ final class ModelManager: ObservableObject {
                 speedSamples.append(instantSpeed)
                 if speedSamples.count > maxSamples { speedSamples.removeFirst() }
                 let smoothedSpeed = speedSamples.reduce(0, +) / Int64(speedSamples.count)
+
+                // FU-07: Reset the stall clock whenever bytes increase.
+                if modelSize > lastSize {
+                    lastProgressAt = Date()
+                }
+
+                // FU-07: If no bytes have arrived for stallTimeoutSeconds, cancel
+                // the subprocess and surface a recoverable error. We cancel the
+                // process first (which stops writes), then set .error so the user
+                // sees the NSAlert rather than returning to .notDownloaded silently.
+                if Self.isStalled(lastProgressAt: lastProgressAt, now: Date(), timeout: Self.stallTimeoutSeconds) {
+                    self.logger.warning("Download stalled — no progress for \(Self.stallTimeoutSeconds)s; cancelling subprocess")
+                    self.cancelDownload()
+                    // cancelDownload() sets state to .notDownloaded; override with the
+                    // stall error so the existing NSAlert routing chain shows recovery UI.
+                    self.state = .error(MurmurError.downloadStalled.shortMessage)
+                    self.statusMessage = MurmurError.downloadStalled.alertTitle
+                    break
+                }
 
                 self.downloadSpeed = smoothedSpeed
                 self.downloadedBytes = modelSize
@@ -826,6 +856,24 @@ final class ModelManager: ObservableObject {
         state = .notDownloaded
         downloadProgress = 0
         logger.info("Model deleted")
+    }
+
+    // MARK: - Stall Detection
+
+    /// Pure predicate: returns true when the elapsed time since the last byte-count
+    /// increase meets or exceeds `timeout`. Extracted from the monitor loop so it
+    /// can be unit-tested without running a real download.
+    ///
+    /// Marked `nonisolated` because it is a pure computation with no access to
+    /// actor-isolated state — callers can invoke it from any concurrency context.
+    ///
+    /// - Parameters:
+    ///   - lastProgressAt: The timestamp when `downloadedBytes` last increased.
+    ///   - now: The reference "current" time (injectable for testing).
+    ///   - timeout: Stall threshold in seconds; defaults to `stallTimeoutSeconds`.
+    /// - Returns: `true` if no progress has been made for at least `timeout` seconds.
+    nonisolated static func isStalled(lastProgressAt: Date, now: Date, timeout: TimeInterval) -> Bool {
+        return now.timeIntervalSince(lastProgressAt) >= timeout
     }
 
     // MARK: - Helpers
