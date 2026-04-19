@@ -4,6 +4,7 @@ enum MurmurError: Error, Sendable {
     case microphoneBusy
     case diskFull
     case modelNotFound
+    case downloadStalled
     case silenceDetected
     case permissionRevoked(Permission)
     case transcriptionFailed(String)
@@ -28,7 +29,7 @@ enum MurmurError: Error, Sendable {
     /// How the error should be presented. `critical` = NSAlert, `transient` = pill.
     var severity: Severity {
         switch self {
-        case .modelNotFound, .diskFull, .permissionRevoked:
+        case .modelNotFound, .diskFull, .downloadStalled, .permissionRevoked:
             return .critical
         case .microphoneBusy, .silenceDetected, .transcriptionFailed,
              .injectionFailed, .timeout, .sessionAbandoned:
@@ -44,6 +45,7 @@ enum MurmurError: Error, Sendable {
         case .microphoneBusy: return "Mic in use"
         case .diskFull: return "Disk full"
         case .modelNotFound: return "Model missing"
+        case .downloadStalled: return "Download stalled"
         case .silenceDetected: return "Didn't catch that"
         case .permissionRevoked(let perm): return "\(perm.rawValue.capitalized) needed"
         case .transcriptionFailed: return "Transcription failed"
@@ -58,6 +60,7 @@ enum MurmurError: Error, Sendable {
         switch self {
         case .modelNotFound: return "Speech model not installed"
         case .diskFull: return "Not enough disk space"
+        case .downloadStalled: return "Download stopped making progress"
         case .permissionRevoked(let perm): return "\(perm.rawValue.capitalized) Permission Required"
         default: return shortMessage
         }
@@ -73,6 +76,8 @@ extension MurmurError: LocalizedError {
             return "Not enough disk space to record. Free up space and try again."
         case .modelNotFound:
             return "Murmur needs to download the transcription model before it can work. Open Settings and start the download."
+        case .downloadStalled:
+            return "The download isn't receiving data. Check your internet connection and try again."
         case .silenceDetected:
             return "Didn't catch that. Try again."
         case .permissionRevoked(let perm):
