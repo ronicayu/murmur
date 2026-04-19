@@ -119,6 +119,7 @@ final class AppCoordinator: ObservableObject {
     private var audioLevelTask: Task<Void, Never>?
     private var maxDurationTask: Task<Void, Never>?
     private var undoMonitor: Any?
+    private var activeBadge: String? = nil
     private static let log = Logger(subsystem: "com.murmur.app", category: "coordinator")
 
     init(
@@ -361,9 +362,13 @@ final class AppCoordinator: ObservableObject {
 
     private func startV1RecordingFlow() async {
         do {
+            let resolvedLang = resolveTranscriptionLanguage()
+            let storedSetting = UserDefaults.standard.string(forKey: "transcriptionLanguage") ?? "auto"
+            activeBadge = LanguageBadge.badgeText(resolvedCode: resolvedLang, storedSetting: storedSetting)
+
             transition(to: .recording)
             audioFeedback.playStartRecording()
-            pill.show(state: .recording, audioLevel: 0)
+            pill.show(state: .recording, audioLevel: 0, languageBadge: activeBadge)
 
             // Monitor audio levels for the pill
             audioLevelTask?.cancel()
@@ -371,7 +376,7 @@ final class AppCoordinator: ObservableObject {
                 guard let self else { return }
                 for await level in self.audio.audioLevel {
                     self.currentAudioLevel = level
-                    self.pill.show(state: .recording, audioLevel: level)
+                    self.pill.show(state: .recording, audioLevel: level, languageBadge: self.activeBadge)
                 }
             }
 
@@ -415,7 +420,7 @@ final class AppCoordinator: ObservableObject {
                     self.currentAudioLevel = level
                     // Pill update happens via streamingCoordinator published state
                     if case .streaming(let n) = self.streamingCoordinator?.sessionState {
-                        self.pill.show(state: .streaming(chunkCount: n), audioLevel: level)
+                        self.pill.show(state: .streaming(chunkCount: n), audioLevel: level, languageBadge: self.activeBadge)
                     }
                 }
             }
@@ -428,6 +433,9 @@ final class AppCoordinator: ObservableObject {
             let startOffset = resolveCurrentCursorOffset()
             let targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
             let lang = resolveTranscriptionLanguage()
+            let storedSetting = UserDefaults.standard.string(forKey: "transcriptionLanguage") ?? "auto"
+            activeBadge = LanguageBadge.badgeText(resolvedCode: lang, storedSetting: storedSetting)
+            pill.show(state: .streaming(chunkCount: 0), audioLevel: currentAudioLevel, languageBadge: activeBadge)
             let wavURL = audio.currentRecordingURL ?? FileManager.default.temporaryDirectory
                 .appendingPathComponent("murmur_stream_\(UUID().uuidString).wav")
 
