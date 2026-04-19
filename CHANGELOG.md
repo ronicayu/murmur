@@ -11,14 +11,23 @@
 - Cancel→redownload race where the cleanup Task deleted files the new download was writing (C8)
 - Termination-handler race in `download()`: handler now attached before `run()` with defensive post-run check
 - Monitor task overwrote `.ready` with a stale `.downloading` write after the subprocess exited
+- V1 pill lagged 1.5 s behind text insertion because `injectViaClipboard` blocked on clipboard restoration; restore is now a detached Task
+- Critical errors (model missing, disk full) now surface as NSAlert with clear copy instead of a truncated pill
+- Pre-check on startRecording catches missing-model case before wasted audio capture
 
 ### Added
 - FU-04 manifest verification: `manifest.json` (SHA-256 + size per file) written after every successful download; hot-path checks (size only) gate `isModelDownloaded`; `verify()` re-hashes on demand; one-time migration generates the manifest for existing on-disk models
-- Engine row disabled during active download (Settings and onboarding)
+- Engine row disabled during active download with "Locked during download" caption + hover tooltip (Settings and onboarding)
+- Cancel confirmation dialog above 100 MB ("You've downloaded N MB — cancelling will discard it")
+- `MurmurError.Severity` + `shortMessage` + `alertTitle` taxonomy for consistent error presentation
+- Every error state transition logged via `os_log` (subsystem `com.murmur.app`, category `coordinator`) for post-hoc diagnosis
 
 ### Changed
 - Download progress label no longer shows misleading "Finalizing" mid-transfer
 - Progress size tracking scoped to the model directory only (previously conflated with unrelated `~/.cache/huggingface` data)
+- Pill for `.undoable` state simplified to "Inserted" — removed the transcribed-text preview and "⌘Z to undo" hint (Cmd+Z still works)
+- Audio feedback reduced to just two sounds: Tink on record start (system event: mic is live) and Basso on error (system event: failure). Stop/cancel/success chimes removed — the pill and visible text insertion already confirm those user-initiated or visible events. All sounds at 0.18 volume.
+- "Cancel" → "Cancel Download" copy unified across Settings and onboarding
 
 ## [0.2.0] — 2026-04-13
 
