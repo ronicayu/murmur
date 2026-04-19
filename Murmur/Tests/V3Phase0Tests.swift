@@ -196,7 +196,8 @@ final class V3AXSelectReplaceTests: XCTestCase {
             replacementText: "[V3_REPLACED_NOTES]"
         )
         logResult(r)
-        XCTAssertTrue(r.canGetFocusedElement, "Notes: must be able to get focused element. Is a text body focused?")
+        try XCTSkipUnless(r.canGetFocusedElement,
+                          "Notes: no focused text element — click inside a Notes body before running")
         XCTAssertTrue(r.canInsertText, "Notes: text insertion must succeed")
         XCTAssertTrue(r.canSelectInsertedRange, "Notes: must be able to select injected range")
         XCTAssertTrue(r.canReplaceSelection, "Notes: must be able to replace selection")
@@ -214,7 +215,8 @@ final class V3AXSelectReplaceTests: XCTestCase {
             replacementText: "[V3_REPLACED_TEXTEDIT]"
         )
         logResult(r)
-        XCTAssertTrue(r.canGetFocusedElement, "TextEdit: must be able to get focused element")
+        try XCTSkipUnless(r.canGetFocusedElement,
+                          "TextEdit: no focused text element — click inside a TextEdit document before running")
         XCTAssertTrue(r.canInsertText, "TextEdit: text insertion must succeed")
         XCTAssertTrue(r.canSelectInsertedRange, "TextEdit: must be able to select injected range")
         XCTAssertTrue(r.canReplaceSelection, "TextEdit: must be able to replace selection")
@@ -249,13 +251,16 @@ final class V3AXSelectReplaceTests: XCTestCase {
     /// MANUAL: Open Terminal with a shell prompt active (not inside vim or similar).
     func test_axSelectReplace_Terminal() throws {
         try requireAccessibilityPermission()
+        try XCTSkipUnless(runningApp(bundleIdentifier: "com.apple.Terminal") != nil,
+                          "Terminal not running — manual test, skip in CI")
         let r = performSelectReplace(
             bundleIdentifier: "com.apple.Terminal",
             probeText: "[V3_PROBE_TERMINAL]",
             replacementText: "[V3_REPLACED_TERMINAL]"
         )
         logResult(r)
-        XCTAssertTrue(r.canGetFocusedElement, "Terminal: must be able to get focused element")
+        try XCTSkipUnless(r.canGetFocusedElement,
+                          "Terminal: no focused text element — ensure Terminal has an active shell prompt focused")
         // Terminal AX range selection is known to be limited — soft assertion.
         if !r.canSelectInsertedRange {
             XCTExpectFailure("Terminal AX selected-range set may not be supported")
