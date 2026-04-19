@@ -343,7 +343,7 @@ final class AppCoordinator: ObservableObject {
             streamingCoordinator?.cancelSession()
             streamingCoordinator?.resetToIdle()
             audio.cancelRecording()
-            audioFeedback.playStopRecording()
+            // No sound: user just pressed Escape; pill.hide() is the confirmation.
             pill.hide()
             transition(to: .idle)
         }
@@ -464,7 +464,10 @@ final class AppCoordinator: ObservableObject {
     private func stopAndTranscribeStreaming() async {
         audioLevelTask?.cancel()
         maxDurationTask?.cancel()
-        audioFeedback.playStopRecording()
+        // No stop sound: release is user-initiated, already known to the user.
+        // Pill transitions ("Listening..." → "Transcribing...") provide visual
+        // confirmation; V1 success chime still confirms the system event of
+        // transcription completing.
 
         audio.detachStreamingAccumulator()
 
@@ -621,7 +624,8 @@ final class AppCoordinator: ObservableObject {
     private func stopAndTranscribeV1() async {
         audioLevelTask?.cancel()
         maxDurationTask?.cancel()
-        audioFeedback.playStopRecording()
+        // No stop sound: release is user-initiated. Success chime on inject
+        // confirms the system event once transcription finishes.
 
         do {
             transition(to: .transcribing)
