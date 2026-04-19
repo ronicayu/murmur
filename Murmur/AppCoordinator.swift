@@ -499,26 +499,23 @@ final class AppCoordinator: ObservableObject {
             } else if streamingCoordinator?.didTriggerCPUFallback == true {
                 // UT-P1: Inform user that streaming was paused due to high CPU.
                 // Full-pass still ran, so show result normally but with a note.
+                // Success sound already fired on .finalizing transition (see waitForStreamingDone).
                 if let replacedText = streamingCoordinator?.fullPassReplacedText {
                     let undoableState = AppState.undoable(text: replacedText, method: .clipboard)
                     transition(to: undoableState)
-                    audioFeedback.playSuccess()
                     pill.show(state: undoableState)
                     pill.hide(after: 3)
                 } else {
                     transition(to: .idle)
-                    audioFeedback.playSuccess()
                     pill.hide(after: 1)
                 }
             } else if let replacedText = streamingCoordinator?.fullPassReplacedText {
                 let undoableState = AppState.undoable(text: replacedText, method: .clipboard)
                 transition(to: undoableState)
-                audioFeedback.playSuccess()
                 pill.show(state: undoableState)
                 pill.hide(after: 3)
             } else {
                 transition(to: .idle)
-                audioFeedback.playSuccess()
                 pill.hide(after: 1)
             }
 
@@ -564,7 +561,7 @@ final class AppCoordinator: ObservableObject {
             }
 
             // Main wait: subscribe to state changes.
-            group.addTask { @MainActor in
+            group.addTask { @MainActor [weak self] in
                 let stream = AsyncStream<StreamingSessionState> { continuation in
                     let cancellable = coordinator.$sessionState.sink { state in
                         continuation.yield(state)
@@ -576,12 +573,21 @@ final class AppCoordinator: ObservableObject {
 
                 let deadline = Date().addingTimeInterval(30)
                 var warningSent = false
+                var successPlayed = false
 
                 for await state in stream {
                     switch state {
                     case .done, .cancelled, .failed:
                         return
                     case .finalizing:
+                        // Play the success chime as soon as the streamed text is
+                        // final (all chunks injected; full-pass refinement starts).
+                        // Previously fired only after the full pass completed,
+                        // leaving a 1–15s gap between text appearing and sound.
+                        if !successPlayed {
+                            successPlayed = true
+                            self?.audioFeedback.playSuccess()
+                        }
                         if !warningSent,
                            let startedAt = coordinator.finalizingStartedAt,
                            Date().timeIntervalSince(startedAt) >= StreamingTranscriptionCoordinator.fullPassWarningSeconds {
