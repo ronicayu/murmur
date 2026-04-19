@@ -298,6 +298,15 @@ final class AppCoordinator: ObservableObject {
     private func handleHotkeyEvent(_ event: HotkeyEvent) async {
         switch event {
         case .startRecording:
+            // Pre-check: without a downloaded model the streaming pipeline would
+            // silently swallow transcription errors (processChunkBuffer logs and
+            // continues; full-pass transitions to .done on failure). Catch it
+            // here and surface a proper NSAlert before the user wastes a
+            // recording on a session that can't produce text.
+            guard Self.isActiveBackendModelInstalled else {
+                handleError(.modelNotFound)
+                return
+            }
             let status = permissions.checkAll()
             if status.microphone == .notDetermined {
                 let granted = await permissions.requestMicrophone()
@@ -712,6 +721,25 @@ final class AppCoordinator: ObservableObject {
     /// in the NSAlert for critical errors and the unified log for everything.
     private static let errorAutoRecoverySeconds: TimeInterval = 4
 
+    /// Fast readiness check for the currently selected backend — is a
+    /// manifest.json (FU-04 "download + verify completed" marker) present
+    /// on disk for the active backend? Used by the startRecording pre-check
+    /// to avoid wasting a recording session when no model is installed.
+    private static var isActiveBackendModelInstalled: Bool {
+        let saved = UserDefaults.standard.string(forKey: "modelBackend") ?? "onnx"
+        let subdir: String
+        switch saved {
+        case "huggingface": subdir = "Murmur/Models"
+        case "whisper": subdir = "Murmur/Models-Whisper"
+        default: subdir = "Murmur/Models-ONNX"
+        }
+        let manifestURL = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(subdir)
+            .appendingPathComponent("manifest.json")
+        return FileManager.default.fileExists(atPath: manifestURL.path)
+    }
+
     /// Central error-presentation funnel. Every catch block that maps a thrown
     /// error into a user-visible failure should go through here.
     ///
@@ -741,6 +769,9 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func showCriticalErrorAlert(for err: MurmurError) {
+        // Murmur is LSUIElement (menu-bar only); without an explicit activate,
+        // runModal() can appear behind the focused app or ignore the event.
+        NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = err.alertTitle
         alert.informativeText = err.errorDescription ?? ""
