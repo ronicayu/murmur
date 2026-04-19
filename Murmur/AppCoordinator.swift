@@ -369,7 +369,8 @@ final class AppCoordinator: ObservableObject {
 
             transition(to: .recording)
             audioFeedback.playStartRecording()
-            pill.show(state: .recording, audioLevel: 0, languageBadge: activeBadge)
+            let cancelHandler: () -> Void = { [weak self] in self?.hotkey.emit(.cancelRecording) }
+            pill.show(state: .recording, audioLevel: 0, languageBadge: activeBadge, onCancel: cancelHandler)
 
             // Monitor audio levels for the pill
             audioLevelTask?.cancel()
@@ -377,7 +378,7 @@ final class AppCoordinator: ObservableObject {
                 guard let self else { return }
                 for await level in self.audio.audioLevel {
                     self.currentAudioLevel = level
-                    self.pill.show(state: .recording, audioLevel: level, languageBadge: self.activeBadge)
+                    self.pill.show(state: .recording, audioLevel: level, languageBadge: self.activeBadge, onCancel: cancelHandler)
                 }
             }
 
@@ -417,7 +418,8 @@ final class AppCoordinator: ObservableObject {
 
             transition(to: .recording)
             audioFeedback.playStartRecording()
-            pill.show(state: .streaming(chunkCount: 0), audioLevel: 0, languageBadge: activeBadge)
+            let cancelHandler: () -> Void = { [weak self] in self?.hotkey.emit(.cancelRecording) }
+            pill.show(state: .streaming(chunkCount: 0), audioLevel: 0, languageBadge: activeBadge, onCancel: cancelHandler)
 
             audioLevelTask?.cancel()
             audioLevelTask = Task { @MainActor [weak self] in
@@ -426,7 +428,7 @@ final class AppCoordinator: ObservableObject {
                     self.currentAudioLevel = level
                     // Pill update happens via streamingCoordinator published state
                     if case .streaming(let n) = self.streamingCoordinator?.sessionState {
-                        self.pill.show(state: .streaming(chunkCount: n), audioLevel: level, languageBadge: self.activeBadge)
+                        self.pill.show(state: .streaming(chunkCount: n), audioLevel: level, languageBadge: self.activeBadge, onCancel: cancelHandler)
                     }
                 }
             }

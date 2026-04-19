@@ -4,31 +4,37 @@ struct FloatingPillView: View {
     let state: AppState
     let audioLevel: Float
     let languageBadge: String?
+    let onCancel: (() -> Void)?
 
-    init(state: AppState, audioLevel: Float, languageBadge: String? = nil) {
+    init(state: AppState, audioLevel: Float, languageBadge: String? = nil, onCancel: (() -> Void)? = nil) {
         self.state = state
         self.audioLevel = audioLevel
         self.languageBadge = languageBadge
+        self.onCancel = onCancel
     }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            HStack(spacing: 8) {
-                stateIcon
-                stateText
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(.ultraThinMaterial, in: Capsule())
-            .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
-            .frame(minWidth: 120)
-
+        HStack(spacing: 8) {
+            stateIcon
             if let badge = languageBadge, isRecordingState {
                 LanguageBadgeView(text: badge)
-                    .padding(.top, 4)
-                    .padding(.trailing, 10)
+            }
+            stateText
+            if isRecordingState, let onCancel {
+                Button(action: onCancel) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Cancel recording")
             }
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: Capsule())
+        .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
+        .frame(minWidth: 120)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(pillAccessibilityLabel)
     }
@@ -135,10 +141,10 @@ final class FloatingPillController {
     private var hostingView: NSHostingView<FloatingPillView>?
     private var hideTask: Task<Void, Never>?
 
-    func show(state: AppState, audioLevel: Float = 0, languageBadge: String? = nil) {
+    func show(state: AppState, audioLevel: Float = 0, languageBadge: String? = nil, onCancel: (() -> Void)? = nil) {
         hideTask?.cancel()
 
-        let pillView = FloatingPillView(state: state, audioLevel: audioLevel, languageBadge: languageBadge)
+        let pillView = FloatingPillView(state: state, audioLevel: audioLevel, languageBadge: languageBadge, onCancel: onCancel)
 
         if let hostingView {
             hostingView.rootView = pillView
