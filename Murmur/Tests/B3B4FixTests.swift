@@ -51,6 +51,11 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
             try Data("stub".utf8).write(to: url)
         }
 
+        // FU-04: write a manifest so manifestIsValid(for:) returns true.
+        // Without this, modelPath(for:) returns nil even with files on disk.
+        let manifest = try manager.buildManifest(for: .onnx)
+        try manager.writeManifest(manifest, for: .onnx)
+
         tempModelRoot = dir
     }
 
@@ -135,9 +140,13 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
             try Data("stub".utf8).write(to: url)
         }
 
-        // Act + Assert — .whisper is NOT active; result is file-existence only
+        // FU-04: write a manifest so manifestIsValid(for:) returns true.
+        let manifest = try manager.buildManifest(for: .whisper)
+        try manager.writeManifest(manifest, for: .whisper)
+
+        // Act + Assert — .whisper is NOT active; result is manifest validity
         XCTAssertTrue(manager.isModelDownloaded(for: .whisper),
-                      "Non-active backend with files present must return true")
+                      "Non-active backend with files and manifest present must return true")
     }
 
     func test_nonActiveBackend_filesAbsent_returnsFalse() {
@@ -275,6 +284,10 @@ final class ActiveBackendDidSetGuardTests: XCTestCase {
             )
             try Data("stub".utf8).write(to: url)
         }
+        // FU-04: write a manifest so refreshState() resolves to .ready.
+        let manifest = try manager.buildManifest(for: .onnx)
+        try manager.writeManifest(manifest, for: .onnx)
+
         manager.refreshState()
         XCTAssertEqual(manager.state, .ready)
 

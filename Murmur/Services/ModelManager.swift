@@ -201,12 +201,112 @@ final class ModelManager: ObservableObject {
         modelPath(for: activeBackend)
     }
 
+    // MARK: - Manifest (FU-04)
+
+    /// File-level entry recorded in the manifest for integrity checking.
+    struct ManifestFileEntry: Codable {
+        let sha256: String
+        let size: Int64
+    }
+
+    /// Persisted manifest written to `manifest.json` after a successful download.
+    ///
+    /// `isModelDownloaded(for:)` reads this file on the hot path (size-only check).
+    /// `verify()` recomputes SHA-256 on every entry on the cold path.
+    struct ModelManifest: Codable {
+        let version: Int
+        let backend: String
+        let createdAt: String
+        let files: [String: ManifestFileEntry]
+
+        /// Relative path of the manifest file inside the model directory.
+        static let filename = "manifest.json"
+    }
+
+    func manifestURL(for backend: ModelBackend) -> URL {
+        modelDirectory(for: backend).appendingPathComponent(ModelManifest.filename)
+    }
+
+    /// Loads the manifest for `backend` from disk, or nil if absent / unreadable.
+    func loadManifest(for backend: ModelBackend) -> ModelManifest? {
+        let url = manifestURL(for: backend)
+        guard let data = try? Data(contentsOf: url),
+              let manifest = try? JSONDecoder().decode(ModelManifest.self, from: data)
+        else { return nil }
+        return manifest
+    }
+
+    /// Walks `modelDirectory(for:)` and computes a manifest entry for every file
+    /// found, excluding `manifest.json` itself. Does NOT exclude `.cache/` prefixes
+    /// because HF doesn't write a `.cache` subdir into local_dir.
+    ///
+    /// - Throws: if a file cannot be read.
+    func buildManifest(for backend: ModelBackend) throws -> ModelManifest {
+        let dir = modelDirectory(for: backend)
+        let fm = FileManager.default
+
+        guard let enumerator = fm.enumerator(
+            at: dir,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            throw CocoaError(.fileReadUnknown)
+        }
+
+        var entries: [String: ManifestFileEntry] = [:]
+        for case let fileURL as URL in enumerator {
+            let values = try fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            guard values.isRegularFile == true else { continue }
+
+            // Skip the manifest file itself
+            guard fileURL.lastPathComponent != ModelManifest.filename else { continue }
+
+            let data = try Data(contentsOf: fileURL)
+            let hash = SHA256.hash(data: data)
+            let hashStr = hash.map { String(format: "%02x", $0) }.joined()
+            let size = Int64(values.fileSize ?? 0)
+            let relative = fileURL.path.replacingOccurrences(of: dir.path + "/", with: "")
+            entries[relative] = ManifestFileEntry(sha256: hashStr, size: size)
+        }
+
+        let iso8601 = ISO8601DateFormatter()
+        return ModelManifest(
+            version: 1,
+            backend: backend.rawValue,
+            createdAt: iso8601.string(from: Date()),
+            files: entries
+        )
+    }
+
+    /// Writes `manifest` to `manifest.json` in the model directory.
+    func writeManifest(_ manifest: ModelManifest, for backend: ModelBackend) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(manifest)
+        try data.write(to: manifestURL(for: backend), options: .atomic)
+    }
+
+    /// Hot-path validation: returns true only if `manifest.json` exists AND
+    /// every listed file exists with the exact size recorded in the manifest.
+    /// Does NOT hash — size check is cheap enough for frequent calls.
+    func manifestIsValid(for backend: ModelBackend) -> Bool {
+        guard let manifest = loadManifest(for: backend) else { return false }
+        let dir = modelDirectory(for: backend)
+        let fm = FileManager.default
+        for (relative, entry) in manifest.files {
+            let url = dir.appendingPathComponent(relative)
+            guard let attrs = try? fm.attributesOfItem(atPath: url.path),
+                  let fileSize = attrs[.size] as? Int64,
+                  fileSize == entry.size
+            else { return false }
+        }
+        return true
+    }
+
     func modelPath(for backend: ModelBackend) -> URL? {
         let dir = modelDirectory(for: backend)
-        let allExist = backend.requiredFiles.allSatisfy { file in
-            FileManager.default.fileExists(atPath: dir.appendingPathComponent(file).path)
-        }
-        return allExist ? dir : nil
+        guard manifestIsValid(for: backend) else { return nil }
+        return dir
     }
 
     /// Check if a specific backend's model is downloaded.
@@ -214,7 +314,7 @@ final class ModelManager: ObservableObject {
     /// For the active backend, the state machine is authoritative: returns false
     /// while a download or verification is in progress, even if files exist on
     /// disk (HuggingFace writes files incrementally before the copy completes).
-    /// For inactive backends, file existence is the only signal we have.
+    /// For inactive backends, manifest validity is the signal.
     func isModelDownloaded(for backend: ModelBackend) -> Bool {
         if backend == activeBackend {
             // The state machine is authoritative for the active backend.
@@ -223,12 +323,35 @@ final class ModelManager: ObservableObject {
             // — must show as not-downloaded so the UI offers the right action.
             switch state {
             case .ready:
-                return modelPath(for: backend) != nil
+                return manifestIsValid(for: backend)
             default:
                 return false
             }
         }
-        return modelPath(for: backend) != nil
+        return manifestIsValid(for: backend)
+    }
+
+    /// One-time migration: if required files exist on disk but no manifest is
+    /// present, compute hashes and write the manifest so the user is not forced
+    /// into a redownload. Logs clearly and sets state to .ready on success.
+    /// Falls through to .notDownloaded if hashing fails or files are absent.
+    func migrateToManifestIfNeeded(for backend: ModelBackend) {
+        guard loadManifest(for: backend) == nil else { return }
+
+        let dir = modelDirectory(for: backend)
+        let requiredFilesPresent = backend.requiredFiles.allSatisfy { file in
+            FileManager.default.fileExists(atPath: dir.appendingPathComponent(file).path)
+        }
+        guard requiredFilesPresent else { return }
+
+        logger.info("Manifest migration: hashing existing files for \(backend.rawValue)…")
+        do {
+            let manifest = try buildManifest(for: backend)
+            try writeManifest(manifest, for: backend)
+            logger.info("Manifest migration complete for \(backend.rawValue): \(manifest.files.count) files recorded")
+        } catch {
+            logger.error("Manifest migration failed for \(backend.rawValue): \(error) — will require redownload")
+        }
     }
 
     var pythonEnvPath: URL {
@@ -252,6 +375,13 @@ final class ModelManager: ObservableObject {
                 UserDefaults.standard.set(oldHash, forKey: perBackendKey)
             }
             UserDefaults.standard.removeObject(forKey: oldKey)
+        }
+
+        // FU-04 manifest migration: if existing downloads predate the manifest
+        // system, generate the manifest from on-disk files so users are not
+        // forced to redownload 1.5–4 GB. Runs once per backend, noop thereafter.
+        for backend in ModelBackend.allCases {
+            migrateToManifestIfNeeded(for: backend)
         }
 
         refreshState()
@@ -344,18 +474,12 @@ final class ModelManager: ObservableObject {
         process.standardOutput = stdout
         process.standardError = stderr
 
-        try process.run()
-
-        // Store reference so cancelDownload() can terminate the process immediately.
-        activeDownloadProcess = process
-
         // Monitor download activity: show downloaded size and speed.
         // We don't know the exact total, so we show an indeterminate progress
         // and only set 100% when the process confirms success.
-        // huggingface_hub downloads to ~/.cache/huggingface first, then copies to local_dir.
-        let hfCacheDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache/huggingface")
-
+        // Scope size tracking to the model directory only — the HF cache dir
+        // can contain unrelated prior downloads and would report misleadingly
+        // large numbers.
         let monitorTask = Task { @MainActor [weak self] in
             guard let self else { return }
             var lastSize: Int64 = 0
@@ -365,10 +489,8 @@ final class ModelManager: ObservableObject {
             while !Task.isCancelled && process.isRunning {
                 try? await Task.sleep(for: .seconds(1))
                 let modelSize = self.directorySize(self.modelDirectory)
-                let cacheSize = self.directorySize(hfCacheDir)
-                let currentSize = max(modelSize, cacheSize)
 
-                let instantSpeed = currentSize - lastSize
+                let instantSpeed = modelSize - lastSize
                 speedSamples.append(instantSpeed)
                 if speedSamples.count > maxSamples { speedSamples.removeFirst() }
                 let smoothedSpeed = speedSamples.reduce(0, +) / Int64(speedSamples.count)
@@ -376,22 +498,59 @@ final class ModelManager: ObservableObject {
                 self.downloadSpeed = smoothedSpeed
                 // Use indeterminate progress (-1) so the UI shows a spinner, not a stuck bar
                 self.state = .downloading(progress: -1, bytesPerSec: smoothedSpeed)
-                let sizeMB = currentSize / 1_000_000
-                if modelSize > 1_000_000 {
-                    self.statusMessage = "Finalizing model: \(sizeMB) MB downloaded"
-                } else {
-                    self.statusMessage = "Downloading: \(sizeMB) MB downloaded"
-                }
-                lastSize = currentSize
+                let sizeMB = modelSize / 1_000_000
+                // Always report as "Downloading" — verify() will set "Verifying" when
+                // it actually runs, so we never show a misleading "Finalizing" mid-transfer.
+                self.statusMessage = "Downloading: \(sizeMB) MB"
+                lastSize = modelSize
             }
         }
 
-        // Wait for process on a background thread (M2 fix: don't block main actor)
+        // Race fix: attach terminationHandler BEFORE process.run() so that a
+        // cache-hit subprocess that exits in milliseconds never escapes the handler.
+        // We use an NSLock-guarded flag so the handler (fires on a background queue)
+        // and the post-run defensive check (runs on the calling actor) cannot both
+        // resume the same continuation.
+        let resumeLock = NSLock()
+        var alreadyResumed = false
+
+        // Wait for process exit (M2 fix: don't block main actor).
+        // Handler is attached first, then run() is called, then we do a defensive
+        // check in case the process already exited before we finished setting up.
         let exitStatus: Int32 = await withCheckedContinuation { continuation in
             process.terminationHandler = { proc in
+                resumeLock.lock()
+                defer { resumeLock.unlock() }
+                guard !alreadyResumed else { return }
+                alreadyResumed = true
                 continuation.resume(returning: proc.terminationStatus)
             }
+
+            do {
+                try process.run()
+            } catch {
+                resumeLock.lock()
+                defer { resumeLock.unlock() }
+                guard !alreadyResumed else { return }
+                alreadyResumed = true
+                continuation.resume(returning: Int32(-1))
+                return
+            }
+
+            // Store reference so cancelDownload() can terminate the process immediately.
+            activeDownloadProcess = process
+
+            // Defensive: if the subprocess already exited before we got here
+            // (race between handler attach and run completion), resume now.
+            if !process.isRunning {
+                resumeLock.lock()
+                defer { resumeLock.unlock() }
+                guard !alreadyResumed else { return }
+                alreadyResumed = true
+                continuation.resume(returning: process.terminationStatus)
+            }
         }
+
         monitorTask.cancel()
         activeDownloadProcess = nil
 
@@ -576,43 +735,69 @@ final class ModelManager: ObservableObject {
     }
 
     func verify() async throws -> Bool {
+        let backend = activeBackend
         state = .verifying
-        logger.info("Verifying model...")
+        logger.info("Verifying model (\(backend.rawValue))…")
 
-        // Check that key model files exist
-        let requiredFiles = activeBackend.requiredFiles
-        for file in requiredFiles {
-            let path = modelDirectory.appendingPathComponent(file)
+        let dir = modelDirectory(for: backend)
+
+        // Check that required files exist before attempting to hash.
+        for file in backend.requiredFiles {
+            let path = dir.appendingPathComponent(file)
             if !FileManager.default.fileExists(atPath: path.path) {
-                logger.warning("Missing model file: \(file)")
+                logger.warning("Missing required model file: \(file)")
                 state = .corrupt
+                statusMessage = "Corrupt: missing \(file)"
                 return false
             }
         }
 
-        // SHA-256 verification of config.json as a basic integrity check
-        let configPath = modelDirectory.appendingPathComponent("config.json")
-        if let configData = try? Data(contentsOf: configPath) {
-            let hash = SHA256.hash(data: configData)
-            let hashStr = hash.map { String(format: "%02x", $0) }.joined()
-            logger.info("config.json SHA-256: \(hashStr)")
+        // Cold path: build a fresh manifest from disk, compare against stored manifest.
+        // If no manifest exists yet (first download), write one and trust it.
+        let freshManifest: ModelManifest
+        do {
+            freshManifest = try buildManifest(for: backend)
+        } catch {
+            logger.error("verify() failed to hash model files: \(error)")
+            state = .corrupt
+            statusMessage = "Corrupt: could not read model files"
+            return false
+        }
 
-            // Use per-backend key to avoid cross-backend hash collisions
-            let hashKey = "modelConfigHash_\(self.activeBackend.rawValue)"
-            let storedHash = UserDefaults.standard.string(forKey: hashKey)
-            if let storedHash, storedHash != hashStr {
-                logger.warning("Config hash mismatch for \(self.activeBackend.rawValue): expected \(storedHash), got \(hashStr)")
+        if let storedManifest = loadManifest(for: backend) {
+            // Compare SHA-256 of every file in the stored manifest against fresh hashes.
+            var mismatches: [String] = []
+            for (relative, storedEntry) in storedManifest.files {
+                if let freshEntry = freshManifest.files[relative] {
+                    if freshEntry.sha256 != storedEntry.sha256 {
+                        mismatches.append(relative)
+                        logger.warning("SHA-256 mismatch: \(relative) stored=\(storedEntry.sha256) actual=\(freshEntry.sha256)")
+                    }
+                } else {
+                    mismatches.append(relative)
+                    logger.warning("File in manifest but missing on disk: \(relative)")
+                }
+            }
+            if !mismatches.isEmpty {
+                let firstMismatch = mismatches.first ?? "unknown"
                 state = .corrupt
+                statusMessage = "Corrupt: hash mismatch in \(firstMismatch)"
                 return false
             }
-            // Store hash on first verification for future comparisons
-            if storedHash == nil {
-                UserDefaults.standard.set(hashStr, forKey: hashKey)
+            logger.info("verify(): all \(storedManifest.files.count) files match stored manifest")
+        } else {
+            // No manifest yet — write one from the freshly computed hashes.
+            do {
+                try writeManifest(freshManifest, for: backend)
+                logger.info("verify(): wrote initial manifest for \(backend.rawValue) with \(freshManifest.files.count) files")
+            } catch {
+                logger.error("verify(): failed to write manifest: \(error)")
+                // Non-fatal: verification still passes; next call will retry migration.
             }
         }
 
         state = .ready
-        logger.info("Model verification passed")
+        logger.info("Model verification passed (\(backend.rawValue))")
         return true
     }
 
@@ -744,11 +929,28 @@ final class ModelManager: ObservableObject {
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
 
-        try proc.run()
-
+        // Same race fix as download(): attach handler before run().
+        let lock = NSLock()
+        var resumed = false
         let status: Int32 = await withCheckedContinuation { continuation in
             proc.terminationHandler = { p in
+                lock.lock(); defer { lock.unlock() }
+                guard !resumed else { return }
+                resumed = true
                 continuation.resume(returning: p.terminationStatus)
+            }
+            do { try proc.run() } catch {
+                lock.lock(); defer { lock.unlock() }
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume(returning: Int32(-1))
+                return
+            }
+            if !proc.isRunning {
+                lock.lock(); defer { lock.unlock() }
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume(returning: proc.terminationStatus)
             }
         }
 
@@ -772,8 +974,6 @@ final class ModelManager: ObservableObject {
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = stderrPipe
 
-        try proc.run()
-
         // Stream stderr lines to update status
         let streamTask = Task { @MainActor [weak self] in
             let handle = stderrPipe.fileHandleForReading
@@ -789,9 +989,28 @@ final class ModelManager: ObservableObject {
             }
         }
 
+        // Same race fix: attach handler before run().
+        let lock = NSLock()
+        var resumed = false
         let status: Int32 = await withCheckedContinuation { continuation in
             proc.terminationHandler = { p in
+                lock.lock(); defer { lock.unlock() }
+                guard !resumed else { return }
+                resumed = true
                 continuation.resume(returning: p.terminationStatus)
+            }
+            do { try proc.run() } catch {
+                lock.lock(); defer { lock.unlock() }
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume(returning: Int32(-1))
+                return
+            }
+            if !proc.isRunning {
+                lock.lock(); defer { lock.unlock() }
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume(returning: proc.terminationStatus)
             }
         }
         streamTask.cancel()
