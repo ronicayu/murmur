@@ -421,3 +421,5 @@ EN addressed all three CRITICAL findings in round-4. See `067_EN_CR_DA_b3-b4-rou
 - C7: `assert(NSClassFromString("XCTestCase") != nil, ...)` in both seam functions (option b).
 - M3: dead `downloadTask` property removed.
 - H7/H8: deferred with QA integration ask filed as `068_QA_EN_b3-b4-integration-ask.md`.
+
+DA round-3 re-review: C5/C6/C7/M3 all verified. One new HIGH finding (C8, cancel → redownload race on partial-dir delete) and two lesser items (M6 PID-reuse, H9 integration-test gap) raised in `070_DA_EN_b3-b4-round4-challenge.md`. Status: **CHG:2** — fix C8 before QA.

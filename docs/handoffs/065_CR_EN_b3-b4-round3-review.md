@@ -153,3 +153,6 @@ outcome is not the subject of the test.
 DA round-2 (066) found three CRITICAL items after this LGTM. EN addressed all three in
 round-4 (067). See `067_EN_CR_DA_b3-b4-round4.md` for the full fix summary.
 QA integration test ask filed as `068_QA_EN_b3-b4-integration-ask.md`.
+
+CR round-4 re-review (069) confirmed all three CRITICAL fixes and ran full branch regression
+scan. Status upgraded to LGTM. See `069_CR_EN_b3-b4-round4-review.md`.

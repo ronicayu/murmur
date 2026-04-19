@@ -177,3 +177,11 @@ Full suite run: `swift test` → 272 tests, 0 failures.
 - **DA:** Re-examine C5/C6/C7 — are the fixes structurally sufficient?
 - **QA:** Pick up `068_QA_EN_b3-b4-integration-ask.md` for the subprocess
   integration test.
+
+---
+
+## cr-review-status
+
+CR round-4 review complete (069_CR_EN_b3-b4-round4-review.md). Status: **LGTM**.
+C5/C6/C7/M3 fixes confirmed correct. Full branch regression scan clean.
+Branch cleared for QA and UT sign-off.
