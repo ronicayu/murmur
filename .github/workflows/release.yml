@@ -12,7 +12,7 @@ jobs:
   build:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Extract version from tag
         id: version
@@ -74,6 +74,8 @@ jobs:
           rm -rf "$DMG_STAGE"
 
       - name: Create GitHub Release
+        # softprops/action-gh-release v2 series has been updated to Node 24
+        # compatibility; keep @v2 pinned and revisit if upstream issues a v3.
         uses: softprops/action-gh-release@v2
         with:
           files: Murmur/dist/Murmur-${{ steps.version.outputs.VERSION }}.dmg
