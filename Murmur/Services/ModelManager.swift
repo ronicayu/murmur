@@ -488,6 +488,11 @@ final class ModelManager: ObservableObject {
 
             while !Task.isCancelled && process.isRunning {
                 try? await Task.sleep(for: .seconds(1))
+                // Re-check after the sleep: cancel() or subprocess-exit can land
+                // during the sleep, and without this guard we'd post one final
+                // .downloading state write AFTER download() has set .ready or
+                // .verifying, leaving the UI stuck on "Downloading".
+                guard !Task.isCancelled, process.isRunning else { break }
                 let modelSize = self.directorySize(self.modelDirectory)
 
                 let instantSpeed = modelSize - lastSize
