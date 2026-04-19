@@ -605,6 +605,76 @@ final class SetActiveBackendGuardTests: XCTestCase {
     }
 }
 
+// MARK: - C8: cleanup Task skips removeItem when a new download is in progress
+//
+// These tests verify the C8 race-condition fix: when the background cleanup Task
+// runs after cancelDownload() but finds that a new download has started for the
+// same backend, it must NOT delete the model directory (which the new download
+// is actively writing into).
+//
+// The test seam `__testing_runCleanupAfterCancel(for:)` directly invokes the
+// cleanup logic so we can drive it without a real subprocess.
+
+@MainActor
+final class CancelDownloadCleanupRaceTests: XCTestCase {
+
+    private var manager: ModelManager!
+    private var tempModelDir: URL!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
+        manager = ModelManager()
+
+        // Plant a sentinel file in the real ONNX model directory (as resolved by
+        // ModelManager.modelDirectory(for:)) so we can verify whether removeItem
+        // was called by the cleanup logic. Using the manager's own resolution
+        // guarantees the test observes the same path the cleanup code will operate on.
+        let fm = FileManager.default
+        tempModelDir = manager.modelDirectory(for: .onnx)
+        try fm.createDirectory(at: tempModelDir, withIntermediateDirectories: true)
+        let sentinel = tempModelDir.appendingPathComponent("sentinel.txt")
+        try "exists".write(to: sentinel, atomically: true, encoding: .utf8)
+    }
+
+    override func tearDownWithError() throws {
+        // Clean up the sentinel directory we may have created.
+        try? FileManager.default.removeItem(at: tempModelDir)
+        manager = nil
+        try super.tearDownWithError()
+    }
+
+    func test_cleanupAfterCancel_skipsRemoveItem_whenNewDownloadIsActive() async {
+        // Arrange — simulate a new download in progress for the same backend.
+        manager.__testing_setState(.downloading(progress: 0.1, bytesPerSec: 50_000))
+        XCTAssertTrue(manager.isDownloadActive, "Precondition: new download must be active")
+
+        // Act — run the cleanup logic directly (bypasses subprocess lifecycle).
+        await manager.__testing_runCleanupAfterCancel(for: .onnx)
+
+        // Assert — the directory must still exist because cleanup was skipped.
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: tempModelDir.path),
+            "Cleanup must not remove the model directory when a new download is active"
+        )
+    }
+
+    func test_cleanupAfterCancel_removesDirectory_whenNoDownloadIsActive() async {
+        // Arrange — no download in progress.
+        manager.__testing_setState(.notDownloaded)
+        XCTAssertFalse(manager.isDownloadActive, "Precondition: no download must be active")
+
+        // Act — run the cleanup logic directly.
+        await manager.__testing_runCleanupAfterCancel(for: .onnx)
+
+        // Assert — the directory must have been removed.
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: tempModelDir.path),
+            "Cleanup must remove the model directory when no download is active"
+        )
+    }
+}
+
 // MARK: - H4 + C6: cancelDownload terminates the active process
 //
 // These tests verify the synchronous state-reset guarantees of cancelDownload().

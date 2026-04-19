@@ -480,11 +480,24 @@ final class ModelManager: ObservableObject {
             // Background Task: wait for exit, escalate to SIGKILL, then clean up
             // the partial model directory so isModelDownloaded(for:) cannot
             // falsely return true for an incomplete download (H5 mitigation).
-            Task.detached { [logger] in
+            Task.detached { [weak self, logger] in
                 let exited = await Self.waitForProcessExit(proc, timeoutSeconds: 2.0)
                 if !exited {
                     // Process survived SIGTERM window — force-kill to guarantee no
                     // further writes to the model directory.
+                    //
+                    // PID-reuse note (M6): there is a sub-millisecond window between
+                    // the last `proc.isRunning` poll inside waitForProcessExit and
+                    // this Darwin.kill call. In theory the process could exit and
+                    // the kernel could recycle its PID for an unrelated process
+                    // during that window. In practice, if the recycled PID belongs
+                    // to another user's process, kill() returns EPERM and is a no-op.
+                    // If the recycled PID is another Murmur child (extremely unlikely
+                    // — we only spawn one python subprocess at a time), we would send
+                    // SIGKILL to it; that subprocess would also require cleanup, so
+                    // this is an accepted risk given the narrow window. For a cleaner
+                    // design, replace the poll loop with a kqueue EVFILT_PROC wait in
+                    // a future refactor.
                     Darwin.kill(pid, SIGKILL)
                     logger.warning("Escalated to SIGKILL for download process (pid: \(pid))")
                     // Brief grace period for the OS to reclaim file handles before
@@ -494,19 +507,7 @@ final class ModelManager: ObservableObject {
                     logger.info("Download process exited cleanly after SIGTERM (pid: \(pid))")
                 }
 
-                // H5 mitigation: delete partial model directory now that the
-                // subprocess is guaranteed to be dead and no longer writing.
-                // This prevents isModelDownloaded(for: capturedBackend) from
-                // falsely returning true if the partial write happened to include
-                // all required file names (they may still be corrupt/truncated).
-                do {
-                    if FileManager.default.fileExists(atPath: capturedModelDir.path) {
-                        try FileManager.default.removeItem(at: capturedModelDir)
-                        logger.info("Removed partial model directory after cancel: \(capturedModelDir.path)")
-                    }
-                } catch {
-                    logger.error("Failed to remove partial model directory: \(error)")
-                }
+                await self?.removePartialModelDirectory(capturedModelDir, backend: capturedBackend)
             }
         }
         activeDownloadProcess = nil
@@ -535,6 +536,43 @@ final class ModelManager: ObservableObject {
             try? await Task.sleep(for: pollInterval)
         }
         return !proc.isRunning
+    }
+
+    /// Removes the partial model directory for a cancelled download, but only if no
+    /// new download has started for the same backend in the interim.
+    ///
+    /// This guard (C8 fix) closes the race between the cleanup Task (which runs for
+    /// up to ~2.1s after `cancelDownload()`) and a user-triggered redownload of the
+    /// same backend during that window. Without this check, `removeItem` would delete
+    /// files the new subprocess is actively writing, corrupting the new download.
+    ///
+    /// The check hops to `@MainActor` to read `isDownloadActive` atomically with
+    /// respect to state mutations, which always happen on the main actor.
+    private func removePartialModelDirectory(_ modelDir: URL, backend: ModelBackend) async {
+        // C8: hop to MainActor to read isDownloadActive atomically. If a new download
+        // has started (same or different backend), skip the rmdir — the new download
+        // owns the directory from this point forward.
+        let shouldSkip = await MainActor.run { isDownloadActive }
+        guard !shouldSkip else {
+            logger.info(
+                "Skipping partial-dir cleanup for \(backend.rawValue) — new download in progress; new download owns the directory"
+            )
+            return
+        }
+
+        // H5 mitigation: delete partial model directory now that the subprocess is
+        // guaranteed dead, no new download is active, and no further writes can occur.
+        // This prevents isModelDownloaded(for: backend) from falsely returning true
+        // if the partial write happened to include all required file names (they may
+        // still be corrupt/truncated).
+        do {
+            if FileManager.default.fileExists(atPath: modelDir.path) {
+                try FileManager.default.removeItem(at: modelDir)
+                logger.info("Removed partial model directory after cancel: \(modelDir.path)")
+            }
+        } catch {
+            logger.error("Failed to remove partial model directory: \(error)")
+        }
     }
 
     func verify() async throws -> Bool {
@@ -830,6 +868,24 @@ final class ModelManager: ObservableObject {
             "__testing_setActiveBackend invoked outside XCTest — this is a test seam and must only be called from unit tests"
         )
         activeBackend = backend
+    }
+
+    /// Directly invokes the post-cancel cleanup logic for deterministic unit testing
+    /// of the C8 race-condition fix.
+    ///
+    /// This bypasses the subprocess lifecycle (SIGTERM / poll / SIGKILL) that is not
+    /// exercisable in unit tests without a real Process. It lets tests set up a known
+    /// state (e.g. `isDownloadActive == true`) and verify that cleanup correctly skips
+    /// `removeItem` when a new download is in progress.
+    ///
+    /// NEVER call this from non-test code.
+    func __testing_runCleanupAfterCancel(for backend: ModelBackend) async {
+        assert(
+            NSClassFromString("XCTestCase") != nil,
+            "__testing_runCleanupAfterCancel invoked outside XCTest — this is a test seam and must only be called from unit tests"
+        )
+        let modelDir = modelDirectory(for: backend)
+        await removePartialModelDirectory(modelDir, backend: backend)
     }
 #endif
 }
