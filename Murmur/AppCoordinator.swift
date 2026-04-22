@@ -108,7 +108,7 @@ final class AppCoordinator: ObservableObject {
                 Self.log.info("Model preloaded successfully")
             } catch {
                 if !Task.isCancelled {
-                    Self.log.warning("Model preload failed (will retry on first use): \(error)")
+                    Self.log.warning("Model preload failed (will retry on first use): \(String(describing: error), privacy: .public)")
                 }
             }
         }
@@ -693,7 +693,11 @@ final class AppCoordinator: ObservableObject {
 
         let old = state
         state = effectiveState
-        Self.log.info("State: \(String(describing: old)) → \(String(describing: effectiveState))")
+        Self.log.info("State: \(String(describing: old), privacy: .public) → \(String(describing: effectiveState), privacy: .public)")
+
+        if case .error(let err) = effectiveState {
+            Self.log.error("Entered error state: \(String(describing: err), privacy: .public) — \(err.localizedDescription, privacy: .public)")
+        }
 
         // Auto-transition from undoable to idle after 5s (covers both V1 and streaming)
         if case .undoable = effectiveState {
