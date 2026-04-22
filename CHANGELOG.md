@@ -6,6 +6,14 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.2.3] — 2026-04-22
+
+### Fixed
+- CoreAudio error -10868 (`kAudioUnitErr_FormatNotSupported`) after the app sat idle through sleep/wake or an audio route change (e.g. Bluetooth mic disconnect, display-with-mic sleep). `AudioService` now observes `AVAudioEngineConfigurationChange` and `NSWorkspace.didWakeNotification`, calls `engine.reset()` before the next `startRecording` when either has fired, and reads the live hardware format at record-start instead of relying on the first-buffer format. Early-fails with a clear "No audio input available" message when no input device is present.
+
+### Changed
+- Coordinator state and error logs promoted to `.public` privacy so Console.app / `log stream` no longer redacts them as `<private>`, unblocking diagnosis of sleep/wake failures.
+
 ## [0.2.2] — 2026-04-19
 
 ### Added

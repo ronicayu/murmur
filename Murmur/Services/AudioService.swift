@@ -1,4 +1,5 @@
 import AVFoundation
+import AppKit
 import os
 
 protocol AudioServiceProtocol {
@@ -39,6 +40,12 @@ final class AudioService: AudioServiceProtocol {
     private let maxDurationContinuation: AsyncStream<Void>.Continuation
     let maxDurationReached: AsyncStream<Void>
 
+    /// Set by route-change / wake observers; consumed on next startRecording.
+    /// Protected by `lock`.
+    private var needsReset = false
+    private var configChangeObserver: NSObjectProtocol?
+    private var wakeObserver: NSObjectProtocol?
+
     init() {
         (audioLevel, levelContinuation) = AsyncStream.makeStream(
             of: Float.self,
@@ -48,6 +55,28 @@ final class AudioService: AudioServiceProtocol {
             of: Void.self,
             bufferingPolicy: .bufferingNewest(1)
         )
+
+        configChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            self?.markNeedsReset(reason: "configuration change")
+        }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.markNeedsReset(reason: "system wake")
+        }
+    }
+
+    private func markNeedsReset(reason: String) {
+        lock.lock()
+        needsReset = true
+        lock.unlock()
+        logger.info("Audio engine flagged for reset: \(reason, privacy: .public)")
     }
 
     // MARK: - V3 Streaming Accumulator
@@ -80,6 +109,19 @@ final class AudioService: AudioServiceProtocol {
             tapInstalled = false
         }
 
+        // If the audio route changed or the system woke since last record,
+        // the input node's cached format is stale and `installTap` + `start`
+        // will hit error -10868 (kAudioUnitErr_FormatNotSupported). Reset
+        // the engine to rebuild the node graph against current hardware.
+        lock.lock()
+        let shouldReset = needsReset
+        needsReset = false
+        lock.unlock()
+        if shouldReset {
+            engine.reset()
+            logger.info("Audio engine reset before start")
+        }
+
         try checkDiskSpace()
 
         let tempDir = FileManager.default.temporaryDirectory
@@ -101,21 +143,24 @@ final class AudioService: AudioServiceProtocol {
         rmsAccumulator = []
         lock.unlock()
 
-        // Pass nil for tap format — AVAudioEngine will use the actual hardware
-        // format. We lazily create the converter on the first callback using the
-        // real buffer format, avoiding the stale-format mismatch that causes
-        // error -10868 ("formats don't match").
+        // Read the hardware format live at start-time and pass it explicitly
+        // to installTap. A sample rate of 0 means no input device is currently
+        // available — fail early with a clear message rather than letting the
+        // engine throw -10868 later.
         let inputNode = engine.inputNode
-        var converter: AVAudioConverter?
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
+        let hardwareFormat = inputNode.inputFormat(forBus: 0)
+        guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
+            logger.error("No audio input available (sampleRate=\(hardwareFormat.sampleRate), channels=\(hardwareFormat.channelCount))")
+            throw MurmurError.transcriptionFailed("No audio input available")
+        }
+        guard let converter = AVAudioConverter(from: hardwareFormat, to: recordFormat) else {
+            throw MurmurError.transcriptionFailed("Cannot create audio converter")
+        }
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hardwareFormat) { [weak self] buffer, _ in
             guard let self else { return }
 
-            // Lazily create converter from the actual tap format
             let actualFormat = buffer.format
-            if converter == nil {
-                converter = AVAudioConverter(from: actualFormat, to: recordFormat)
-            }
-            guard let conv = converter else { return }
+            let conv = converter
 
             let frameCount = AVAudioFrameCount(
                 Double(buffer.frameLength) * 16000 / actualFormat.sampleRate
@@ -238,6 +283,12 @@ final class AudioService: AudioServiceProtocol {
     }
 
     deinit {
+        if let token = configChangeObserver {
+            NotificationCenter.default.removeObserver(token)
+        }
+        if let token = wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+        }
         levelContinuation.finish()
         maxDurationContinuation.finish()
     }
