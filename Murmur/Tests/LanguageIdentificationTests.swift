@@ -193,6 +193,53 @@ final class ResolveTranscriptionLanguageAsyncTests: XCTestCase {
         XCTAssertFalse(lang.isEmpty)
         XCTAssertEqual(lang.count, 2, "Fallback must be a two-letter language code")
     }
+
+    func testAutoDetectOn_silenceDetected_fallsBackSilently() async {
+        // When LID throws silenceDetected, the coordinator must NOT show an error
+        // pill and must return the fallback language. Silence is a normal user
+        // action (accidental press), not an error condition.
+        UserDefaults.standard.set(true, forKey: "autoDetectLanguage")
+        UserDefaults.standard.set("de", forKey: "transcriptionLanguage")
+        coordinator.lid = mock
+        mock.behaviour = .failure(MurmurError.silenceDetected)
+
+        let lang = await coordinator.resolveTranscriptionLanguageAsync(audioURL: dummyURL)
+        XCTAssertEqual(lang, "de", "silenceDetected must fall through to the picker value, not surface an error")
+    }
+
+    // MARK: - Badge update when LID overrides IME (DA fix #3)
+
+    /// When autoDetect is on and LID returns a high-confidence result that differs
+    /// from the picker/IME setting, resolveTranscriptionLanguageAsync must return the
+    /// LID-detected language AND the badge text for that language must reflect the
+    /// LID override.
+    ///
+    /// This test verifies the two parts of the DA-#3 badge-consistency fix:
+    /// (1) the resolver returns the LID language, and
+    /// (2) LanguageBadge.badgeText produces the correct updated badge for that language.
+    /// The badge update itself happens in stopAndTranscribeV1 using these two values.
+    func test_badgeUpdate_whenLIDOverridesIME_resolvedLanguageAndBadgeMatch() async {
+        // Arrange: IME/picker is "auto" (so activeBadge starts as "EN·" from
+        // resolveTranscriptionLanguage at record-start). LID returns zh @ 0.90.
+        UserDefaults.standard.set(true, forKey: "autoDetectLanguage")
+        UserDefaults.standard.set("auto", forKey: "transcriptionLanguage")
+        coordinator.lid = mock
+        mock.behaviour = .success(code: "zh", confidence: 0.90)
+
+        // Act: resolver returns the LID language
+        let resolvedLang = await coordinator.resolveTranscriptionLanguageAsync(audioURL: dummyURL)
+
+        // Assert part 1: resolver returns "zh"
+        XCTAssertEqual(resolvedLang, "zh",
+                       "resolveTranscriptionLanguageAsync must return the LID-detected language when confidence is above threshold")
+
+        // Assert part 2: the badge text for the resolved language is "ZH·"
+        // (dot suffix because storedSetting == "auto"). This is what stopAndTranscribeV1
+        // uses to update activeBadge when LID overrides the IME language.
+        let updatedBadge = LanguageBadge.badgeText(resolvedCode: resolvedLang, storedSetting: "auto")
+        XCTAssertEqual(updatedBadge, "ZH·",
+                       "Badge must update to ZH· when LID overrides auto-IME with zh")
+    }
 }
 
 // MARK: - AuxiliaryModel + ModelManager glue
@@ -228,5 +275,166 @@ final class AuxiliaryModelStateTests: XCTestCase {
         XCTAssertEqual(aux.modelSubdirectory, "Murmur/Models-LID")
         XCTAssertFalse(aux.requiredFiles.isEmpty)
         XCTAssertTrue(aux.allowPatterns.contains { $0.contains("encoder_model") })
+    }
+
+    // MARK: - QA P0-1: auxiliaryManifestIsValid truthy path
+
+    /// T1: A well-formed manifest with matching file sizes must return true.
+    /// Closes QA P0-1: the truthy path of auxiliaryManifestIsValid was never exercised.
+    func test_auxiliaryManifestIsValid_returnsTrue_whenManifestAndSizesMatch() throws {
+        // Arrange
+        let (mm, tmp) = makeSandboxedManager()
+        let onnxDir = tmp.appendingPathComponent("onnx")
+        try FileManager.default.createDirectory(at: onnxDir, withIntermediateDirectories: true)
+
+        let fileContent = Data(repeating: 0xAB, count: 8)
+        let relPath = "onnx/encoder_model_quantized.onnx"
+        try fileContent.write(to: tmp.appendingPathComponent(relPath))
+
+        try writeAuxManifest(to: tmp, files: [relPath: Int64(fileContent.count)])
+
+        // Act + Assert
+        XCTAssertTrue(mm.auxiliaryManifestIsValid(.lidWhisperTiny),
+                      "auxiliaryManifestIsValid must return true when manifest and file sizes match")
+        XCTAssertTrue(mm.isAuxiliaryDownloaded(.lidWhisperTiny),
+                      "isAuxiliaryDownloaded must be true when manifest is valid")
+    }
+
+    // MARK: - QA P0-2: auxiliaryModelPath nil / non-nil
+
+    /// T2a: No manifest on disk → auxiliaryModelPath returns nil.
+    func test_auxiliaryModelPath_returnsNil_whenManifestAbsent() {
+        // Arrange: temp dir exists but is empty (no manifest)
+        let (mm, _) = makeSandboxedManager()
+
+        // Act + Assert
+        XCTAssertNil(mm.auxiliaryModelPath(.lidWhisperTiny),
+                     "auxiliaryModelPath must be nil when no manifest exists")
+    }
+
+    /// T2b: Valid manifest → auxiliaryModelPath returns the model directory.
+    func test_auxiliaryModelPath_returnsDirectory_whenManifestValid() throws {
+        // Arrange
+        let (mm, tmp) = makeSandboxedManager()
+        let onnxDir = tmp.appendingPathComponent("onnx")
+        try FileManager.default.createDirectory(at: onnxDir, withIntermediateDirectories: true)
+
+        let fileContent = Data(repeating: 0xCD, count: 16)
+        let relPath = "onnx/encoder_model_quantized.onnx"
+        try fileContent.write(to: tmp.appendingPathComponent(relPath))
+        try writeAuxManifest(to: tmp, files: [relPath: Int64(fileContent.count)])
+
+        // Act
+        let path = mm.auxiliaryModelPath(.lidWhisperTiny)
+
+        // Assert
+        XCTAssertNotNil(path, "auxiliaryModelPath must return the directory URL when the manifest is valid")
+        XCTAssertEqual(path?.path, tmp.path)
+    }
+
+    // MARK: - QA P0-3: deleteAuxiliary clears state and directory
+
+    /// T3: After deleteAuxiliary, the directory must be gone and the state reset.
+    func test_deleteAuxiliary_clearsFilesAndResetsStateTotNotDownloaded() throws {
+        // Arrange: seed a valid fixture
+        let (mm, tmp) = makeSandboxedManager()
+        let onnxDir = tmp.appendingPathComponent("onnx")
+        try FileManager.default.createDirectory(at: onnxDir, withIntermediateDirectories: true)
+
+        let fileContent = Data(repeating: 0xFF, count: 4)
+        let relPath = "onnx/encoder_model_quantized.onnx"
+        try fileContent.write(to: tmp.appendingPathComponent(relPath))
+        try writeAuxManifest(to: tmp, files: [relPath: Int64(fileContent.count)])
+        mm.__testing_setAuxiliaryState(.ready, for: .lidWhisperTiny)
+
+        // Confirm precondition
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tmp.path))
+
+        // Act
+        try mm.deleteAuxiliary(.lidWhisperTiny)
+
+        // Assert: directory gone
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tmp.path),
+                       "deleteAuxiliary must remove the model directory from disk")
+        // Assert: state reset
+        XCTAssertEqual(mm.auxiliaryState(for: .lidWhisperTiny), .notDownloaded,
+                       "deleteAuxiliary must reset auxiliaryStates to .notDownloaded")
+        // Assert: isAuxiliaryDownloaded follows
+        XCTAssertFalse(mm.isAuxiliaryDownloaded(.lidWhisperTiny),
+                       "isAuxiliaryDownloaded must be false after delete")
+    }
+
+    // MARK: - QA P0-4: refreshAuxiliaryState transitions
+
+    /// T4a: Valid manifest on disk → refreshAuxiliaryState sets state to .ready.
+    func test_refreshAuxiliaryState_setsReady_whenValidManifest() throws {
+        // Arrange
+        let (mm, tmp) = makeSandboxedManager()
+        let onnxDir = tmp.appendingPathComponent("onnx")
+        try FileManager.default.createDirectory(at: onnxDir, withIntermediateDirectories: true)
+
+        let fileContent = Data(repeating: 0x01, count: 12)
+        let relPath = "onnx/encoder_model_quantized.onnx"
+        try fileContent.write(to: tmp.appendingPathComponent(relPath))
+        try writeAuxManifest(to: tmp, files: [relPath: Int64(fileContent.count)])
+
+        // State not yet set
+        XCTAssertEqual(mm.auxiliaryState(for: .lidWhisperTiny), .notDownloaded)
+
+        // Act
+        mm.refreshAuxiliaryState(.lidWhisperTiny)
+
+        // Assert
+        XCTAssertEqual(mm.auxiliaryState(for: .lidWhisperTiny), .ready,
+                       "refreshAuxiliaryState must set state to .ready when a valid manifest exists")
+    }
+
+    /// T4b: No manifest on disk → refreshAuxiliaryState sets state to .notDownloaded.
+    func test_refreshAuxiliaryState_setsNotDownloaded_whenNoManifest() {
+        // Arrange: empty temp dir, no manifest
+        let (mm, _) = makeSandboxedManager()
+        mm.__testing_setAuxiliaryState(.ready, for: .lidWhisperTiny) // prime a stale state
+
+        // Act
+        mm.refreshAuxiliaryState(.lidWhisperTiny)
+
+        // Assert
+        XCTAssertEqual(mm.auxiliaryState(for: .lidWhisperTiny), .notDownloaded,
+                       "refreshAuxiliaryState must set state to .notDownloaded when no manifest exists")
+    }
+
+    // MARK: - Helpers
+
+    /// Returns a fresh ModelManager redirected to an isolated temp directory,
+    /// cleaning up automatically via addTeardownBlock.
+    private func makeSandboxedManager() -> (ModelManager, URL) {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lid-aux-\(UUID().uuidString)")
+        // Create the directory so the manager can write into it.
+        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let mm = ModelManager()
+        mm.__testing_setAuxiliaryDirectory(tmp, for: .lidWhisperTiny)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: tmp)
+        }
+        return (mm, tmp)
+    }
+
+    /// Writes a minimal valid manifest.json into `dir` for the auxiliary model.
+    /// `files` maps relative paths to their byte sizes — the manifest is authoritative
+    /// for size-based validity checks in `auxiliaryManifestIsValid`.
+    private func writeAuxManifest(to dir: URL, files: [String: Int64]) throws {
+        var fileEntries: [String: [String: Any]] = [:]
+        for (path, size) in files {
+            fileEntries[path] = ["sha256": "deadbeef", "size": size]
+        }
+        let manifest: [String: Any] = [
+            "version": 1,
+            "backend": "lidWhisperTiny",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "files": fileEntries,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest)
+        try data.write(to: dir.appendingPathComponent("manifest.json"))
     }
 }

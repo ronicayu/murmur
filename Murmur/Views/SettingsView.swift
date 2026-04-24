@@ -123,6 +123,7 @@ struct SettingsView: View {
                     Toggle("", isOn: $autoDetectLanguage)
                         .labelsHidden()
                         .toggleStyle(.switch)
+                        .disabled(!modelManager.isAuxiliaryDownloaded(.lidWhisperTiny))
                         .onChange(of: autoDetectLanguage) { _, newValue in
                             if newValue && !modelManager.isAuxiliaryDownloaded(.lidWhisperTiny) {
                                 Task { try? await modelManager.downloadAuxiliary(.lidWhisperTiny) }

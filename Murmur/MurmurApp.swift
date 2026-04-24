@@ -90,6 +90,9 @@ struct MurmurApp: App {
                         coordinator.lid = LanguageIdentificationService(modelPath: path)
                     } else if !lidReady, coordinator.lid != nil {
                         coordinator.lid = nil
+                        // Reset the toggle so subsequent recordings don't fire
+                        // the "Language model not installed" pill on every transcription.
+                        UserDefaults.standard.set(false, forKey: "autoDetectLanguage")
                     }
                 }
                 // Listen for settings notification from Transcription window

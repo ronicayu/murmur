@@ -85,11 +85,12 @@ actor LanguageIdentificationService: LanguageIdentifying {
     private var decoderSession: ORTSession?
     private var loaded = false
 
-    /// First N seconds of audio passed to mel extraction. Whisper LID needs only
-    /// a short probe; the encoder always runs on a fixed 30-second mel window
-    /// (padded with zeros), so trimming audio before mel extraction is a pure
-    /// speed win with no accuracy cost for languages spoken in the first few
-    /// seconds.
+    /// First N seconds of audio passed to mel extraction. The encoder always runs
+    /// on a fixed 30-second mel window padded with zeros; trimming audio here
+    /// replaces seconds 5–30 with silence. This keeps the probe cheap at the cost
+    /// of potential accuracy loss on short or late-starting utterances (e.g. a user
+    /// who pauses before speaking). See docs/handoffs/096_EN_PM_lid-deferrals.md
+    /// for the tonal-language reliability discussion.
     private static let probeSeconds: Double = 5.0
 
     init(modelPath: URL) {
@@ -243,6 +244,10 @@ actor LanguageIdentificationService: LanguageIdentifying {
             }
         } while status == .haveData
 
+        if let err = convertError {
+            throw MurmurError.transcriptionFailed("LID audio conversion error: \(err.localizedDescription)")
+        }
+
         return allSamples
     }
 
@@ -376,7 +381,7 @@ final class WhisperMelExtractor {
     /// Extract mel features and return an ORT tensor of shape [1, 80, 3000].
     func extract(samples: [Float]) throws -> ORTValue {
         let padded = padOrTruncate(samples, to: Self.targetSamples)
-        let power = stftPower(signal: padded)
+        let power = try stftPower(signal: padded)
         let mel = applyFilterbank(power: power)
         let normed = Self.logAndNormalise(mel)
         let data = NSMutableData(bytes: normed, length: normed.count * MemoryLayout<Float>.stride)
@@ -398,7 +403,7 @@ final class WhisperMelExtractor {
     /// (pad = nFFT / 2 on each side), producing exactly 3000 frames for a
     /// 480 000-sample input. Output is `[nFreqs × nFrames]` row-major where
     /// `nFreqs = nFFT / 2 + 1 = 201`.
-    private func stftPower(signal: [Float]) -> [Float] {
+    private func stftPower(signal: [Float]) throws -> [Float] {
         let nFFT = Self.nFFT
         let hop = Self.hopLength
         let pad = nFFT / 2
@@ -410,7 +415,7 @@ final class WhisperMelExtractor {
 
         let log2n = vDSP_Length(log2(Float(nFFT)))
         guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
-            fatalError("WhisperMelExtractor: vDSP_create_fftsetup failed")
+            throw MurmurError.transcriptionFailed("LID vDSP_create_fftsetup failed (log2n=\(log2n))")
         }
         defer { vDSP_destroy_fftsetup(setup) }
 
@@ -420,7 +425,6 @@ final class WhisperMelExtractor {
         for frame in 0..<nFrames {
             let start = frame * hop
             var windowed = [Float](repeating: 0, count: nFFT)
-            signal.withUnsafeBufferPointer { _ in }
             padded.withUnsafeBufferPointer { sigPtr in
                 window.withUnsafeBufferPointer { winPtr in
                     vDSP_vmul(sigPtr.baseAddress! + start, 1,
@@ -534,7 +538,9 @@ final class WhisperMelExtractor {
     private func buildHannWindow(length: Int) -> [Float] {
         var w = [Float](repeating: 0, count: length)
         for i in 0..<length {
-            w[i] = 0.5 * (1.0 - cos(2.0 * Float.pi * Float(i) / Float(length - 1)))
+            // Periodic (DFT-even) Hann window — matches numpy.hanning(N) used by
+            // Whisper's training preprocessing. Divide by `length`, not `length - 1`.
+            w[i] = 0.5 * (1.0 - cos(2.0 * Float.pi * Float(i) / Float(length)))
         }
         return w
     }

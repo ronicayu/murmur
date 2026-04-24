@@ -659,6 +659,14 @@ final class AppCoordinator: ObservableObject {
                 try await self.audio.stopRecording()
             }
             let lang = await resolveTranscriptionLanguageAsync(audioURL: wav)
+            // If LID overrode the IME language, update the badge so the pill
+            // reflects what will actually be transcribed before the result arrives.
+            let storedSetting = UserDefaults.standard.string(forKey: Self.transcriptionLanguageKey) ?? "auto"
+            let resolvedBadge = LanguageBadge.badgeText(resolvedCode: lang, storedSetting: storedSetting)
+            if resolvedBadge != activeBadge {
+                activeBadge = resolvedBadge
+                pill.show(state: .transcribing, languageBadge: activeBadge)
+            }
             let result = try await withTimeout(seconds: 120, operation: "transcription") {
                 return try await self.transcription.transcribe(audioURL: wav, language: lang)
             }
@@ -897,6 +905,11 @@ final class AppCoordinator: ObservableObject {
             if let mapped, result.confidence >= Self.lidConfidenceThreshold {
                 return mapped
             }
+            return fallback
+        } catch MurmurError.silenceDetected {
+            // Silence is a normal condition (accidental press, nothing said).
+            // Fall through quietly — no pill error, no user action required.
+            Self.log.info("LID: silent audio, using fallback=\(fallback, privacy: .public)")
             return fallback
         } catch {
             // LID model load/inference failure is never fatal to transcription;
