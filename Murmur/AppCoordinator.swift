@@ -68,6 +68,18 @@ final class AppCoordinator: ObservableObject {
     let audioFeedback: AudioFeedbackService
     let pill: FloatingPillController
 
+    /// Optional audio-based language identifier. When nil or when the
+    /// `autoDetectLanguage` default is off, language resolution falls through
+    /// to the synchronous input-source heuristic. Injected by MurmurApp once
+    /// the auxiliary LID model has been downloaded.
+    var lid: (any LanguageIdentifying)?
+
+    /// Minimum softmax confidence required to trust a detected language. Below
+    /// this threshold we fall back to the manual Picker (or "auto" heuristic),
+    /// so a brief grunt or multilingual utterance does not flip to the wrong
+    /// language. Tunable from real-world logs — see .public LID log lines.
+    private static let lidConfidenceThreshold: Float = 0.60
+
     // MARK: - V3 Streaming (feature-flag gated)
 
     private(set) var streamingCoordinator: StreamingTranscriptionCoordinator?
@@ -247,7 +259,7 @@ final class AppCoordinator: ObservableObject {
             self.transition(to: .transcribing)
             self.pill.show(state: .transcribing)
 
-            let lang = self.resolveTranscriptionLanguage()
+            let lang = await self.resolveTranscriptionLanguageAsync(audioURL: audioURL)
 
             do {
                 let result = try await self.transcription.transcribeLong(
@@ -634,7 +646,7 @@ final class AppCoordinator: ObservableObject {
             let wav = try await withTimeout(seconds: 5, operation: "stop recording") {
                 try await self.audio.stopRecording()
             }
-            let lang = resolveTranscriptionLanguage()
+            let lang = await resolveTranscriptionLanguageAsync(audioURL: wav)
             let result = try await withTimeout(seconds: 120, operation: "transcription") {
                 return try await self.transcription.transcribe(audioURL: wav, language: lang)
             }
@@ -835,6 +847,53 @@ final class AppCoordinator: ObservableObject {
         if let monitor = undoMonitor {
             NSEvent.removeMonitor(monitor)
             undoMonitor = nil
+        }
+    }
+
+    private var autoDetectLanguageEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "autoDetectLanguage")
+    }
+
+    /// Async language resolution for the non-streaming path. When the user has
+    /// enabled audio-based detection AND an LID service is available, runs the
+    /// LID model on the recorded audio and trusts the result above
+    /// `lidConfidenceThreshold` IFF the detected language is in Cohere's set.
+    /// Otherwise falls back to the synchronous resolver (Picker value or
+    /// input-source "auto" mapping).
+    ///
+    /// Streaming V3 intentionally does not call this — pre-roll LID would
+    /// defeat its first-token latency target.
+    func resolveTranscriptionLanguageAsync(audioURL: URL) async -> String {
+        let fallback = resolveTranscriptionLanguage()
+        guard autoDetectLanguageEnabled else { return fallback }
+        guard let lid else {
+            // User opted into detection but the LID model is not available.
+            // Surface a non-blocking toast — plan deliberately avoids silent
+            // fallback so the user can take action — and proceed with the
+            // Picker value for this one transcription.
+            Self.log.warning("LID enabled but model not loaded; using fallback=\(fallback, privacy: .public)")
+            pill.show(state: .error(.transcriptionFailed("Language model not installed")))
+            pill.hide(after: Self.errorAutoRecoverySeconds)
+            return fallback
+        }
+
+        do {
+            let result = try await lid.identify(audioURL: audioURL)
+            let mapped = CohereLanguageMapping.map(result.code)
+            Self.log.info("LID: detected=\(result.code, privacy: .public) confidence=\(String(format: "%.2f", result.confidence), privacy: .public) mapped=\(mapped ?? "nil", privacy: .public) threshold=\(String(format: "%.2f", Self.lidConfidenceThreshold), privacy: .public) fallback=\(fallback, privacy: .public)")
+
+            if let mapped, result.confidence >= Self.lidConfidenceThreshold {
+                return mapped
+            }
+            return fallback
+        } catch {
+            // LID model load/inference failure is never fatal to transcription;
+            // log and fall back so the user still gets text in their picked
+            // language.
+            Self.log.error("LID inference failed, falling back to \(fallback, privacy: .public): \(String(describing: error), privacy: .public)")
+            pill.show(state: .error(.transcriptionFailed("Language detection unavailable")))
+            pill.hide(after: Self.errorAutoRecoverySeconds)
+            return fallback
         }
     }
 

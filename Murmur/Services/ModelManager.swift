@@ -112,6 +112,74 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+// MARK: - Auxiliary Model
+
+/// Small, optional models that live alongside the primary transcription backend
+/// (e.g. Whisper-tiny used only for language ID). Unlike `ModelBackend`, there is
+/// no notion of an "active" auxiliary — each one is downloaded and managed
+/// independently on demand.
+enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
+    /// Whisper-tiny multilingual, ONNX quantised. Used by
+    /// `LanguageIdentificationService` when the user enables audio-based
+    /// language detection.
+    case lidWhisperTiny
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .lidWhisperTiny: return "Language Detection Model"
+        }
+    }
+
+    var modelRepo: String {
+        switch self {
+        case .lidWhisperTiny: return "onnx-community/whisper-tiny"
+        }
+    }
+
+    var modelSubdirectory: String {
+        switch self {
+        case .lidWhisperTiny: return "Murmur/Models-LID"
+        }
+    }
+
+    /// ~50 MB worst-case. Quantised encoder + decoder are each ~15–25 MB.
+    var requiredDiskSpace: Int64 {
+        switch self {
+        case .lidWhisperTiny: return 100_000_000
+        }
+    }
+
+    var sizeDescription: String {
+        switch self {
+        case .lidWhisperTiny: return "~40 MB"
+        }
+    }
+
+    var allowPatterns: [String] {
+        switch self {
+        case .lidWhisperTiny:
+            return [
+                "onnx/encoder_model_quantized.onnx",
+                "onnx/decoder_model_quantized.onnx",
+                "*.json",
+            ]
+        }
+    }
+
+    var requiredFiles: [String] {
+        switch self {
+        case .lidWhisperTiny:
+            return [
+                "onnx/encoder_model_quantized.onnx",
+                "onnx/decoder_model_quantized.onnx",
+                "config.json",
+            ]
+        }
+    }
+}
+
 enum ModelState: Sendable, Equatable {
     case notDownloaded
     case downloading(progress: Double, bytesPerSec: Int64)
@@ -159,6 +227,15 @@ final class ModelManager: ObservableObject {
     /// direct assignment is intentionally not exposed so callers must go through
     /// the guard that refuses switches during active downloads.
     @Published private(set) var activeBackend: ModelBackend
+
+    /// Per-auxiliary-model state. Only keys the user has interacted with appear.
+    /// Reads go through `auxiliaryState(for:)` which returns `.notDownloaded` for
+    /// absent keys, so consumers never need to nil-coalesce.
+    @Published private(set) var auxiliaryStates: [AuxiliaryModel: ModelState] = [:]
+    @Published private(set) var auxiliaryProgress: [AuxiliaryModel: Double] = [:]
+    @Published private(set) var auxiliarySpeed: [AuxiliaryModel: Int64] = [:]
+    @Published private(set) var auxiliaryDownloadedBytes: [AuxiliaryModel: Int64] = [:]
+    @Published private(set) var auxiliaryStatusMessage: [AuxiliaryModel: String] = [:]
 
     /// Emits only when a backend switch is *accepted* (i.e. not refused by the
     /// download-in-progress guard). Observers that need to react to a committed
@@ -417,6 +494,10 @@ final class ModelManager: ObservableObject {
         }
 
         refreshState()
+
+        for aux in AuxiliaryModel.allCases {
+            refreshAuxiliaryState(aux)
+        }
     }
 
     /// Re-evaluate state based on current activeBackend
@@ -1105,6 +1186,273 @@ final class ModelManager: ObservableObject {
         return total
     }
 
+    // MARK: - Auxiliary Models
+
+    /// Current state of an auxiliary model. Returns `.notDownloaded` for any
+    /// key that has never been mutated; `downloadAuxiliary` / `deleteAuxiliary`
+    /// / constructor migration populates the dictionary lazily.
+    func auxiliaryState(for aux: AuxiliaryModel) -> ModelState {
+        auxiliaryStates[aux] ?? .notDownloaded
+    }
+
+    func auxiliaryModelDirectory(_ aux: AuxiliaryModel) -> URL {
+        #if DEBUG
+        if let override = auxiliaryDirectoryOverrides[aux] {
+            return override
+        }
+        #endif
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(aux.modelSubdirectory)
+    }
+
+    /// Manifest path for an auxiliary model — stored inside its own directory
+    /// alongside the ONNX files, same scheme as the primary backends.
+    private func auxiliaryManifestURL(_ aux: AuxiliaryModel) -> URL {
+        auxiliaryModelDirectory(aux).appendingPathComponent(ModelManifest.filename)
+    }
+
+    /// Cheap validity check — same semantics as `manifestIsValid(for:)` but for
+    /// an auxiliary model. Required by `isAuxiliaryDownloaded` so UI can render
+    /// the row without hashing.
+    func auxiliaryManifestIsValid(_ aux: AuxiliaryModel) -> Bool {
+        let url = auxiliaryManifestURL(aux)
+        guard let data = try? Data(contentsOf: url),
+              let manifest = try? JSONDecoder().decode(ModelManifest.self, from: data)
+        else { return false }
+        let dir = auxiliaryModelDirectory(aux)
+        for (relative, entry) in manifest.files {
+            let fileURL = dir.appendingPathComponent(relative)
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+                  let fileSize = attrs[.size] as? Int64,
+                  fileSize == entry.size
+            else { return false }
+        }
+        return true
+    }
+
+    func isAuxiliaryDownloaded(_ aux: AuxiliaryModel) -> Bool {
+        // While a download or verification is in flight, report false so the
+        // UI offers the correct next action (e.g. "Cancel" rather than "Use").
+        switch auxiliaryState(for: aux) {
+        case .downloading, .verifying:
+            return false
+        case .ready, .notDownloaded, .corrupt, .error:
+            // Manifest on disk is authoritative — .notDownloaded covers the
+            // cold-launch case where refreshAuxiliaryState hasn't yet run.
+            return auxiliaryManifestIsValid(aux)
+        }
+    }
+
+    func auxiliaryModelPath(_ aux: AuxiliaryModel) -> URL? {
+        guard auxiliaryManifestIsValid(aux) else { return nil }
+        return auxiliaryModelDirectory(aux)
+    }
+
+    /// Recompute the auxiliary state on startup based on on-disk manifest.
+    /// Mirrors `refreshState()` for the primary backend.
+    func refreshAuxiliaryState(_ aux: AuxiliaryModel) {
+        if auxiliaryManifestIsValid(aux) {
+            auxiliaryStates[aux] = .ready
+            auxiliaryStatusMessage[aux] = ""
+        } else {
+            auxiliaryStates[aux] = .notDownloaded
+            auxiliaryStatusMessage[aux] = ""
+        }
+        auxiliaryProgress[aux] = 0
+        auxiliaryDownloadedBytes[aux] = 0
+        auxiliarySpeed[aux] = 0
+    }
+
+    /// Download an auxiliary model via the bundled Python env. Shares the same
+    /// `snapshot_download` path as the primary backend — a second subprocess is
+    /// run, independent of any in-flight backend download, so the user can
+    /// enable LID without interrupting a primary download.
+    func downloadAuxiliary(_ aux: AuxiliaryModel) async throws {
+        // Guard: already downloading / verifying this aux model.
+        if case .downloading = auxiliaryState(for: aux) {
+            logger.info("downloadAuxiliary(\(aux.rawValue)): already in progress")
+            return
+        }
+
+        // Disk space: use the auxiliary's own requirement, not the active backend's.
+        let attrs = try FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())
+        if let free = attrs[.systemFreeSize] as? Int64, free < aux.requiredDiskSpace {
+            throw MurmurError.diskFull
+        }
+
+        let dir = auxiliaryModelDirectory(aux)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        auxiliaryStates[aux] = .downloading(progress: 0, bytesPerSec: 0)
+        auxiliaryProgress[aux] = 0
+        auxiliarySpeed[aux] = 0
+        auxiliaryDownloadedBytes[aux] = 0
+        auxiliaryStatusMessage[aux] = "Preparing download..."
+
+        let pythonBin = try await ensurePythonEnv()
+        auxiliaryStatusMessage[aux] = "Downloading..."
+
+        let quoted = aux.allowPatterns.map { "\"\($0)\"" }.joined(separator: ", ")
+        let script = """
+        import sys, json
+        from huggingface_hub import snapshot_download
+        try:
+            path = snapshot_download(
+                "\(aux.modelRepo)",
+                local_dir="\(dir.path)",
+                allow_patterns=[\(quoted)],
+            )
+            print(json.dumps({"status": "ok", "path": path}), flush=True)
+        except Exception as e:
+            print(json.dumps({"status": "error", "error": str(e)}), flush=True)
+        """
+
+        let process = Process()
+        process.executableURL = pythonBin
+        process.arguments = ["-c", script]
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        let monitorTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var lastSize: Int64 = 0
+            var samples: [Int64] = []
+            while !Task.isCancelled && process.isRunning {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, process.isRunning else { break }
+                let size = self.directorySize(dir)
+                let instant = size - lastSize
+                samples.append(instant)
+                if samples.count > 5 { samples.removeFirst() }
+                let smoothed = samples.reduce(0, +) / Int64(samples.count)
+                self.auxiliarySpeed[aux] = smoothed
+                self.auxiliaryDownloadedBytes[aux] = size
+                self.auxiliaryStates[aux] = .downloading(progress: -1, bytesPerSec: smoothed)
+                self.auxiliaryStatusMessage[aux] = "Downloading: \(size / 1_000_000) MB"
+                lastSize = size
+            }
+        }
+
+        let resumeGuard = ResumeGuard()
+        let exitStatus: Int32 = await withCheckedContinuation { cont in
+            process.terminationHandler = { p in
+                if resumeGuard.claim() { cont.resume(returning: p.terminationStatus) }
+            }
+            do {
+                try process.run()
+            } catch {
+                if resumeGuard.claim() { cont.resume(returning: -1) }
+                return
+            }
+            if !process.isRunning, resumeGuard.claim() {
+                cont.resume(returning: process.terminationStatus)
+            }
+        }
+        monitorTask.cancel()
+
+        let outData = stdout.fileHandleForReading.readDataToEndOfFile()
+        let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+        let outStr = String(data: outData, encoding: .utf8) ?? ""
+        let errStr = String(data: errData, encoding: .utf8) ?? ""
+
+        if let line = outStr.components(separatedBy: "\n").last(where: { $0.contains("{") }),
+           let data = line.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let errMsg = json["error"] as? String {
+                auxiliaryStatusMessage[aux] = "Error: \(errMsg)"
+                auxiliaryStates[aux] = .error(String(errMsg.prefix(200)))
+                throw MurmurError.transcriptionFailed(errMsg)
+            }
+            if json["status"] as? String == "ok" {
+                auxiliaryStatusMessage[aux] = "Verifying..."
+                auxiliaryStates[aux] = .verifying
+                let valid = try await verifyAuxiliary(aux)
+                guard valid else {
+                    auxiliaryStatusMessage[aux] = "Error: Integrity check failed"
+                    auxiliaryStates[aux] = .corrupt
+                    throw MurmurError.transcriptionFailed("LID model integrity check failed")
+                }
+                auxiliaryStates[aux] = .ready
+                auxiliaryStatusMessage[aux] = "Ready"
+                return
+            }
+        }
+
+        if exitStatus != 0 {
+            let short = String(errStr.suffix(200))
+            auxiliaryStatusMessage[aux] = "Error: \(short)"
+            auxiliaryStates[aux] = .error("Download failed")
+            throw MurmurError.transcriptionFailed("LID model download failed: \(short)")
+        }
+
+        if auxiliaryModelPath(aux) != nil {
+            auxiliaryStates[aux] = .ready
+            auxiliaryStatusMessage[aux] = "Ready"
+        } else {
+            auxiliaryStates[aux] = .error("Model files missing")
+            auxiliaryStatusMessage[aux] = "Error: Download completed but files missing"
+            throw MurmurError.transcriptionFailed("LID model files missing")
+        }
+    }
+
+    /// Hashes every file present under the auxiliary model directory and writes
+    /// a manifest. Returns false if any required file is missing.
+    private func verifyAuxiliary(_ aux: AuxiliaryModel) async throws -> Bool {
+        let dir = auxiliaryModelDirectory(aux)
+        for file in aux.requiredFiles {
+            let p = dir.appendingPathComponent(file).path
+            if !FileManager.default.fileExists(atPath: p) {
+                logger.warning("LID model missing required file: \(file)")
+                return false
+            }
+        }
+        // Build a fresh manifest and write it. Reuse the same struct as the
+        // primary backend so the file format is consistent.
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: dir,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return false }
+
+        var entries: [String: ManifestFileEntry] = [:]
+        for case let fileURL as URL in enumerator {
+            let values = try fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            guard values.isRegularFile == true else { continue }
+            if fileURL.lastPathComponent == ModelManifest.filename { continue }
+            let data = try Data(contentsOf: fileURL)
+            let hash = SHA256.hash(data: data)
+            let hashStr = hash.map { String(format: "%02x", $0) }.joined()
+            let size = Int64(values.fileSize ?? 0)
+            let relative = fileURL.path.replacingOccurrences(of: dir.path + "/", with: "")
+            entries[relative] = ManifestFileEntry(sha256: hashStr, size: size)
+        }
+        let manifest = ModelManifest(
+            version: 1,
+            backend: aux.rawValue,
+            createdAt: ISO8601DateFormatter().string(from: Date()),
+            files: entries
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(manifest).write(to: auxiliaryManifestURL(aux), options: .atomic)
+        return true
+    }
+
+    func deleteAuxiliary(_ aux: AuxiliaryModel) throws {
+        let dir = auxiliaryModelDirectory(aux)
+        if FileManager.default.fileExists(atPath: dir.path) {
+            try FileManager.default.removeItem(at: dir)
+        }
+        auxiliaryStates[aux] = .notDownloaded
+        auxiliaryStatusMessage[aux] = ""
+        auxiliaryProgress[aux] = 0
+        auxiliaryDownloadedBytes[aux] = 0
+        logger.info("Auxiliary model deleted: \(aux.rawValue)")
+    }
+
     // MARK: - Test Seams (DEBUG only)
     //
     // These functions are compiled only in DEBUG builds and are intentionally
@@ -1127,6 +1475,23 @@ final class ModelManager: ObservableObject {
     ///
     /// NEVER call this from non-test code.
     private var modelDirectoryOverrides: [ModelBackend: URL] = [:]
+    private var auxiliaryDirectoryOverrides: [AuxiliaryModel: URL] = [:]
+
+    func __testing_setAuxiliaryDirectory(_ url: URL, for aux: AuxiliaryModel) {
+        assert(
+            NSClassFromString("XCTestCase") != nil,
+            "__testing_setAuxiliaryDirectory invoked outside XCTest"
+        )
+        auxiliaryDirectoryOverrides[aux] = url
+    }
+
+    func __testing_setAuxiliaryState(_ state: ModelState, for aux: AuxiliaryModel) {
+        assert(
+            NSClassFromString("XCTestCase") != nil,
+            "__testing_setAuxiliaryState invoked outside XCTest"
+        )
+        auxiliaryStates[aux] = state
+    }
 
     func __testing_setModelDirectory(_ url: URL, for backend: ModelBackend) {
         assert(

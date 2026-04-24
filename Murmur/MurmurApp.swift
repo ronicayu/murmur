@@ -21,8 +21,15 @@ struct MurmurApp: App {
         } else {
             ts = TranscriptionService(modelPath: modelPath)
         }
+        let coord = AppCoordinator(transcription: ts)
+        // If the LID model is already on disk from a prior run, wire up the
+        // identifier so the first autoDetect-enabled transcription doesn't
+        // trigger a cold download.
+        if let lidPath = mm.auxiliaryModelPath(.lidWhisperTiny) {
+            coord.lid = LanguageIdentificationService(modelPath: lidPath)
+        }
         _modelManager = StateObject(wrappedValue: mm)
-        _coordinator = StateObject(wrappedValue: AppCoordinator(transcription: ts))
+        _coordinator = StateObject(wrappedValue: coord)
         _historyService = StateObject(wrappedValue: TranscriptionHistoryService())
     }
 
@@ -69,6 +76,20 @@ struct MurmurApp: App {
                     // Preload model immediately after download completes
                     if newState == .ready {
                         coordinator.preloadModelInBackground()
+                    }
+                }
+                .onReceive(modelManager.$auxiliaryStates) { states in
+                    // Attach / detach the LID service as the auxiliary model
+                    // transitions between .ready and anything else (downloading,
+                    // deleted, corrupt). Doing this via state subscription keeps
+                    // the coordinator decoupled from ModelManager internals.
+                    let lidReady = states[.lidWhisperTiny] == .ready
+                        && modelManager.auxiliaryModelPath(.lidWhisperTiny) != nil
+                    if lidReady, coordinator.lid == nil,
+                       let path = modelManager.auxiliaryModelPath(.lidWhisperTiny) {
+                        coordinator.lid = LanguageIdentificationService(modelPath: path)
+                    } else if !lidReady, coordinator.lid != nil {
+                        coordinator.lid = nil
                     }
                 }
                 // Listen for settings notification from Transcription window

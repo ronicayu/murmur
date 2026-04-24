@@ -9,6 +9,7 @@ struct SettingsView: View {
     @AppStorage("soundEffects") private var soundEffects: Bool = true
     @AppStorage("launchAtLogin") private var launchAtLogin: Bool = true
     @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
+    @AppStorage("autoDetectLanguage") private var autoDetectLanguage: Bool = false
     @AppStorage("streamingInputEnabled") private var streamingInputEnabled: Bool = false
     @AppStorage("streamingDiscoveryBadgeDismissed") private var discoveryBadgeDismissed: Bool = false
     @AppStorage("streamingFocusAbandonSeconds") private var focusAbandonSeconds: Double = 10.0
@@ -90,7 +91,7 @@ struct SettingsView: View {
                         }
                     }
                 }
-                LabeledContent("Language") {
+                LabeledContent(autoDetectLanguage ? "Fallback language" : "Language") {
                     Picker("", selection: $transcriptionLanguage) {
                         Text("Auto").tag("auto")
                         Divider()
@@ -112,6 +113,28 @@ struct SettingsView: View {
                     }
                     .labelsHidden()
                     .frame(width: 160)
+                }
+                if autoDetectLanguage {
+                    Text("Used when audio detection is unsure.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                LabeledContent {
+                    Toggle("", isOn: $autoDetectLanguage)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .onChange(of: autoDetectLanguage) { _, newValue in
+                            if newValue && !modelManager.isAuxiliaryDownloaded(.lidWhisperTiny) {
+                                Task { try? await modelManager.downloadAuxiliary(.lidWhisperTiny) }
+                            }
+                        }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Auto-detect language from audio")
+                        Text("Uses a separate small model (~40 MB). Overrides manual selection when confident.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 LabeledContent("Sound effects") {
                     Toggle("", isOn: $soundEffects)
@@ -278,6 +301,10 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Language Detection") {
+                lidModelRow
+            }
+
             Section {
                 HStack {
                     Button("Open Model Folder") {
@@ -299,6 +326,62 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    @ViewBuilder
+    private var lidModelRow: some View {
+        let state = modelManager.auxiliaryState(for: .lidWhisperTiny)
+        let isDownloaded = modelManager.isAuxiliaryDownloaded(.lidWhisperTiny)
+        let isBusy: Bool = {
+            if case .downloading = state { return true }
+            if case .verifying = state { return true }
+            return false
+        }()
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(AuxiliaryModel.lidWhisperTiny.displayName)
+                        .font(.body)
+                    Text(AuxiliaryModel.lidWhisperTiny.sizeDescription
+                        + (isDownloaded ? " · Downloaded" : ""))
+                        .font(.caption)
+                        .foregroundStyle(isDownloaded ? .green : .secondary)
+                }
+                Spacer()
+                if isDownloaded {
+                    Button("Delete", role: .destructive) {
+                        try? modelManager.deleteAuxiliary(.lidWhisperTiny)
+                    }
+                    .buttonStyle(.bordered)
+                } else if !isBusy {
+                    Button("Download") {
+                        Task { try? await modelManager.downloadAuxiliary(.lidWhisperTiny) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            if case .downloading(_, let speed) = state {
+                ProgressView().progressViewStyle(.linear)
+                HStack {
+                    if let msg = modelManager.auxiliaryStatusMessage[.lidWhisperTiny], !msg.isEmpty {
+                        Text(msg)
+                    }
+                    Spacer()
+                    if speed > 0 { Text(formatSpeed(speed)) }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            } else if case .error(let msg) = state {
+                Text(msg)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            } else if case .verifying = state {
+                Text("Verifying…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     @ViewBuilder
