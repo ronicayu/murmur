@@ -74,6 +74,16 @@ final class AppCoordinator: ObservableObject {
     /// the auxiliary LID model has been downloaded.
     var lid: (any LanguageIdentifying)?
 
+    /// Optional post-transcription cleanup service. When non-nil and the
+    /// `cleanupTranscription` UserDefault is on, called after V1 transcription
+    /// succeeds and before text is injected. Injected by MurmurApp on every
+    /// launch (rule-based; no download gate in v0.3.0).
+    var cleanup: (any TranscriptionCleanup)?
+
+    private var cleanupEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "cleanupTranscription")
+    }
+
     /// Minimum softmax confidence required to trust a detected language. Below
     /// this threshold we fall back to the manual Picker (or "auto" heuristic),
     /// so a brief grunt or multilingual utterance does not flip to the wrong
@@ -674,16 +684,20 @@ final class AppCoordinator: ObservableObject {
                 return try await self.transcription.transcribe(audioURL: wav, language: lang)
             }
 
+            // Post-transcription cleanup (v0.3.0: rule-based EN, passthrough for other langs).
+            // 250 ms hard cap — on timeout or any error, fall back to raw text silently.
+            let textToInject = await applyCleanupIfEnabled(text: result.text, language: lang)
+
             transition(to: .injecting)
             pill.show(state: .injecting)
 
             let method = try await withTimeout(seconds: 5, operation: "text injection") {
-                try await self.injection.inject(text: result.text)
+                try await self.injection.inject(text: textToInject)
             }
 
-            lastTranscription = result.text
+            lastTranscription = textToInject
             lastLanguage = result.language
-            transcriptionHistory.insert((text: result.text, language: result.language, date: Date()), at: 0)
+            transcriptionHistory.insert((text: textToInject, language: result.language, date: Date()), at: 0)
             if transcriptionHistory.count > maxHistoryCount {
                 transcriptionHistory.removeLast()
             }
@@ -691,7 +705,7 @@ final class AppCoordinator: ObservableObject {
             // Increment V1 usage counter for discovery badge
             V1UsageCounter.increment()
 
-            let undoableState = AppState.undoable(text: result.text, method: method)
+            let undoableState = AppState.undoable(text: textToInject, method: method)
             transition(to: undoableState)
             // No success chime: user can see the text appear in their editor
             // and the "Inserted" pill confirms it. A sound is redundant. Error
@@ -710,6 +724,52 @@ final class AppCoordinator: ObservableObject {
             await startRecordingFlow()
         }
     }
+
+    /// Runs the cleanup service if the toggle is on and a service is wired in.
+    /// Always returns a valid string: the cleaned text on success, `rawText` on
+    /// timeout, throw, or toggle-off. Never surfaces an error to the caller.
+    private func applyCleanupIfEnabled(text rawText: String, language: String) async -> String {
+        guard cleanupEnabled, let cleanup else { return rawText }
+        do {
+            let cleaned = try await withTimeout(seconds: Self.cleanupTimeoutSeconds, operation: "cleanup") {
+                try await cleanup.improve(rawText, language: language)
+            }
+            return cleaned
+        } catch {
+            Self.log.warning("Cleanup failed, using raw text: \(String(describing: error), privacy: .public)")
+            return rawText
+        }
+    }
+
+    /// Hard cap for post-transcription cleanup (250 ms per spec).
+    private static let cleanupTimeoutSeconds: TimeInterval = 0.25
+
+#if DEBUG
+    /// Testable entry-point that bypasses audio I/O. Exercises the transcribe →
+    /// cleanup → inject pipeline with a pre-recorded WAV and a pre-resolved
+    /// language code. Only used by `CoordinatorCleanupTests`.
+    func stopAndTranscribeV1ForTesting(wav: URL, lang: String) async {
+        do {
+            let result = try await withTimeout(seconds: 120, operation: "transcription") {
+                return try await self.transcription.transcribe(audioURL: wav, language: lang)
+            }
+
+            let textToInject = await applyCleanupIfEnabled(text: result.text, language: lang)
+
+            // Skip real injection in tests — just record what would be injected.
+            lastTranscription = textToInject
+            lastLanguage = result.language
+            transcriptionHistory.insert((text: textToInject, language: result.language, date: Date()), at: 0)
+            if transcriptionHistory.count > maxHistoryCount {
+                transcriptionHistory.removeLast()
+            }
+
+            transition(to: .undoable(text: textToInject, method: .clipboard))
+        } catch {
+            handleError(mapError(error))
+        }
+    }
+#endif
 
     // MARK: - Helpers
 

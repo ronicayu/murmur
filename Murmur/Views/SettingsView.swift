@@ -14,6 +14,7 @@ struct SettingsView: View {
     @AppStorage("streamingDiscoveryBadgeDismissed") private var discoveryBadgeDismissed: Bool = false
     @AppStorage("streamingFocusAbandonSeconds") private var focusAbandonSeconds: Double = 10.0
     @AppStorage("undoAfterTranscription") private var undoAfterTranscription: Bool = false
+    @AppStorage("cleanupTranscription") private var cleanupTranscription: Bool = false
 
     @State private var useRightCommand: Bool = true
     @State private var showDeleteConfirmation = false
@@ -311,6 +312,10 @@ struct SettingsView: View {
                 lidModelRow
             }
 
+            Section("Transcription Cleanup") {
+                transcriptionCleanupRow
+            }
+
             Section {
                 HStack {
                     Button("Open Model Folder") {
@@ -384,6 +389,24 @@ struct SettingsView: View {
                     .lineLimit(2)
             } else if case .verifying = state {
                 Text("Verifying…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var transcriptionCleanupRow: some View {
+        LabeledContent {
+            Toggle("", isOn: $cleanupTranscription)
+                .labelsHidden()
+                .toggleStyle(.switch)
+            // v0.3.0: always enabled — rule-based, no model download required.
+            // v0.3.1 will gate this on AuxiliaryModel.punctuationCleanup being downloaded.
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Clean up punctuation and casing")
+                Text("Currently applies only to English. Chinese support coming in a future update.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -28,6 +28,10 @@ struct MurmurApp: App {
         if let lidPath = mm.auxiliaryModelPath(.lidWhisperTiny) {
             coord.lid = LanguageIdentificationService(modelPath: lidPath)
         }
+        // v0.3.0: rule-based cleanup service — always available, no download gate.
+        // v0.3.1 will swap this for PunctuationCleanupService backed by the ONNX
+        // classifier once AuxiliaryModel.punctuationCleanup lands.
+        coord.cleanup = PunctuationCleanupService()
         _modelManager = StateObject(wrappedValue: mm)
         _coordinator = StateObject(wrappedValue: coord)
         _historyService = StateObject(wrappedValue: TranscriptionHistoryService())
