@@ -70,6 +70,15 @@ v0.3.1 is a body swap, not a rename.
 
 ## scope explicitly deferred to v0.3.1
 
+- **Auto-disable counter (CR P2-D).** Persisted consecutive-failure counter in `UserDefaults`;
+  auto-disable the cleanup toggle after 10 consecutive failures + surface a Settings-pane
+  banner (no NSAlert). Not implemented in v0.3.0 — rule-based pass has near-zero failure rate
+  so the omission is safe for the initial ship. Must land before the ONNX classifier path,
+  which can produce model errors under resource pressure.
+- **Onboarding nudge (CR P2-E).** One-time Settings-pane banner after 10 successful
+  transcriptions (mirror `V1UsageCounter.discoveryThreshold = 10`). Text:
+  *"Turn on Polish transcription to auto-capitalise and add periods to English transcriptions."*
+  Dismissable; no re-show; suppressed if toggle is already on. Not implemented in v0.3.0.
 - **ONNX classifier.** `kredor/punctuate-all` is the starting candidate;
   spike confirms before commit. Fallback: dual-head (~300 MB total,
   honest copy).

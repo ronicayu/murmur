@@ -148,6 +148,21 @@ final class PunctuationCleanupServiceENTests: XCTestCase {
         // Assert — trimmed, capitalised, period added
         XCTAssertEqual(result, "Hello.")
     }
+
+    // MARK: Quote-ending behaviour
+
+    func test_en_textEndingInClosingQuote_appendsTerminalPeriod() async throws {
+        // Arrange — closing quote is NOT a terminal-punctuation suppressor;
+        // `he said "hello"` should receive a trailing period so it reads as
+        // a complete sentence. See PunctuationCleanupService.terminalPunctuation.
+        let input = "he said \"hello\""
+
+        // Act
+        let result = try await sut.improve(input, language: "en")
+
+        // Assert — period appended after the closing quote
+        XCTAssertEqual(result, "He said \"hello\".")
+    }
 }
 
 // MARK: - Passthrough for non-EN languages
@@ -244,9 +259,14 @@ actor SpyCleanupService: TranscriptionCleanup {
             return cleaned
         case .failure(let error):
             throw error
-        case .slowSuccess(let cleaned, let seconds):
-            try await Task.sleep(for: .seconds(seconds))
-            return cleaned
+        case .slowSuccess(let cleaned, _):
+            // Block indefinitely without a wall-clock dependency so the
+            // coordinator's withTimeout always fires before this resumes.
+            // Task.sleep(nanoseconds:) throws CancellationError when the
+            // enclosing task group cancels this task — deterministic.
+            _ = cleaned  // result is intentionally never returned
+            try await Task.sleep(nanoseconds: UInt64.max)
+            return cleaned  // unreachable; satisfies the compiler
         }
     }
 }

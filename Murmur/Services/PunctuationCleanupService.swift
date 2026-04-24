@@ -39,8 +39,8 @@ protocol TranscriptionCleanup: Sendable {
 /// 4. Capitalise the first character of the trimmed text.
 /// 5. After `.`, `?`, `!` followed by one or more whitespace characters,
 ///    capitalise the immediately following letter.
-/// 6. Append a terminal `.` if the text does not end in `.?!…:;` or a
-///    typographic/ASCII quote character.
+/// 6. Append a terminal `.` if the text does not end in `.?!…:;`.
+///    Quote characters are not in the suppression set — see `terminalPunctuation`.
 ///
 /// For `zh`, `ja`, `ko`, or any other language code the input is returned
 /// unchanged. ZH rules land in v0.3.1 with the ONNX classifier.
@@ -50,12 +50,12 @@ actor PunctuationCleanupService: TranscriptionCleanup {
     private static let log = Logger(subsystem: "com.murmur.app", category: "cleanup")
 
     /// Characters that suppress the auto-appended terminal period.
-    /// Includes ASCII and typographic variants of quotes.
+    /// Quotes are intentionally excluded: `"hello"` → `"hello".` is more
+    /// readable than `"hello"` with no terminal period. Quoted dialog is rare
+    /// in dictation output, and ending without a period looks worse than an
+    /// extra one inside the closing quote (American-style placement).
     private static let terminalPunctuation: Set<Character> = [
         ".", "?", "!", "…", ":", ";",
-        "\"", "'",
-        "\u{201C}", "\u{201D}",  // " "
-        "\u{2018}", "\u{2019}",  // ' '
     ]
 
     func improve(_ text: String, language: String) async throws -> String {
@@ -170,6 +170,10 @@ actor PunctuationCleanupService: TranscriptionCleanup {
                 // Capitalise the first letter we find.
                 if j < chars.count && chars[j].isLetter {
                     let upper = String(chars[j]).uppercased()
+                    // FIXME(v0.3.1): String.uppercased() can produce multi-scalar output
+                    // (e.g. ß → SS); current code drops the second character. EN-only
+                    // transcription output makes this practically unreachable, but the
+                    // classifier path in v0.3.1 should not rely on this.
                     if let first = upper.first {
                         chars[j] = first
                     }

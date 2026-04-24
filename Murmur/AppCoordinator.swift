@@ -697,6 +697,11 @@ final class AppCoordinator: ObservableObject {
 
             lastTranscription = textToInject
             lastLanguage = result.language
+            // History records the same text that was injected (cleaned when the toggle is on,
+            // raw when it is off). This keeps injection and history consistent — the entry in
+            // history always matches what the user actually received. Known trade-off: if the
+            // user toggles cleanup mid-session, earlier entries will be cleaned and later ones
+            // raw. That is acknowledged and intentional, not a bug.
             transcriptionHistory.insert((text: textToInject, language: result.language, date: Date()), at: 0)
             if transcriptionHistory.count > maxHistoryCount {
                 transcriptionHistory.removeLast()
@@ -764,6 +769,8 @@ final class AppCoordinator: ObservableObject {
                 transcriptionHistory.removeLast()
             }
 
+            // method hardcoded — tests here don't assert on injection method;
+            // see AppCoordinatorTests for real injection coverage.
             transition(to: .undoable(text: textToInject, method: .clipboard))
         } catch {
             handleError(mapError(error))
