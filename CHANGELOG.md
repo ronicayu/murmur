@@ -6,16 +6,27 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
-## [0.2.4] — 2026-04-22
+## [0.2.4] — 2026-04-25 (unreleased)
 
-(Note: v0.2.3 tag was claimed upstream by an earlier handoff-docs commit on 2026-04-19; this is the first code release since 0.2.2.)
-
+### Added
+- Audio-based language identification (LID) as an opt-in auxiliary model. When enabled, the app runs a locally-installed Whisper-tiny ONNX encoder + one decoder step on the first 5 s of the recording to pick a language before handing audio to Cohere. Falls through to the existing IME-based resolver on any failure or low-confidence result. Streaming V3 deliberately skips LID to avoid pre-roll latency. Opt-in via a new Settings section that downloads the ~40 MB auxiliary model on demand.
 
 ### Fixed
 - CoreAudio error -10868 (`kAudioUnitErr_FormatNotSupported`) after the app sat idle through sleep/wake or an audio route change (e.g. Bluetooth mic disconnect, display-with-mic sleep). `AudioService` now observes `AVAudioEngineConfigurationChange` and `NSWorkspace.didWakeNotification`, calls `engine.reset()` before the next `startRecording` when either has fired, and reads the live hardware format at record-start instead of relying on the first-buffer format. Early-fails with a clear "No audio input available" message when no input device is present.
 
 ### Changed
 - Coordinator state and error logs promoted to `.public` privacy so Console.app / `log stream` no longer redacts them as `<private>`, unblocking diagnosis of sleep/wake failures.
+
+(Note: v0.2.3 tag was claimed upstream by an earlier handoff-docs commit on 2026-04-19; 0.2.4 absorbs both the earlier 0.2.3 feature set below and the sleep/wake + LID work above.)
+
+## [0.2.3] — 2026-04-20
+
+### Added
+- Language indicator on the recording pill: a small badge (e.g. `EN`, `ZH`) sits between the state icon and the "Recording…" text so the user can confirm which language the model will transcribe in before speaking. When the language setting is `Auto`, the badge gets a trailing middle dot (e.g. `EN·`, `ZH·`) to signal that the value came from the active macOS keyboard input source rather than a fixed Settings choice.
+- Cancel button on the recording pill (`xmark.circle.fill`). Clicking goes through the same `.cancelRecording` path as the Esc shortcut.
+
+### Fixed
+- Esc-to-cancel-recording now works reliably across macOS versions. The previous implementation used `NSEvent.addGlobalMonitorForEvents(matching: .keyDown)`, which silently fails to deliver events on some installs while the `flagsChanged` monitor keeps working — so right-cmd-to-record worked but Esc didn't. Replaced with a Carbon `RegisterEventHotKey` registration (via the existing `HotKey` package) that's installed when recording starts and torn down when it ends. Side effect: Esc is exclusively grabbed by Murmur during a recording.
 
 ## [0.2.2] — 2026-04-19
 

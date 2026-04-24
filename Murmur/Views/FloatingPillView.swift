@@ -3,11 +3,32 @@ import SwiftUI
 struct FloatingPillView: View {
     let state: AppState
     let audioLevel: Float
+    let languageBadge: String?
+    let onCancel: (() -> Void)?
+
+    init(state: AppState, audioLevel: Float, languageBadge: String? = nil, onCancel: (() -> Void)? = nil) {
+        self.state = state
+        self.audioLevel = audioLevel
+        self.languageBadge = languageBadge
+        self.onCancel = onCancel
+    }
 
     var body: some View {
         HStack(spacing: 8) {
             stateIcon
+            if let badge = languageBadge, isRecordingState {
+                LanguageBadgeView(text: badge)
+            }
             stateText
+            if isRecordingState, let onCancel {
+                Button(action: onCancel) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Cancel recording")
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -16,6 +37,13 @@ struct FloatingPillView: View {
         .frame(minWidth: 120)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(pillAccessibilityLabel)
+    }
+
+    var isRecordingState: Bool {
+        switch state {
+        case .recording, .streaming: return true
+        default: return false
+        }
     }
 
     private var pillAccessibilityLabel: String {
@@ -113,10 +141,10 @@ final class FloatingPillController {
     private var hostingView: NSHostingView<FloatingPillView>?
     private var hideTask: Task<Void, Never>?
 
-    func show(state: AppState, audioLevel: Float = 0) {
+    func show(state: AppState, audioLevel: Float = 0, languageBadge: String? = nil, onCancel: (() -> Void)? = nil) {
         hideTask?.cancel()
 
-        let pillView = FloatingPillView(state: state, audioLevel: audioLevel)
+        let pillView = FloatingPillView(state: state, audioLevel: audioLevel, languageBadge: languageBadge, onCancel: onCancel)
 
         if let hostingView {
             hostingView.rootView = pillView

@@ -131,6 +131,8 @@ final class AppCoordinator: ObservableObject {
     private var audioLevelTask: Task<Void, Never>?
     private var maxDurationTask: Task<Void, Never>?
     private var undoMonitor: Any?
+    private var activeBadge: String? = nil
+    private static let transcriptionLanguageKey = "transcriptionLanguage"
     private static let log = Logger(subsystem: "com.murmur.app", category: "coordinator")
 
     init(
@@ -373,9 +375,14 @@ final class AppCoordinator: ObservableObject {
 
     private func startV1RecordingFlow() async {
         do {
+            let resolvedLang = resolveTranscriptionLanguage()
+            let storedSetting = UserDefaults.standard.string(forKey: Self.transcriptionLanguageKey) ?? "auto"
+            activeBadge = LanguageBadge.badgeText(resolvedCode: resolvedLang, storedSetting: storedSetting)
+
             transition(to: .recording)
             audioFeedback.playStartRecording()
-            pill.show(state: .recording, audioLevel: 0)
+            let cancelHandler: () -> Void = { [weak self] in self?.hotkey.emit(.cancelRecording) }
+            pill.show(state: .recording, audioLevel: 0, languageBadge: activeBadge, onCancel: cancelHandler)
 
             // Monitor audio levels for the pill
             audioLevelTask?.cancel()
@@ -383,7 +390,7 @@ final class AppCoordinator: ObservableObject {
                 guard let self else { return }
                 for await level in self.audio.audioLevel {
                     self.currentAudioLevel = level
-                    self.pill.show(state: .recording, audioLevel: level)
+                    self.pill.show(state: .recording, audioLevel: level, languageBadge: self.activeBadge, onCancel: cancelHandler)
                 }
             }
 
@@ -416,9 +423,15 @@ final class AppCoordinator: ObservableObject {
 
     private func startStreamingRecordingFlow() async {
         do {
+            // Resolve badge before showing pill — mirrors V1 flow
+            let lang = resolveTranscriptionLanguage()
+            let storedSetting = UserDefaults.standard.string(forKey: Self.transcriptionLanguageKey) ?? "auto"
+            activeBadge = LanguageBadge.badgeText(resolvedCode: lang, storedSetting: storedSetting)
+
             transition(to: .recording)
             audioFeedback.playStartRecording()
-            pill.show(state: .streaming(chunkCount: 0), audioLevel: 0)
+            let cancelHandler: () -> Void = { [weak self] in self?.hotkey.emit(.cancelRecording) }
+            pill.show(state: .streaming(chunkCount: 0), audioLevel: 0, languageBadge: activeBadge, onCancel: cancelHandler)
 
             audioLevelTask?.cancel()
             audioLevelTask = Task { @MainActor [weak self] in
@@ -427,7 +440,7 @@ final class AppCoordinator: ObservableObject {
                     self.currentAudioLevel = level
                     // Pill update happens via streamingCoordinator published state
                     if case .streaming(let n) = self.streamingCoordinator?.sessionState {
-                        self.pill.show(state: .streaming(chunkCount: n), audioLevel: level)
+                        self.pill.show(state: .streaming(chunkCount: n), audioLevel: level, languageBadge: self.activeBadge, onCancel: cancelHandler)
                     }
                 }
             }
@@ -436,10 +449,9 @@ final class AppCoordinator: ObservableObject {
                 try await self.audio.startRecording()
             }
 
-            // Resolve insertion point before any text is injected
+            // Resolve insertion point before any text is injected (lang already resolved above)
             let startOffset = resolveCurrentCursorOffset()
             let targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
-            let lang = resolveTranscriptionLanguage()
             let wavURL = audio.currentRecordingURL ?? FileManager.default.temporaryDirectory
                 .appendingPathComponent("murmur_stream_\(UUID().uuidString).wav")
 
@@ -900,7 +912,7 @@ final class AppCoordinator: ObservableObject {
     /// When language is "auto", resolve to the active input method's language.
     /// e.g., Pinyin/Wubi → "zh", ABC/US → "en", Kotoeri → "ja"
     private func resolveTranscriptionLanguage() -> String {
-        let stored = UserDefaults.standard.string(forKey: "transcriptionLanguage") ?? "auto"
+        let stored = UserDefaults.standard.string(forKey: Self.transcriptionLanguageKey) ?? "auto"
         guard stored == "auto" else { return stored }
 
         if let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
