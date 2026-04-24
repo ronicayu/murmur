@@ -1,7 +1,26 @@
 import XCTest
 @testable import Murmur
 
-// MARK: - Mock LID
+// MARK: - Test doubles
+
+/// Spy for PillControlling. Records the last call to `show` so tests can assert
+/// what badge / state was displayed without standing up a real NSWindow.
+final class SpyPillController: PillControlling, @unchecked Sendable {
+    private(set) var showCallCount = 0
+    private(set) var lastState: AppState?
+    private(set) var lastBadge: String?
+    private(set) var hideCallCount = 0
+
+    func show(state: AppState, audioLevel: Float, languageBadge: String?, onCancel: (() -> Void)?) {
+        showCallCount += 1
+        lastState = state
+        lastBadge = languageBadge
+    }
+
+    func hide(after delay: TimeInterval) {
+        hideCallCount += 1
+    }
+}
 
 /// Test double for LanguageIdentifying. Can be configured to return a canned
 /// result or throw. `identify` ignores the audio URL — we never need to feed
@@ -209,16 +228,15 @@ final class ResolveTranscriptionLanguageAsyncTests: XCTestCase {
 
     // MARK: - Badge update when LID overrides IME (DA fix #3)
 
-    /// When autoDetect is on and LID returns a high-confidence result that differs
-    /// from the picker/IME setting, resolveTranscriptionLanguageAsync must return the
-    /// LID-detected language AND the badge text for that language must reflect the
-    /// LID override.
+    /// Verifies that resolveTranscriptionLanguageAsync returns the LID-detected
+    /// language code when confidence is above threshold (the input to badge update).
     ///
-    /// This test verifies the two parts of the DA-#3 badge-consistency fix:
-    /// (1) the resolver returns the LID language, and
-    /// (2) LanguageBadge.badgeText produces the correct updated badge for that language.
-    /// The badge update itself happens in stopAndTranscribeV1 using these two values.
-    func test_badgeUpdate_whenLIDOverridesIME_resolvedLanguageAndBadgeMatch() async {
+    /// CR NC-2 note: the stopAndTranscribeV1 badge-update block (lines 664–669 in
+    /// AppCoordinator) requires live AudioService to invoke; it is not reachable
+    /// from unit tests without a full audio stack. That path is covered at
+    /// integration / UAT level. This test validates the resolver output — the
+    /// value stopAndTranscribeV1 consumes when computing the new badge.
+    func test_resolvedLanguage_isLIDCode_whenConfidenceAboveThreshold() async {
         // Arrange: IME/picker is "auto" (so activeBadge starts as "EN·" from
         // resolveTranscriptionLanguage at record-start). LID returns zh @ 0.90.
         UserDefaults.standard.set(true, forKey: "autoDetectLanguage")
@@ -226,19 +244,44 @@ final class ResolveTranscriptionLanguageAsyncTests: XCTestCase {
         coordinator.lid = mock
         mock.behaviour = .success(code: "zh", confidence: 0.90)
 
-        // Act: resolver returns the LID language
+        // Act
         let resolvedLang = await coordinator.resolveTranscriptionLanguageAsync(audioURL: dummyURL)
 
-        // Assert part 1: resolver returns "zh"
+        // Assert: resolver returns "zh" — this is the value stopAndTranscribeV1
+        // feeds into LanguageBadge.badgeText to produce "ZH·".
         XCTAssertEqual(resolvedLang, "zh",
                        "resolveTranscriptionLanguageAsync must return the LID-detected language when confidence is above threshold")
+    }
 
-        // Assert part 2: the badge text for the resolved language is "ZH·"
-        // (dot suffix because storedSetting == "auto"). This is what stopAndTranscribeV1
-        // uses to update activeBadge when LID overrides the IME language.
-        let updatedBadge = LanguageBadge.badgeText(resolvedCode: resolvedLang, storedSetting: "auto")
-        XCTAssertEqual(updatedBadge, "ZH·",
-                       "Badge must update to ZH· when LID overrides auto-IME with zh")
+    // MARK: - LID model detached notification (UT #5a)
+
+    /// When the LID model is removed while the user has auto-detect enabled,
+    /// notifyLIDModelDetached must post a pill error toast so the user sees
+    /// that their preference was silently reset — not discover it later.
+    func test_notifyLIDModelDetached_showsPillWithDisabledMessage() {
+        // Arrange: inject a spy pill so we can observe show calls without NSWindow.
+        let spy = SpyPillController()
+        let coord = AppCoordinator(pill: spy)
+
+        // Act: simulate MurmurApp's `!lidReady, coordinator.lid != nil` branch.
+        coord.notifyLIDModelDetached()
+
+        // Assert: pill was shown with an error state mentioning the disabled
+        // auto-detect, then scheduled to auto-hide.
+        XCTAssertEqual(spy.showCallCount, 1,
+                       "notifyLIDModelDetached must call pill.show exactly once")
+        XCTAssertEqual(spy.hideCallCount, 1,
+                       "notifyLIDModelDetached must schedule pill.hide")
+        if case .error(let err) = spy.lastState {
+            let description = err.errorDescription ?? err.shortMessage
+            XCTAssertTrue(
+                description.lowercased().contains("auto-detect") ||
+                description.lowercased().contains("language"),
+                "Error description must mention auto-detect or language; got: \(description)"
+            )
+        } else {
+            XCTFail("pill.show must be called with an .error state; got \(String(describing: spy.lastState))")
+        }
     }
 }
 

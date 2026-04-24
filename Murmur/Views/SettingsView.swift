@@ -135,6 +135,11 @@ struct SettingsView: View {
                         Text("Uses a separate small model (~40 MB). Overrides manual selection when confident.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if streamingInputEnabled {
+                            Text("Streaming voice input uses the active input source — audio detection runs on full-pass transcription only.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
                 LabeledContent("Sound effects") {

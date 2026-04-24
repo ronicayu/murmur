@@ -66,7 +66,7 @@ final class AppCoordinator: ObservableObject {
     let injection: TextInjectionService
     let permissions: PermissionsService
     let audioFeedback: AudioFeedbackService
-    let pill: FloatingPillController
+    let pill: any PillControlling
 
     /// Optional audio-based language identifier. When nil or when the
     /// `autoDetectLanguage` default is off, language resolution falls through
@@ -131,7 +131,10 @@ final class AppCoordinator: ObservableObject {
     private var audioLevelTask: Task<Void, Never>?
     private var maxDurationTask: Task<Void, Never>?
     private var undoMonitor: Any?
-    private var activeBadge: String? = nil
+    // Exposed as internal(set) so tests can assert the badge value without
+    // needing to spy on the full stopAndTranscribeV1 call path (which requires
+    // live audio infrastructure).
+    internal(set) var activeBadge: String? = nil
     private static let transcriptionLanguageKey = "transcriptionLanguage"
     private static let log = Logger(subsystem: "com.murmur.app", category: "coordinator")
 
@@ -142,7 +145,7 @@ final class AppCoordinator: ObservableObject {
         injection: TextInjectionService = TextInjectionService(),
         permissions: PermissionsService = PermissionsService(),
         audioFeedback: AudioFeedbackService = AudioFeedbackService(),
-        pill: FloatingPillController = FloatingPillController()
+        pill: any PillControlling = FloatingPillController()
     ) {
         self.hotkey = hotkey
         self.audio = audio
@@ -920,6 +923,16 @@ final class AppCoordinator: ObservableObject {
             pill.hide(after: Self.errorAutoRecoverySeconds)
             return fallback
         }
+    }
+
+    /// Called by MurmurApp when the LID auxiliary model transitions out of .ready
+    /// (deleted, corrupted). Posts a pill toast so the user knows their
+    /// auto-detect preference was silently disabled.
+    /// Only fires on a real transition (lid was non-nil before), not on initial
+    /// subscription when the model was never downloaded.
+    func notifyLIDModelDetached() {
+        pill.show(state: .error(.transcriptionFailed("Auto-detect disabled — language model was removed")))
+        pill.hide(after: 4)
     }
 
     /// When language is "auto", resolve to the active input method's language.

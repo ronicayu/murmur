@@ -85,4 +85,39 @@ final class LanguageBadgeTests: XCTestCase {
             XCTAssertFalse(view.isRecordingState, "Expected isRecordingState == false for state \(state)")
         }
     }
+
+    // MARK: - FloatingPillView.isLanguageBadgeVisible (UT #3 / CR NC-2 fix)
+
+    /// Badge must be visible during recording, streaming, AND transcribing so
+    /// the LID-updated badge remains on-screen while Cohere processes the audio.
+    func test_isLanguageBadgeVisible_trueForRecordingStreamingAndTranscribing() {
+        // Arrange & Act
+        let recording = FloatingPillView(state: .recording, audioLevel: 0, languageBadge: "EN")
+        let streaming = FloatingPillView(state: .streaming(chunkCount: 1), audioLevel: 0, languageBadge: "ZH·")
+        let transcribing = FloatingPillView(state: .transcribing, audioLevel: 0, languageBadge: "ZH·")
+
+        // Assert
+        XCTAssertTrue(recording.isLanguageBadgeVisible,
+                      ".recording must show the language badge")
+        XCTAssertTrue(streaming.isLanguageBadgeVisible,
+                      ".streaming must show the language badge")
+        XCTAssertTrue(transcribing.isLanguageBadgeVisible,
+                      ".transcribing must show the language badge (LID override is visible during transcription)")
+    }
+
+    func test_isLanguageBadgeVisible_falseForNonActiveStates() {
+        // Arrange
+        let states: [AppState] = [
+            .idle,
+            .injecting,
+            .undoable(text: "hi", method: .clipboard),
+            .error(.silenceDetected),
+        ]
+        // Act & Assert
+        for state in states {
+            let view = FloatingPillView(state: state, audioLevel: 0, languageBadge: "EN")
+            XCTAssertFalse(view.isLanguageBadgeVisible,
+                           "Expected isLanguageBadgeVisible == false for state \(state)")
+        }
+    }
 }

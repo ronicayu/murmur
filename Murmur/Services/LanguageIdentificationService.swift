@@ -244,6 +244,9 @@ actor LanguageIdentificationService: LanguageIdentifying {
             }
         } while status == .haveData
 
+        // AVAudioConverter's contract: the error pointer is written ONLY on
+        // failure, never cleared on success — so a single shared `convertError`
+        // variable across loop iterations is safe (CR NC-1).
         if let err = convertError {
             throw MurmurError.transcriptionFailed("LID audio conversion error: \(err.localizedDescription)")
         }

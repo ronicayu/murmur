@@ -16,7 +16,7 @@ struct FloatingPillView: View {
     var body: some View {
         HStack(spacing: 8) {
             stateIcon
-            if let badge = languageBadge, isRecordingState {
+            if let badge = languageBadge, isLanguageBadgeVisible {
                 LanguageBadgeView(text: badge)
             }
             stateText
@@ -42,6 +42,15 @@ struct FloatingPillView: View {
     var isRecordingState: Bool {
         switch state {
         case .recording, .streaming: return true
+        default: return false
+        }
+    }
+
+    /// Badge is shown during recording, streaming, AND transcribing — so the
+    /// LID-updated badge remains visible while Cohere processes the audio.
+    var isLanguageBadgeVisible: Bool {
+        switch state {
+        case .recording, .streaming, .transcribing: return true
         default: return false
         }
     }
@@ -133,15 +142,33 @@ struct FloatingPillView: View {
     }
 }
 
+/// Abstractable interface for the floating pill overlay, enabling test spies.
+/// Only `show` and `hide` are required; the concrete class adds window management.
+protocol PillControlling: AnyObject {
+    /// Show the pill in a given state. All parameters except `state` are optional.
+    func show(state: AppState, audioLevel: Float, languageBadge: String?, onCancel: (() -> Void)?)
+    func hide(after delay: TimeInterval)
+}
+
+extension PillControlling {
+    func show(state: AppState) {
+        show(state: state, audioLevel: 0, languageBadge: nil, onCancel: nil)
+    }
+    func show(state: AppState, languageBadge: String?) {
+        show(state: state, audioLevel: 0, languageBadge: languageBadge, onCancel: nil)
+    }
+    func hide() { hide(after: 0) }
+}
+
 /// Window controller for the floating pill overlay.
 /// Uses a fixed-size window to avoid the NSHostingView.updateWindowContentSizeExtremaIfNecessary
 /// crash (rdar://FB12345 — NSHostingView throws when updating constraints on a transitional window).
-final class FloatingPillController {
+final class FloatingPillController: PillControlling {
     private var window: NSWindow?
     private var hostingView: NSHostingView<FloatingPillView>?
     private var hideTask: Task<Void, Never>?
 
-    func show(state: AppState, audioLevel: Float = 0, languageBadge: String? = nil, onCancel: (() -> Void)? = nil) {
+    func show(state: AppState, audioLevel: Float, languageBadge: String?, onCancel: (() -> Void)?) {
         hideTask?.cancel()
 
         let pillView = FloatingPillView(state: state, audioLevel: audioLevel, languageBadge: languageBadge, onCancel: onCancel)
@@ -182,7 +209,7 @@ final class FloatingPillController {
         window?.orderFrontRegardless()
     }
 
-    func hide(after delay: TimeInterval = 0) {
+    func hide(after delay: TimeInterval) {
         hideTask?.cancel()
         if delay > 0 {
             hideTask = Task { @MainActor [weak self] in

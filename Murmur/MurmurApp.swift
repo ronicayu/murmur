@@ -93,6 +93,8 @@ struct MurmurApp: App {
                         // Reset the toggle so subsequent recordings don't fire
                         // the "Language model not installed" pill on every transcription.
                         UserDefaults.standard.set(false, forKey: "autoDetectLanguage")
+                        // Notify the user — silently flipping a preference is a trust-breaker.
+                        coordinator.notifyLIDModelDetached()
                     }
                 }
                 // Listen for settings notification from Transcription window
