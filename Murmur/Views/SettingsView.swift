@@ -20,6 +20,8 @@ struct SettingsView: View {
     @AppStorage("localLLMBaseURL") private var localLLMBaseURL: String = "http://localhost:11434/v1"
     @AppStorage("localLLMModel") private var localLLMModel: String = "qwen2.5:3b-instruct"
     @AppStorage("localLLMAPIKey") private var localLLMAPIKey: String = ""
+    @AppStorage(CorrectionPrompts.glossaryKey) private var correctionGlossary: String = ""
+    @AppStorage(CorrectionPrompts.systemPromptKey) private var correctionSystemPrompt: String = ""
 
     @State private var useRightCommand: Bool = true
     @State private var showDeleteConfirmation = false
@@ -372,7 +374,73 @@ struct SettingsView: View {
                 } else {
                     localLLMConfigFields
                 }
+
+                Divider()
+                    .padding(.vertical, 4)
+
+                glossaryEditor
+                correctionPromptEditor
             }
+        }
+    }
+
+    @ViewBuilder
+    private var glossaryEditor: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Glossary")
+                .font(.subheadline)
+            Text("Comma-separated terms the speaker uses (acronyms, jargon, code-switched words). Treated as authoritative spellings — verbatim hits stay, near-miss mistranscriptions are snapped to these spellings.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("OKR, shipping, 对齐, k8s", text: $correctionGlossary)
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+
+    @ViewBuilder
+    private var correctionPromptEditor: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Correction prompt")
+                    .font(.subheadline)
+                Spacer()
+                Button("Reset to default") {
+                    correctionSystemPrompt = ""
+                }
+                .controlSize(.small)
+                .help("Restore the built-in default prompt")
+            }
+            Text("Advanced. Sent to the correction model as the system message. Leave empty to use the built-in default.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextEditor(text: $correctionSystemPrompt)
+                .font(.system(.body, design: .monospaced))
+                .frame(minHeight: 160, maxHeight: 240)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
+                )
+            promptCharacterCount
+        }
+        .padding(.top, 6)
+    }
+
+    @ViewBuilder
+    private var promptCharacterCount: some View {
+        let count = correctionSystemPrompt.count
+        let isOver = count > 4000
+        let isEffectivelyEmpty = correctionSystemPrompt
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        HStack {
+            Text(isEffectivelyEmpty ? "Using built-in default" : "Custom prompt")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text("\(count) / 4000")
+                .font(.caption2)
+                .foregroundStyle(isOver ? .red : .secondary)
         }
     }
 
