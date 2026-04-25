@@ -80,8 +80,18 @@ final class AppCoordinator: ObservableObject {
     /// launch (rule-based; no download gate in v0.3.0).
     var cleanup: (any TranscriptionCleanup)?
 
+    /// Optional ASR error-correction service. When non-nil and the
+    /// `correctTranscription` UserDefault is on, runs BEFORE `cleanup` on the
+    /// raw transcribed text. MurmurApp wires `FoundationModelsCorrector` on
+    /// macOS 26+ with Apple Intelligence available, `NoOpCorrector` otherwise.
+    var correction: (any TranscriptionCorrection)?
+
     private var cleanupEnabled: Bool {
         UserDefaults.standard.bool(forKey: "cleanupTranscription")
+    }
+
+    private var correctionEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "correctTranscription")
     }
 
     /// Minimum softmax confidence required to trust a detected language. Below
@@ -684,9 +694,10 @@ final class AppCoordinator: ObservableObject {
                 return try await self.transcription.transcribe(audioURL: wav, language: lang)
             }
 
-            // Post-transcription cleanup (v0.3.0: rule-based EN, passthrough for other langs).
-            // 250 ms hard cap — on timeout or any error, fall back to raw text silently.
-            let textToInject = await applyCleanupIfEnabled(text: result.text, language: lang)
+            // Pipeline: transcribe → correction (LLM, 2.5 s cap) → cleanup (rules, 250 ms cap) → inject.
+            // Each step silently falls back to its input on timeout or error.
+            let corrected = await applyCorrectionIfEnabled(text: result.text, language: lang)
+            let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
 
             transition(to: .injecting)
             pill.show(state: .injecting)
@@ -746,8 +757,30 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    /// Runs the ASR-error correction service if the toggle is on and a service
+    /// is wired in. Silent fallback to `rawText` on timeout, throw, toggle-off,
+    /// or if the safety rails in `TranscriptionCorrection` reject the candidate.
+    /// Generative LLM inference is given a longer budget than rule-based cleanup.
+    private func applyCorrectionIfEnabled(text rawText: String, language: String) async -> String {
+        guard correctionEnabled, let correction else { return rawText }
+        do {
+            let corrected = try await withTimeout(seconds: Self.correctionTimeoutSeconds, operation: "correction") {
+                try await correction.correct(rawText, language: language)
+            }
+            return corrected
+        } catch {
+            Self.log.warning("Correction failed, using raw text: \(String(describing: error), privacy: .public)")
+            return rawText
+        }
+    }
+
     /// Hard cap for post-transcription cleanup (250 ms per spec).
     private static let cleanupTimeoutSeconds: TimeInterval = 0.25
+
+    /// Hard cap for ASR-error correction. 2.5 s accommodates Apple Foundation
+    /// Models first-token + generation on M-series; shorter would cause a
+    /// fallback on nearly every invocation when the session is cold.
+    private static let correctionTimeoutSeconds: TimeInterval = 2.5
 
 #if DEBUG
     /// Testable entry-point that bypasses audio I/O. Exercises the transcribe →
@@ -759,7 +792,8 @@ final class AppCoordinator: ObservableObject {
                 return try await self.transcription.transcribe(audioURL: wav, language: lang)
             }
 
-            let textToInject = await applyCleanupIfEnabled(text: result.text, language: lang)
+            let corrected = await applyCorrectionIfEnabled(text: result.text, language: lang)
+            let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
 
             // Skip real injection in tests — just record what would be injected.
             lastTranscription = textToInject

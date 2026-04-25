@@ -15,6 +15,7 @@ struct SettingsView: View {
     @AppStorage("streamingFocusAbandonSeconds") private var focusAbandonSeconds: Double = 10.0
     @AppStorage("undoAfterTranscription") private var undoAfterTranscription: Bool = false
     @AppStorage("cleanupTranscription") private var cleanupTranscription: Bool = false
+    @AppStorage("correctTranscription") private var correctTranscription: Bool = false
 
     @State private var useRightCommand: Bool = true
     @State private var showDeleteConfirmation = false
@@ -312,6 +313,10 @@ struct SettingsView: View {
                 lidModelRow
             }
 
+            Section("Transcription Correction") {
+                transcriptionCorrectionRow
+            }
+
             Section("Transcription Cleanup") {
                 transcriptionCleanupRow
             }
@@ -389,6 +394,22 @@ struct SettingsView: View {
                     .lineLimit(2)
             } else if case .verifying = state {
                 Text("Verifying…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var transcriptionCorrectionRow: some View {
+        LabeledContent {
+            Toggle("", isOn: $correctTranscription)
+                .labelsHidden()
+                .toggleStyle(.switch)
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Correct transcription errors")
+                Text("Uses Apple's on-device model to fix homophone mistakes and phonetic errors while preserving your original meaning. Adds up to 2.5 s; falls back to the raw transcription on timeout. Requires macOS 26 and Apple Intelligence. V1 full-pass only — streaming is bypassed.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
