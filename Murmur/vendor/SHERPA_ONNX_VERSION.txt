@@ -1,0 +1,9 @@
+v1.12.40
+https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.40/sherpa-onnx-v1.12.40-macos-xcframework-static.tar.bz2
+
+Update procedure:
+1. Replace the tarball URL above.
+2. Re-run the download/extract steps from this plan's Task 1.
+3. Re-add Murmur/vendor/sherpa-onnx.xcframework/macos-arm64_x86_64/Headers/module.modulemap (Task 2).
+4. Replace Murmur/Services/Vendor/SherpaOnnx.swift from the matching tag (Task 3) and re-add `import SherpaOnnxC`.
+5. swift test --filter FireRedTranscriptionServiceTests
