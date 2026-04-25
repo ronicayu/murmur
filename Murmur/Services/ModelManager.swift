@@ -254,6 +254,17 @@ final class ModelManager: ObservableObject {
     /// attempted-but-reverted switches.
     let committedBackendChange = PassthroughSubject<ModelBackend, Never>()
 
+    /// Whether to route Chinese audio to FireRed when the active backend is a
+    /// Cohere variant. OFF by default. Persisted in UserDefaults under
+    /// `"useFireRedForChinese"`. Callers MUST go through `setUseFireRedForChinese(_:)`
+    /// — direct assignment is intentionally not exposed so the gating logic
+    /// (download-active, model-not-downloaded) runs every time.
+    @Published private(set) var useFireRedForChinese: Bool
+
+    /// Emits when `setUseFireRedForChinese(_:)` actually commits a change.
+    /// Subscribers (e.g. AppCoordinator) can re-evaluate the routing function.
+    let committedUseFireRedChange = PassthroughSubject<Bool, Never>()
+
     /// Attempt to switch the active backend.
     ///
     /// - Returns: `true` if the switch was accepted and persisted; `false` if a
@@ -274,6 +285,34 @@ final class ModelManager: ObservableObject {
         UserDefaults.standard.set(backend.rawValue, forKey: "modelBackend")
         committedBackendChange.send(backend)
         refreshState()
+        return true
+    }
+
+    /// Attempt to set the FireRed-for-Chinese toggle.
+    ///
+    /// - Parameter newValue: desired toggle state.
+    /// - Returns: `true` if the change was accepted and persisted; `false` if:
+    ///   - a download or verification is in progress (newValue=true rejected), OR
+    ///   - newValue=true but the FireRed model is not on disk (caller must
+    ///     trigger a `download(for: .fireRed)` first).
+    @discardableResult
+    func setUseFireRedForChinese(_ newValue: Bool) -> Bool {
+        guard newValue != useFireRedForChinese else { return true }
+
+        if newValue == true {
+            guard !isDownloadActive else {
+                logger.warning("Refused FireRed toggle ON — download in progress")
+                return false
+            }
+            guard isModelDownloaded(for: .fireRed) else {
+                logger.warning("Refused FireRed toggle ON — model not downloaded")
+                return false
+            }
+        }
+
+        useFireRedForChinese = newValue
+        UserDefaults.standard.set(newValue, forKey: "useFireRedForChinese")
+        committedUseFireRedChange.send(newValue)
         return true
     }
 
@@ -499,6 +538,22 @@ final class ModelManager: ObservableObject {
         // Assign directly here — we are in init, no guard needed, and setActiveBackend
         // is not callable before self is fully initialized.
         self.activeBackend = saved
+
+        // Read persisted toggle, but downgrade to OFF if the FireRed model is
+        // not actually on disk — guards against stale state for users who
+        // deleted the model directory manually. When we downgrade, also clear
+        // the UserDefaults key so the persisted state matches the in-memory
+        // state and subsequent reads don't see a stale `true`.
+        let persistedToggle = UserDefaults.standard.bool(forKey: "useFireRedForChinese")
+        let fireRedDir = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(ModelBackend.fireRed.modelSubdirectory)
+        let fireRedPresent = FileManager.default.fileExists(atPath: fireRedDir.path)
+        let effectiveToggle = persistedToggle && fireRedPresent
+        if persistedToggle && !effectiveToggle {
+            UserDefaults.standard.set(false, forKey: "useFireRedForChinese")
+        }
+        self.useFireRedForChinese = effectiveToggle
 
         // One-time migration: move the old shared "modelConfigHash" key to the
         // per-backend key so that existing hash verifications keep working.
