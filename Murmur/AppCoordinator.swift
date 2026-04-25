@@ -74,11 +74,11 @@ final class AppCoordinator: ObservableObject {
     let audioFeedback: AudioFeedbackService
     let pill: any PillControlling
 
-    /// Optional audio-based language identifier. When nil or when the
-    /// `autoDetectLanguage` default is off, language resolution falls through
-    /// to the synchronous input-source heuristic. Injected by MurmurApp once
-    /// the auxiliary LID model has been downloaded.
-    var lid: (any LanguageIdentifying)?
+    /// Legacy slot — Whisper-tiny LID was removed in favour of Cohere-echo
+    /// (see `transcribeWithAutoDetectIfNeeded`). Kept to avoid breaking the
+    /// public surface during the deprecation window. Always nil at runtime.
+    /// TODO(v0.4): delete when no external code references it.
+    var lid: Any? = nil
 
     /// Optional post-transcription cleanup service. When non-nil and the
     /// `cleanupTranscription` UserDefault is on, called after V1 transcription
@@ -145,11 +145,16 @@ final class AppCoordinator: ObservableObject {
         UserDefaults.standard.bool(forKey: "correctTranscription")
     }
 
-    /// Minimum softmax confidence required to trust a detected language. Below
-    /// this threshold we fall back to the manual Picker (or "auto" heuristic),
-    /// so a brief grunt or multilingual utterance does not flip to the wrong
-    /// language. Tunable from real-world logs — see .public LID log lines.
-    private static let lidConfidenceThreshold: Float = 0.60
+    /// Map a post-hoc text-based `DetectedLanguage` (what Cohere actually
+    /// produced) back to a Cohere language code. Returns nil for `.unknown` —
+    /// caller should keep the current language hint.
+    private static func cohereCode(for detected: DetectedLanguage) -> String? {
+        switch detected {
+        case .english: return "en"
+        case .chinese: return "zh"
+        case .unknown: return nil
+        }
+    }
 
     // MARK: - V3 Streaming (feature-flag gated)
 
@@ -335,7 +340,10 @@ final class AppCoordinator: ObservableObject {
             self.transition(to: .transcribing)
             self.pill.show(state: .transcribing)
 
-            let lang = await self.resolveTranscriptionLanguageAsync(audioURL: audioURL)
+            // For long uploads we keep things simple: trust the IME / picker
+            // language. Auto-detect-by-retry would mean transcribing the whole
+            // file twice on a mismatch, which is too costly for long audio.
+            let lang = self.resolveTranscriptionLanguage()
 
             do {
                 let result = try await self.transcription.transcribeLong(
@@ -734,18 +742,13 @@ final class AppCoordinator: ObservableObject {
             let wav = try await withTimeout(seconds: 5, operation: "stop recording") {
                 try await self.audio.stopRecording()
             }
-            let lang = await resolveTranscriptionLanguageAsync(audioURL: wav)
-            // If LID overrode the IME language, update the badge so the pill
-            // reflects what will actually be transcribed before the result arrives.
-            let storedSetting = UserDefaults.standard.string(forKey: Self.transcriptionLanguageKey) ?? "auto"
-            let resolvedBadge = LanguageBadge.badgeText(resolvedCode: lang, storedSetting: storedSetting)
-            if resolvedBadge != activeBadge {
-                activeBadge = resolvedBadge
-                pill.show(state: .transcribing, languageBadge: activeBadge)
-            }
-            let result = try await withTimeout(seconds: 120, operation: "transcription") {
-                return try await self.transcription.transcribe(audioURL: wav, language: lang)
-            }
+            // Initial guess from the IME / Settings picker. When auto-detect is
+            // on we may end up re-transcribing if Cohere reports a different
+            // language for the output text — see transcribeWithAutoDetectIfNeeded.
+            let initialLang = resolveTranscriptionLanguage()
+            let result = try await transcribeWithAutoDetectIfNeeded(wav: wav, initialLang: initialLang)
+            // The "actual" language used for this transcription, post-retry.
+            let lang = Self.cohereCode(for: result.language) ?? initialLang
 
             // Pipeline: transcribe → correction (LLM, 2.5 s cap) → cleanup (rules, 250 ms cap) → inject.
             // Each step silently falls back to its input on timeout or error.
@@ -1035,62 +1038,62 @@ final class AppCoordinator: ObservableObject {
         UserDefaults.standard.bool(forKey: "autoDetectLanguage")
     }
 
-    /// Async language resolution for the non-streaming path. When the user has
-    /// enabled audio-based detection AND an LID service is available, runs the
-    /// LID model on the recorded audio and trusts the result above
-    /// `lidConfidenceThreshold` IFF the detected language is in Cohere's set.
-    /// Otherwise falls back to the synchronous resolver (Picker value or
-    /// input-source "auto" mapping).
+    /// Transcribe with optional Cohere-echo auto-detect. Replaces the old
+    /// pre-flight Whisper-tiny LID step.
     ///
-    /// Streaming V3 intentionally does not call this — pre-roll LID would
-    /// defeat its first-token latency target.
-    func resolveTranscriptionLanguageAsync(audioURL: URL) async -> String {
-        let fallback = resolveTranscriptionLanguage()
-        guard autoDetectLanguageEnabled else { return fallback }
-        guard let lid else {
-            // User opted into detection but the LID model is not available.
-            // Surface a non-blocking toast — plan deliberately avoids silent
-            // fallback so the user can take action — and proceed with the
-            // Picker value for this one transcription.
-            Self.log.warning("LID enabled but model not loaded; using fallback=\(fallback, privacy: .public)")
-            pill.show(state: .error(.transcriptionFailed("Language model not installed")))
-            pill.hide(after: Self.errorAutoRecoverySeconds)
-            return fallback
+    /// Flow:
+    /// 1. Transcribe once with `initialLang` (the IME guess or Settings picker).
+    /// 2. If `autoDetectLanguage` is on and the post-hoc text-based language
+    ///    on the result differs from `initialLang`, the constraint was wrong
+    ///    — re-transcribe with the detected language.
+    /// 3. Otherwise return the first result.
+    ///
+    /// Cost: zero extra latency when the IME guess was right; one extra
+    /// transcription pass when it was wrong. Encoder dominates pass cost so
+    /// the retry is roughly 1× the base latency, not negligible — but only
+    /// fires on the rare cases that previously produced garbage output.
+    ///
+    /// Updates `activeBadge` if the language changed so the pill reflects
+    /// what the user is actually getting.
+    private func transcribeWithAutoDetectIfNeeded(
+        wav: URL,
+        initialLang: String
+    ) async throws -> TranscriptionResult {
+        let result1 = try await withTimeout(seconds: 120, operation: "transcription") {
+            try await self.transcription.transcribe(audioURL: wav, language: initialLang)
+        }
+        guard autoDetectLanguageEnabled else { return result1 }
+
+        // `result1.language` is what the transcription engine reports based on
+        // the OUTPUT TEXT (`NativeTranscriptionService.detectLanguage`). When
+        // it disagrees with the constrained input language, that's the signal
+        // that the constraint was wrong.
+        guard let detectedCode = Self.cohereCode(for: result1.language),
+              detectedCode != initialLang else {
+            Self.log.info("auto-detect: initialLang=\(initialLang, privacy: .public) matched \(String(describing: result1.language), privacy: .public) — no retry")
+            return result1
+        }
+
+        Self.log.info("auto-detect: initialLang=\(initialLang, privacy: .public) → detected=\(detectedCode, privacy: .public); re-transcribing")
+
+        // Visibly update the badge during the retry so the user sees the
+        // correction in flight (e.g. EN· → ZH·).
+        let storedSetting = UserDefaults.standard.string(forKey: Self.transcriptionLanguageKey) ?? "auto"
+        let updatedBadge = LanguageBadge.badgeText(resolvedCode: detectedCode, storedSetting: storedSetting)
+        if updatedBadge != activeBadge {
+            activeBadge = updatedBadge
+            pill.show(state: .transcribing, languageBadge: activeBadge)
         }
 
         do {
-            let result = try await lid.identify(audioURL: audioURL)
-            let mapped = CohereLanguageMapping.map(result.code)
-            Self.log.info("LID: detected=\(result.code, privacy: .public) confidence=\(String(format: "%.2f", result.confidence), privacy: .public) mapped=\(mapped ?? "nil", privacy: .public) threshold=\(String(format: "%.2f", Self.lidConfidenceThreshold), privacy: .public) fallback=\(fallback, privacy: .public)")
-
-            if let mapped, result.confidence >= Self.lidConfidenceThreshold {
-                return mapped
+            let result2 = try await withTimeout(seconds: 120, operation: "transcription-retry") {
+                try await self.transcription.transcribe(audioURL: wav, language: detectedCode)
             }
-            return fallback
-        } catch MurmurError.silenceDetected {
-            // Silence is a normal condition (accidental press, nothing said).
-            // Fall through quietly — no pill error, no user action required.
-            Self.log.info("LID: silent audio, using fallback=\(fallback, privacy: .public)")
-            return fallback
+            return result2
         } catch {
-            // LID model load/inference failure is never fatal to transcription;
-            // log and fall back so the user still gets text in their picked
-            // language.
-            Self.log.error("LID inference failed, falling back to \(fallback, privacy: .public): \(String(describing: error), privacy: .public)")
-            pill.show(state: .error(.transcriptionFailed("Language detection unavailable")))
-            pill.hide(after: Self.errorAutoRecoverySeconds)
-            return fallback
+            Self.log.warning("auto-detect retry failed, using first result: \(String(describing: error), privacy: .public)")
+            return result1
         }
-    }
-
-    /// Called by MurmurApp when the LID auxiliary model transitions out of .ready
-    /// (deleted, corrupted). Posts a pill toast so the user knows their
-    /// auto-detect preference was silently disabled.
-    /// Only fires on a real transition (lid was non-nil before), not on initial
-    /// subscription when the model was never downloaded.
-    func notifyLIDModelDetached() {
-        pill.show(state: .error(.transcriptionFailed("Auto-detect disabled — language model was removed")))
-        pill.hide(after: 4)
     }
 
     /// When language is "auto", resolve to the active input method's language.

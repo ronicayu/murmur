@@ -23,15 +23,13 @@ struct MurmurApp: App {
             ts = TranscriptionService(modelPath: modelPath)
         }
         let coord = AppCoordinator(transcription: ts)
-        // If the LID model is already on disk from a prior run, wire up the
-        // identifier so the first autoDetect-enabled transcription doesn't
-        // trigger a cold download.
-        if let lidPath = mm.auxiliaryModelPath(.lidWhisperTiny) {
-            coord.lid = LanguageIdentificationService(modelPath: lidPath)
-        }
+        // Whisper-tiny LID was removed in favour of Cohere-echo retry — see
+        // AppCoordinator.transcribeWithAutoDetectIfNeeded. The on-disk
+        // ~/Library/Application Support/Murmur/Models-LID/ directory is no
+        // longer read by the app; users can delete it manually to reclaim
+        // ~40 MB. We do not auto-delete to avoid surprising data loss.
+
         // v0.3.0: rule-based cleanup service — always available, no download gate.
-        // v0.3.1 will swap this for PunctuationCleanupService backed by the ONNX
-        // classifier once AuxiliaryModel.punctuationCleanup lands.
         coord.cleanup = PunctuationCleanupService()
 
         // Wire the ASR-error correction engine chosen by Settings. Supports
@@ -88,25 +86,6 @@ struct MurmurApp: App {
                     // Preload model immediately after download completes
                     if newState == .ready {
                         coordinator.preloadModelInBackground()
-                    }
-                }
-                .onReceive(modelManager.$auxiliaryStates) { states in
-                    // Attach / detach the LID service as the auxiliary model
-                    // transitions between .ready and anything else (downloading,
-                    // deleted, corrupt). Doing this via state subscription keeps
-                    // the coordinator decoupled from ModelManager internals.
-                    let lidReady = states[.lidWhisperTiny] == .ready
-                        && modelManager.auxiliaryModelPath(.lidWhisperTiny) != nil
-                    if lidReady, coordinator.lid == nil,
-                       let path = modelManager.auxiliaryModelPath(.lidWhisperTiny) {
-                        coordinator.lid = LanguageIdentificationService(modelPath: path)
-                    } else if !lidReady, coordinator.lid != nil {
-                        coordinator.lid = nil
-                        // Reset the toggle so subsequent recordings don't fire
-                        // the "Language model not installed" pill on every transcription.
-                        UserDefaults.standard.set(false, forKey: "autoDetectLanguage")
-                        // Notify the user — silently flipping a preference is a trust-breaker.
-                        coordinator.notifyLIDModelDetached()
                     }
                 }
                 // Listen for settings notification from Transcription window

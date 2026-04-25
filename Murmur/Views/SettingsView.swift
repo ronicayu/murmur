@@ -121,7 +121,7 @@ struct SettingsView: View {
                     .frame(width: 160)
                 }
                 if autoDetectLanguage {
-                    Text("Used when audio detection is unsure.")
+                    Text("Used as the initial guess. If the transcription comes back in another language, it's automatically re-transcribed.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -129,20 +129,14 @@ struct SettingsView: View {
                     Toggle("", isOn: $autoDetectLanguage)
                         .labelsHidden()
                         .toggleStyle(.switch)
-                        .disabled(!modelManager.isAuxiliaryDownloaded(.lidWhisperTiny))
-                        .onChange(of: autoDetectLanguage) { _, newValue in
-                            if newValue && !modelManager.isAuxiliaryDownloaded(.lidWhisperTiny) {
-                                Task { try? await modelManager.downloadAuxiliary(.lidWhisperTiny) }
-                            }
-                        }
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Auto-detect language from audio")
-                        Text("Uses a separate small model (~40 MB). Overrides manual selection when confident.")
+                        Text("Auto-detect language")
+                        Text("If the transcription engine reports a different language than the initial guess (above), Murmur re-transcribes once with the detected language. No extra model download.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if streamingInputEnabled {
-                            Text("Streaming voice input uses the active input source — audio detection runs on full-pass transcription only.")
+                            Text("Streaming voice input always uses the language above — re-transcribe applies to V1 full-pass only.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -313,10 +307,6 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Language Detection") {
-                lidModelRow
-            }
-
             Section("Transcription Correction") {
                 transcriptionCorrectionRow
             }
@@ -346,62 +336,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-    }
-
-    @ViewBuilder
-    private var lidModelRow: some View {
-        let state = modelManager.auxiliaryState(for: .lidWhisperTiny)
-        let isDownloaded = modelManager.isAuxiliaryDownloaded(.lidWhisperTiny)
-        let isBusy: Bool = {
-            if case .downloading = state { return true }
-            if case .verifying = state { return true }
-            return false
-        }()
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(AuxiliaryModel.lidWhisperTiny.displayName)
-                        .font(.body)
-                    Text(AuxiliaryModel.lidWhisperTiny.sizeDescription
-                        + (isDownloaded ? " · Downloaded" : ""))
-                        .font(.caption)
-                        .foregroundStyle(isDownloaded ? .green : .secondary)
-                }
-                Spacer()
-                if isDownloaded {
-                    Button("Delete", role: .destructive) {
-                        try? modelManager.deleteAuxiliary(.lidWhisperTiny)
-                    }
-                    .buttonStyle(.bordered)
-                } else if !isBusy {
-                    Button("Download") {
-                        Task { try? await modelManager.downloadAuxiliary(.lidWhisperTiny) }
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-            }
-            if case .downloading(_, let speed) = state {
-                ProgressView().progressViewStyle(.linear)
-                HStack {
-                    if let msg = modelManager.auxiliaryStatusMessage[.lidWhisperTiny], !msg.isEmpty {
-                        Text(msg)
-                    }
-                    Spacer()
-                    if speed > 0 { Text(formatSpeed(speed)) }
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            } else if case .error(let msg) = state {
-                Text(msg)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            } else if case .verifying = state {
-                Text("Verifying…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
     }
 
     @ViewBuilder
