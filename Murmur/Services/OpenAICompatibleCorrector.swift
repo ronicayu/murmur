@@ -39,14 +39,23 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
         guard !trimmed.isEmpty else { return text }
         guard trimmed.count >= 4 else { return text }
 
+        let glossary = CorrectionPrompts.currentGlossary()
         let request = try Self.makeRequest(
             baseURL: baseURL,
             modelName: modelName,
             apiKey: apiKey,
             language: language,
-            glossary: CorrectionPrompts.currentGlossary(),
+            glossary: glossary,
             trimmed: trimmed
         )
+
+        // Debug log of the outgoing request — useful for verifying that the
+        // glossary actually reaches the server and the prompt looks right.
+        // Stream with: `log stream --predicate 'subsystem == "com.murmur.app"
+        // AND category == "correction"' --level debug`. Body previews are
+        // capped to keep Console readable; switch to .debug level so default
+        // Console output is unaffected.
+        Self.logOutgoingRequest(request: request, language: language, glossary: glossary, trimmed: trimmed)
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -143,6 +152,45 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
     }
 
     // MARK: - Logging
+
+    /// Prints the outgoing chat-completion payload at `.debug` level so power
+    /// users can verify the system prompt and glossary line. Truncates the
+    /// system prompt preview because users typically only want to confirm
+    /// length / overall shape, not re-read the full body each time.
+    private static func logOutgoingRequest(
+        request: URLRequest,
+        language: String,
+        glossary: [String],
+        trimmed: String
+    ) {
+        let endpoint = request.url?.absoluteString ?? "<no url>"
+        let glossaryPreview = glossary.isEmpty ? "(none)" : glossary.joined(separator: ", ")
+        let trimmedPreview = String(trimmed.prefix(200))
+
+        var systemPreview = "<missing>"
+        var userPreview = "<missing>"
+        if let body = request.httpBody,
+           let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+           let messages = json["messages"] as? [[String: String]] {
+            if let sys = messages.first(where: { $0["role"] == "system" })?["content"] {
+                systemPreview = String(sys.prefix(120)) + (sys.count > 120 ? "…" : "")
+            }
+            if let usr = messages.first(where: { $0["role"] == "user" })?["content"] {
+                // User message is short enough to log in full — that is the
+                // line where Glossary needs to be visible to the LLM.
+                userPreview = usr
+            }
+        }
+
+        log.debug("""
+        correction[local] outgoing → \(endpoint, privacy: .public)
+          language=\(language, privacy: .public)
+          glossary=[\(glossaryPreview, privacy: .public)]
+          rawIn=\"\(trimmedPreview, privacy: .public)\" (len=\(trimmed.count, privacy: .public))
+          system=\"\(systemPreview, privacy: .public)\"
+          user=\"\(userPreview, privacy: .public)\"
+        """)
+    }
 
     private static func logOutcome(raw: String, candidate: String, final: String) {
         let outcome: String

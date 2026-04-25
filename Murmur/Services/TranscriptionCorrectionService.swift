@@ -254,6 +254,22 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
         Glossary: \(glossaryLine)
         Raw transcription: \(trimmed)
         """
+
+        // Debug log — symmetric with OpenAICompatibleCorrector. Confirms
+        // language + glossary made it into the user message. View with
+        // `log stream --predicate 'subsystem == "com.murmur.app" AND
+        // category == "correction"' --level debug`.
+        let trimmedPreview = String(trimmed.prefix(200))
+        let systemPreview = String(CorrectionPrompts.current.prefix(120))
+            + (CorrectionPrompts.current.count > 120 ? "…" : "")
+        Self.log.debug("""
+        correction[apple] outgoing → on-device
+          language=\(language, privacy: .public)
+          glossary=[\(glossaryLine, privacy: .public)]
+          rawIn=\"\(trimmedPreview, privacy: .public)\" (len=\(trimmed.count, privacy: .public))
+          system=\"\(systemPreview, privacy: .public)\"
+          user=\"\(prompt, privacy: .public)\"
+        """)
         let options = GenerationOptions(
             sampling: .greedy,
             temperature: 0.0,
