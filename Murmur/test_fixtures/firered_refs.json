@@ -1,0 +1,11 @@
+{
+  "test_chinese_en_wav_zh": {
+    "text": "所有只要处理 data不管你是做 machine learning做 deep learning做 data analytics做 data science也好 scientist也好通通都要都做的基本功哦那 again先先对有一些也许对",
+    "audio_dur_s": 14.749,
+    "comment": "FireRedASR2-AED int8 (sherpa-onnx) output, lowercased. Captured from the spike at ~/work/firered-spike/RESULTS.md."
+  },
+  "test_chinese_wav_zh": {
+    "text_partial": "你好",
+    "comment": "Existing test_chinese.wav (~3.7 s, '你好呀,现在可以了吗?'). Just assert FireRed produces non-empty output that contains '你好' — the rest of the punctuation/space style is char-level identical to the spike's runs but we don't pin it because this fixture predates the FireRed effort."
+  }
+}
