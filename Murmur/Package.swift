@@ -13,15 +13,23 @@ let package = Package(
         .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", from: "1.20.0"),
     ],
     targets: [
+        .binaryTarget(
+            name: "SherpaOnnxC",
+            path: "vendor/sherpa-onnx.xcframework"
+        ),
         .executableTarget(
             name: "Murmur",
             dependencies: [
                 "HotKey",
                 .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
+                "SherpaOnnxC",
             ],
             path: ".",
             exclude: ["Package.swift", "Scripts", "Tests"],
-            resources: [.copy("Resources")]
+            resources: [.copy("Resources")],
+            linkerSettings: [
+                .linkedLibrary("c++"),
+            ]
         ),
         .testTarget(
             name: "MurmurTests",
