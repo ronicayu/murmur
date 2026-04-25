@@ -27,13 +27,16 @@ final class ManifestBuildAndValidationTests: XCTestCase {
         UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
         manager = ModelManager()
 
-        // Guard: skip if a real model is installed — we will write into the same directory.
-        try XCTSkipIf(
-            manager.modelPath(for: .onnx) != nil,
-            "Real ONNX model present — skipping ManifestBuildAndValidationTests to protect it."
-        )
+        // Redirect the ONNX model directory to an isolated temp dir so nothing
+        // touches ~/Library/Application Support/Murmur/Models-ONNX/. This
+        // replaces the earlier XCTSkipIf-on-real-model guard — tests now
+        // always run and never risk deleting a user's installed model.
+        tempDir = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("manifest-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        manager.__testing_setModelDirectory(tempDir, for: .onnx)
 
-        tempDir = manager.modelDirectory(for: .onnx)
         let onnxSub = tempDir.appendingPathComponent("onnx")
         try FileManager.default.createDirectory(at: onnxSub, withIntermediateDirectories: true)
     }
@@ -219,12 +222,14 @@ final class ManifestVerifyCorruptionTests: XCTestCase {
         UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
         manager = ModelManager()
 
-        try XCTSkipIf(
-            manager.modelPath(for: .onnx) != nil,
-            "Real ONNX model present — skipping ManifestVerifyCorruptionTests to protect it."
-        )
+        // Redirect to an isolated temp dir before any write — see
+        // ManifestBuildAndValidationTests for rationale.
+        tempDir = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("manifest-corrupt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        manager.__testing_setModelDirectory(tempDir, for: .onnx)
 
-        tempDir = manager.modelDirectory(for: .onnx)
         // Plant the three ONNX required files so verify() doesn't fail at the
         // existence-check stage before reaching hash comparison.
         let onnxSub = tempDir.appendingPathComponent("onnx")
@@ -329,17 +334,23 @@ final class ManifestMigrationTests: XCTestCase {
         try super.setUpWithError()
         UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
 
-        // We need to plant files BEFORE creating ModelManager so migration runs
-        // as part of init(). Compute the path directly.
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        tempDir = appSupport.appendingPathComponent(ModelBackend.onnx.modelSubdirectory)
-
-        // Guard: if a real model is installed, skip to avoid destroying it.
-        let probingManager = ModelManager()
-        let realModelExists = probingManager.modelPath(for: .onnx) != nil
-        try XCTSkipIf(realModelExists,
-            "Real ONNX model present — skipping ManifestMigrationTests to protect it.")
+        // Create an isolated temp dir and redirect the manager to it BEFORE
+        // we call `migrateToManifestIfNeeded(for:)` in each test. The previous
+        // strategy — using the real Application Support path with an
+        // XCTSkipIf(modelPath != nil) guard — was unsafe: if a user had
+        // downloaded the model via HuggingFace without Murmur's manifest.json
+        // yet written, `modelPath` returns nil, the skip didn't fire, and the
+        // tests' `removeItem(at: tempDir)` wiped the real model directory.
+        //
+        // This version: always temp-dir, no skip needed, and we exercise the
+        // migration logic post-init by calling `migrateToManifestIfNeeded`
+        // directly (the init-time invocation ran against a still-empty dir).
+        manager = ModelManager()
+        tempDir = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("migration-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        manager.__testing_setModelDirectory(tempDir, for: .onnx)
 
         // Plant required files without a manifest to simulate a pre-manifest install.
         let onnxSub = tempDir.appendingPathComponent("onnx")
@@ -351,7 +362,7 @@ final class ManifestMigrationTests: XCTestCase {
             try Data("pre-manifest content for \(file)".utf8).write(to: url)
         }
 
-        // Remove any manifest that may have been written by a prior test.
+        // Remove any manifest that may have leaked in.
         let manifestURL = tempDir.appendingPathComponent(ModelManager.ModelManifest.filename)
         try? FileManager.default.removeItem(at: manifestURL)
     }
@@ -367,16 +378,17 @@ final class ManifestMigrationTests: XCTestCase {
     // MARK: 5 – Migration generates manifest and sets .ready
 
     func test_migration_generatesManifest_fromExistingFiles() throws {
-        // Act — creating ModelManager triggers migrateToManifestIfNeeded in init()
-        manager = ModelManager()
+        // Act — explicit migration call post-init (init-time invocation was
+        // before the redirect, so it ran against an empty real directory and
+        // was effectively a no-op).
+        manager.migrateToManifestIfNeeded(for: .onnx)
 
         let manifestURL = tempDir.appendingPathComponent(ModelManager.ModelManifest.filename)
 
-        // Assert — manifest was written during init
+        // Assert — manifest was written during migration
         XCTAssertTrue(FileManager.default.fileExists(atPath: manifestURL.path),
                       "Migration must write manifest.json when required files exist but no manifest does")
 
-        // Verify the manifest contains the planted files
         let manifest = manager.loadManifest(for: .onnx)
         XCTAssertNotNil(manifest, "loadManifest must return the newly-written manifest")
         XCTAssertGreaterThan(manifest?.files.count ?? 0, 0,
@@ -384,50 +396,46 @@ final class ManifestMigrationTests: XCTestCase {
     }
 
     func test_migration_setsStateReady_afterManifestGenerated() throws {
-        // Act — ModelManager init runs migration then refreshState
-        manager = ModelManager()
+        // Act — explicit migration + refreshState.
+        manager.migrateToManifestIfNeeded(for: .onnx)
+        manager.refreshState()
 
-        // Assert — after migration, refreshState() finds a valid manifest and sets .ready
         XCTAssertEqual(manager.state, .ready,
                        "State must be .ready after migration writes a valid manifest")
     }
 
     func test_migration_isIdempotent_doesNotOverwriteExistingManifest() throws {
-        // Arrange — run migration once (creates manager which runs migration)
-        manager = ModelManager()
+        // Arrange — run migration once.
+        manager.migrateToManifestIfNeeded(for: .onnx)
         let manifestURL = tempDir.appendingPathComponent(ModelManager.ModelManifest.filename)
 
-        // Capture the manifest's modification date
         let attrs = try FileManager.default.attributesOfItem(atPath: manifestURL.path)
         let firstWriteDate = attrs[.modificationDate] as? Date
 
-        // Wait a brief moment so any re-write would produce a different mtime
         Thread.sleep(forTimeInterval: 0.05)
 
-        // Act — create a second manager (triggers migration again, but manifest exists)
-        let manager2 = ModelManager()
-        _ = manager2
+        // Act — run migration again; manifest exists, must not be rewritten.
+        manager.migrateToManifestIfNeeded(for: .onnx)
 
         let attrs2 = try FileManager.default.attributesOfItem(atPath: manifestURL.path)
         let secondDate = attrs2[.modificationDate] as? Date
 
-        // Assert — manifest was not rewritten
         XCTAssertEqual(firstWriteDate, secondDate,
                        "Migration must be idempotent: must not overwrite an existing manifest")
     }
 
     func test_migration_doesNotRun_whenNoRequiredFilesOnDisk() throws {
-        // Arrange — remove all planted files so nothing qualifies for migration
+        // Arrange — remove all planted files from the tempdir.
         try FileManager.default.removeItem(at: tempDir)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         let manifestURL = tempDir.appendingPathComponent(ModelManager.ModelManifest.filename)
 
-        // Act — create manager; migration should skip (files absent)
-        manager = ModelManager()
+        // Act
+        manager.migrateToManifestIfNeeded(for: .onnx)
 
-        // Assert — no manifest created, state is .notDownloaded
+        // Assert
         XCTAssertFalse(FileManager.default.fileExists(atPath: manifestURL.path),
                        "Migration must not write a manifest when required files are absent")
-        XCTAssertEqual(manager.state, .notDownloaded)
     }
 }
 

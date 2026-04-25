@@ -362,6 +362,12 @@ final class ModelManager: ObservableObject {
             throw CocoaError(.fileReadUnknown)
         }
 
+        // Canonicalise the root path so relative-path stripping works even when
+        // the enumerator yields a symlink-resolved variant (e.g. test tempdirs
+        // where `/var/folders/...` resolves to `/private/var/folders/...`).
+        let rootPath = dir.resolvingSymlinksInPath().path
+        let rootPrefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+
         var entries: [String: ManifestFileEntry] = [:]
         for case let fileURL as URL in enumerator {
             let values = try fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
@@ -374,7 +380,16 @@ final class ModelManager: ObservableObject {
             let hash = SHA256.hash(data: data)
             let hashStr = hash.map { String(format: "%02x", $0) }.joined()
             let size = Int64(values.fileSize ?? 0)
-            let relative = fileURL.path.replacingOccurrences(of: dir.path + "/", with: "")
+            let resolvedPath = fileURL.resolvingSymlinksInPath().path
+            let relative: String
+            if resolvedPath.hasPrefix(rootPrefix) {
+                relative = String(resolvedPath.dropFirst(rootPrefix.count))
+            } else {
+                // Defensive: if the enumerator surfaces an out-of-tree path,
+                // fall back to the filename so the entry still roundtrips
+                // through manifestIsValid rather than being keyed to garbage.
+                relative = fileURL.lastPathComponent
+            }
             entries[relative] = ManifestFileEntry(sha256: hashStr, size: size)
         }
 

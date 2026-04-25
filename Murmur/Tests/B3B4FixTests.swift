@@ -25,16 +25,24 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
     override func setUpWithError() throws {
         try super.setUpWithError()
 
-        // Isolate from real application support by pointing the active backend's
-        // directory at a temp root we control.
-        // Strategy: plant files under the real appSupport path that ModelManager
-        // resolves, then clean them up in tearDown.
-        // (ModelManager.modelDirectory is derived from activeBackend.modelSubdirectory
-        //  and cannot be injected without a test seam — we use the real path.)
-
-        // Force active backend to .onnx to have a known required-files set.
+        // Redirect both .onnx AND .whisper model directories to isolated temp
+        // dirs via `__testing_setModelDirectory`. Several tests below read both
+        // backends' paths; redirecting up-front prevents any accidental writes
+        // to ~/Library/Application Support/Murmur/{Models-ONNX,Models-Whisper}/.
         defaults.set(ModelBackend.onnx.rawValue, forKey: backendKey)
         manager = ModelManager()
+
+        let onnxTemp = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("b3b4-onnx-\(UUID().uuidString)")
+        let whisperTemp = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("b3b4-whisper-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: onnxTemp, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: whisperTemp, withIntermediateDirectories: true)
+        manager.__testing_setModelDirectory(onnxTemp, for: .onnx)
+        manager.__testing_setModelDirectory(whisperTemp, for: .whisper)
+
         _ = manager.setActiveBackend(.onnx)
 
         let dir = manager.modelDirectory(for: .onnx)
@@ -57,11 +65,17 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
         try manager.writeManifest(manifest, for: .onnx)
 
         tempModelRoot = dir
+        whisperTempRoot = whisperTemp
     }
+
+    private var whisperTempRoot: URL!
 
     override func tearDownWithError() throws {
         if let root = tempModelRoot, FileManager.default.fileExists(atPath: root.path) {
             try? FileManager.default.removeItem(at: root)
+        }
+        if let wRoot = whisperTempRoot, FileManager.default.fileExists(atPath: wRoot.path) {
+            try? FileManager.default.removeItem(at: wRoot)
         }
         manager = nil
         try super.tearDownWithError()
@@ -198,16 +212,28 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
 final class ActiveBackendDidSetGuardTests: XCTestCase {
 
     private var manager: ModelManager!
+    private var onnxTempRoot: URL!
     private let defaults = UserDefaults.standard
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         defaults.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
         manager = ModelManager()
+        // Redirect all ONNX model I/O into an isolated temp dir — the tests
+        // below plant files via manager.modelDirectory(for: .onnx) which,
+        // without this redirect, resolves to the live Application Support path.
+        onnxTempRoot = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("activebackend-onnx-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: onnxTempRoot, withIntermediateDirectories: true)
+        manager.__testing_setModelDirectory(onnxTempRoot, for: .onnx)
         _ = manager.setActiveBackend(.onnx)
     }
 
     override func tearDownWithError() throws {
+        if let root = onnxTempRoot, FileManager.default.fileExists(atPath: root.path) {
+            try? FileManager.default.removeItem(at: root)
+        }
         // Restore a known backend
         _ = manager.setActiveBackend(.onnx)
         manager = nil
@@ -418,12 +444,27 @@ final class OnboardingViewModelRepublishTests: XCTestCase {
 final class SetActiveBackendGuardTests: XCTestCase {
 
     private var manager: ModelManager!
+    private var onnxTempRoot: URL!
+    private var whisperTempRoot: URL!
     private var cancellables = Set<AnyCancellable>()
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
         manager = ModelManager()
+        // Defensive redirect: these tests call setActiveBackend/cancelDownload
+        // which in some paths touch the model directory. Point all backends at
+        // temp dirs so nothing can reach the real Application Support.
+        onnxTempRoot = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("setactive-onnx-\(UUID().uuidString)")
+        whisperTempRoot = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("setactive-whisper-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: onnxTempRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: whisperTempRoot, withIntermediateDirectories: true)
+        manager.__testing_setModelDirectory(onnxTempRoot, for: .onnx)
+        manager.__testing_setModelDirectory(whisperTempRoot, for: .whisper)
         // Ensure we start from a known backend
         _ = manager.setActiveBackend(.onnx)
     }
@@ -434,6 +475,8 @@ final class SetActiveBackendGuardTests: XCTestCase {
         manager.__testing_setState(.notDownloaded)
         _ = manager.setActiveBackend(.onnx)
         manager = nil
+        if let root = onnxTempRoot { try? FileManager.default.removeItem(at: root) }
+        if let wRoot = whisperTempRoot { try? FileManager.default.removeItem(at: wRoot) }
         cancellables.removeAll()
         try super.tearDownWithError()
     }
@@ -646,20 +689,18 @@ final class CancelDownloadCleanupRaceTests: XCTestCase {
         UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
         manager = ModelManager()
 
-        // Guard: if a real ONNX model is already installed on this machine, skip
-        // the entire class. Both tests manipulate (and one deletes) the directory
-        // that modelDirectory(for: .onnx) resolves to. Running them against a
-        // pre-existing model would destroy the developer's downloaded model.
-        try XCTSkipIf(
-            manager.modelPath(for: .onnx) != nil,
-            "Real ONNX model present on this machine — skipping CancelDownloadCleanupRaceTests " +
-            "to protect pre-downloaded model files. Run on a machine without the ONNX model installed."
-        )
+        // Redirect the ONNX model directory to an isolated temp dir BEFORE
+        // planting the sentinel. This replaces the earlier XCTSkipIf-on-real-
+        // model guard so the tests run on every machine and cannot touch a
+        // user's pre-downloaded model under ~/Library/Application Support.
+        let redirect = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("cancelrace-onnx-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: redirect, withIntermediateDirectories: true)
+        manager.__testing_setModelDirectory(redirect, for: .onnx)
 
-        // Plant a sentinel file in the real ONNX model directory (as resolved by
-        // ModelManager.modelDirectory(for:)) so we can verify whether removeItem
-        // was called by the cleanup logic. Using the manager's own resolution
-        // guarantees the test observes the same path the cleanup code will operate on.
+        // Plant a sentinel file in the (now-redirected) ONNX model directory so
+        // we can verify whether removeItem was called by the cleanup logic.
         let fm = FileManager.default
         tempModelDir = manager.modelDirectory(for: .onnx)
         try fm.createDirectory(at: tempModelDir, withIntermediateDirectories: true)
@@ -726,14 +767,31 @@ final class CancelDownloadCleanupRaceTests: XCTestCase {
 final class CancelDownloadTests: XCTestCase {
 
     private var manager: ModelManager!
+    private var onnxTempRoot: URL!
+    private var whisperTempRoot: URL!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
         manager = ModelManager()
+        // Defensive redirect for both backends referenced by these tests —
+        // cancelDownload's detached cleanup task could remove the model dir
+        // if a subprocess were ever injected.
+        onnxTempRoot = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("canceldl-onnx-\(UUID().uuidString)")
+        whisperTempRoot = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("canceldl-whisper-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: onnxTempRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: whisperTempRoot, withIntermediateDirectories: true)
+        manager.__testing_setModelDirectory(onnxTempRoot, for: .onnx)
+        manager.__testing_setModelDirectory(whisperTempRoot, for: .whisper)
     }
 
     override func tearDownWithError() throws {
+        if let root = onnxTempRoot { try? FileManager.default.removeItem(at: root) }
+        if let wRoot = whisperTempRoot { try? FileManager.default.removeItem(at: wRoot) }
         manager = nil
         try super.tearDownWithError()
     }
