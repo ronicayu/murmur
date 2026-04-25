@@ -6,6 +6,15 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.3.0] — 2026-04-25 (unreleased)
+
+### Added
+- **Post-transcription cleanup** as an opt-in toggle in Settings → Model. After V1 transcription succeeds and before text is injected, the cleanup service applies rule-based fixes on a 250 ms hard cap; any timeout or error silently falls back to the raw text.
+  - **English:** sentence-initial capitalisation, capitalisation after `.?!` + whitespace, standalone "i" → "I" (word-boundary, no proper-noun gazetteer), terminal period if missing, leading/trailing whitespace trim.
+  - **Chinese:** appends `。` if the text doesn't already end in a recognised CJK or Western terminal (or closing CJK quote/bracket); converts a trailing ASCII `.` `?` `!` to the full-width equivalent (`。` `？` `！`); leaves mid-text ASCII punctuation alone so embedded Latin fragments like "Python 3.11" are preserved.
+  - Japanese, Korean, and any other language code pass through unchanged.
+  - V3 streaming is deliberately excluded from cleanup; only the V1 full-pass path runs it.
+
 ## [0.2.4] — 2026-04-25 (unreleased)
 
 ### Added

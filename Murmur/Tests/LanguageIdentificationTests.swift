@@ -293,10 +293,13 @@ final class AuxiliaryModelStateTests: XCTestCase {
     func testDefaultsToNotDownloaded() {
         let mm = ModelManager()
         // Redirect the aux dir so we never look at the real Application Support
-        // path from CI; isAuxiliaryDownloaded reads the manifest on disk.
+        // path; isAuxiliaryDownloaded reads the manifest on disk. The init pass
+        // may have already populated `.ready` from a real model the dev has
+        // installed locally, so reset before assertion.
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("lid-\(UUID().uuidString)")
         mm.__testing_setAuxiliaryDirectory(tmp, for: .lidWhisperTiny)
+        mm.__testing_setAuxiliaryState(.notDownloaded, for: .lidWhisperTiny)
         XCTAssertFalse(mm.isAuxiliaryDownloaded(.lidWhisperTiny))
         XCTAssertEqual(mm.auxiliaryState(for: .lidWhisperTiny), .notDownloaded)
     }
@@ -457,6 +460,10 @@ final class AuxiliaryModelStateTests: XCTestCase {
         try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         let mm = ModelManager()
         mm.__testing_setAuxiliaryDirectory(tmp, for: .lidWhisperTiny)
+        // Reset the in-memory state — `ModelManager.init` may have populated
+        // `.ready` from a real model installed at the live Application Support
+        // path before the test redirected to `tmp`.
+        mm.__testing_setAuxiliaryState(.notDownloaded, for: .lidWhisperTiny)
         addTeardownBlock {
             try? FileManager.default.removeItem(at: tmp)
         }

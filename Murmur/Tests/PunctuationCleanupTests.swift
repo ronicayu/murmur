@@ -181,15 +181,74 @@ final class PunctuationCleanupServicePassthroughTests: XCTestCase {
         super.tearDown()
     }
 
-    func test_zh_passthrough_returnsInputUnchanged() async throws {
-        // Arrange
+    func test_zh_emptyString_returnsEmpty() async throws {
+        let result = try await sut.improve("", language: "zh")
+        XCTAssertEqual(result, "")
+    }
+
+    func test_zh_whitespaceOnly_returnsEmpty() async throws {
+        let result = try await sut.improve("   ", language: "zh")
+        XCTAssertEqual(result, "")
+    }
+
+    func test_zh_endingWithoutPunctuation_appendsFullWidthPeriod() async throws {
+        // Arrange — Cohere typically emits no terminal punctuation on Chinese.
         let input = "你好世界"
 
         // Act
         let result = try await sut.improve(input, language: "zh")
 
-        // Assert — ZH is passthrough in v0.3.0
-        XCTAssertEqual(result, "你好世界")
+        // Assert
+        XCTAssertEqual(result, "你好世界。")
+    }
+
+    func test_zh_endingWithFullWidthPeriod_unchanged() async throws {
+        let result = try await sut.improve("你好。", language: "zh")
+        XCTAssertEqual(result, "你好。")
+    }
+
+    func test_zh_endingWithFullWidthQuestion_unchanged() async throws {
+        let result = try await sut.improve("你好吗？", language: "zh")
+        XCTAssertEqual(result, "你好吗？")
+    }
+
+    func test_zh_endingWithAsciiPeriod_replacedWithFullWidth() async throws {
+        let result = try await sut.improve("你好.", language: "zh")
+        XCTAssertEqual(result, "你好。")
+    }
+
+    func test_zh_endingWithAsciiQuestion_replacedWithFullWidth() async throws {
+        let result = try await sut.improve("你好吗?", language: "zh")
+        XCTAssertEqual(result, "你好吗？")
+    }
+
+    func test_zh_endingWithAsciiExclaim_replacedWithFullWidth() async throws {
+        let result = try await sut.improve("不要!", language: "zh")
+        XCTAssertEqual(result, "不要！")
+    }
+
+    func test_zh_endingInClosingCJKQuote_noPeriod() async throws {
+        // Closing quote treated as terminal — appending 。 after is awkward.
+        let result = try await sut.improve("他说「你好」", language: "zh")
+        XCTAssertEqual(result, "他说「你好」")
+    }
+
+    func test_zh_trimsLeadingAndTrailingWhitespace() async throws {
+        let result = try await sut.improve("  你好世界  ", language: "zh")
+        XCTAssertEqual(result, "你好世界。")
+    }
+
+    func test_zh_preservesEmbeddedLatinFragment() async throws {
+        // Mid-text ASCII punctuation must NOT be converted — version numbers,
+        // brand names, etc. keep their dots.
+        let input = "我用 Python 3.11 写代码"
+        let result = try await sut.improve(input, language: "zh")
+        XCTAssertEqual(result, "我用 Python 3.11 写代码。")
+    }
+
+    func test_zh_endingInEllipsis_noPeriod() async throws {
+        let result = try await sut.improve("好吧…", language: "zh")
+        XCTAssertEqual(result, "好吧…")
     }
 
     func test_ja_passthrough() async throws {

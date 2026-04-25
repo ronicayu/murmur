@@ -406,7 +406,7 @@ struct SettingsView: View {
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Clean up punctuation and casing")
-                Text("Currently applies only to English. Chinese support coming in a future update.")
+                Text("English: capitalises sentences and adds terminal periods. Chinese: appends 。 and converts ASCII terminals to full-width. Japanese, Korean, and other languages pass through unchanged.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -9,11 +9,12 @@ import os
 ///
 /// v0.3.0 contract:
 /// - English: sentence-initial capitalisation, terminal period, standalone "i" → "I", whitespace trim.
-/// - Chinese / Japanese / Korean: passthrough — no rules applied.
+/// - Chinese: terminal full-width period, ASCII-to-full-width terminal conversion, whitespace trim.
+/// - Japanese / Korean: passthrough — no rules applied.
 /// - Unknown language codes: passthrough.
 ///
-/// v0.3.1 will replace the rule-based implementation with an ONNX classifier
-/// that handles EN + ZH via the SentencePiece tokenizer path.
+/// v0.3.1 will replace the rule-based implementations with an ONNX classifier
+/// that handles EN + ZH (and adds JA/KO) via the SentencePiece tokenizer path.
 protocol TranscriptionCleanup: Sendable {
     /// Improve `text` according to the rules for `language` (BCP-47 primary subtag,
     /// e.g. `"en"`, `"zh"`, `"ja"`).
@@ -29,7 +30,7 @@ protocol TranscriptionCleanup: Sendable {
 
 // MARK: - Rule-based implementation (v0.3.0)
 
-/// Rule-based English punctuation and casing cleaner.
+/// Rule-based punctuation cleaner for English and Chinese transcription output.
 ///
 /// Rules applied when `language == "en"` (in application order):
 /// 1. Trim leading/trailing whitespace.
@@ -42,14 +43,26 @@ protocol TranscriptionCleanup: Sendable {
 /// 6. Append a terminal `.` if the text does not end in `.?!…:;`.
 ///    Quote characters are not in the suppression set — see `terminalPunctuation`.
 ///
-/// For `zh`, `ja`, `ko`, or any other language code the input is returned
-/// unchanged. ZH rules land in v0.3.1 with the ONNX classifier.
+/// Rules applied when `language == "zh"` (in application order):
+/// 1. Trim leading/trailing whitespace (including the U+3000 ideographic space).
+/// 2. Early-return on empty/whitespace-only string.
+/// 3. If the final character is an ASCII terminal `.` `?` or `!`, replace it
+///    with the full-width Chinese equivalent (`。` `？` `！`). Mid-text ASCII
+///    punctuation is left alone — it may belong to embedded Latin text
+///    (e.g. "我用 Python 3.11").
+/// 4. Append `。` if the text does not already end in a recognised terminal
+///    character (CJK or Western terminal punctuation, or a closing CJK
+///    quote/bracket — see `zhTerminalPunctuation`).
+///
+/// `ja`, `ko`, and any other language code passthrough unchanged. JA support
+/// is plausible (uses the same `。` and `？！`) but reserved for the v0.3.1
+/// classifier sweep.
 ///
 /// All operations are pure Swift — no regex libraries, no network, no disk I/O.
 actor PunctuationCleanupService: TranscriptionCleanup {
     private static let log = Logger(subsystem: "com.murmur.app", category: "cleanup")
 
-    /// Characters that suppress the auto-appended terminal period.
+    /// Characters that suppress the auto-appended terminal period in EN cleanup.
     /// Quotes are intentionally excluded: `"hello"` → `"hello".` is more
     /// readable than `"hello"` with no terminal period. Quoted dialog is rare
     /// in dictation output, and ending without a period looks worse than an
@@ -58,12 +71,38 @@ actor PunctuationCleanupService: TranscriptionCleanup {
         ".", "?", "!", "…", ":", ";",
     ]
 
+    /// Characters that suppress the auto-appended `。` in ZH cleanup.
+    /// Includes full-width CJK terminals, Western terminals (in case
+    /// the source text already mixed scripts), and closing CJK
+    /// quotes/brackets where appending `。` would be visually awkward.
+    private static let zhTerminalPunctuation: Set<Character> = [
+        // Full-width CJK terminals
+        "。", "？", "！", "…", "：", "；",
+        // Western terminals (mixed-script input)
+        ".", "?", "!", ":", ";",
+        // Closing CJK quotes / brackets — treat as terminal
+        "」", "』", "）", "】", "》", "〉",
+    ]
+
+    /// Map ASCII-terminal characters to their full-width CJK equivalents.
+    /// Applied only at end-of-text in ZH cleanup; mid-text positions are left
+    /// alone to avoid mangling embedded Latin numerics like "Python 3.11".
+    private static let asciiToFullWidthTerminal: [Character: Character] = [
+        ".": "。",
+        "?": "？",
+        "!": "！",
+    ]
+
     func improve(_ text: String, language: String) async throws -> String {
-        // Only English rules are applied in v0.3.0. Every other language is a
-        // passthrough; ZH support lands in v0.3.1 once the ONNX classifier and
-        // SentencePiece tokenizer are integrated.
-        guard language == "en" else { return text }
-        return applyEnglishRules(to: text)
+        switch language {
+        case "en":
+            return applyEnglishRules(to: text)
+        case "zh":
+            return applyChineseRules(to: text)
+        default:
+            // ja, ko, and unknown codes passthrough in v0.3.0.
+            return text
+        }
     }
 
     // MARK: - Private helpers
@@ -193,5 +232,34 @@ actor PunctuationCleanupService: TranscriptionCleanup {
         guard let lastChar = text.last(where: { !$0.isWhitespace }) else { return text }
         if Self.terminalPunctuation.contains(lastChar) { return text }
         return text + "."
+    }
+
+    /// Applies all ZH rules to `text` and returns the cleaned result.
+    private func applyChineseRules(to text: String) -> String {
+        // Rule 1: Trim whitespace. `.whitespacesAndNewlines` covers the U+3000
+        // ideographic space that occasionally leaks through from CJK-locale ASR.
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Rule 2: Empty / whitespace-only → return early.
+        guard !trimmed.isEmpty else { return trimmed }
+
+        // Rule 3: Replace ASCII terminal `.?!` at end-of-text with full-width
+        // equivalent. We deliberately do not touch mid-text ASCII punctuation
+        // because it may belong to an embedded Latin fragment (e.g. version
+        // numbers, English brand names).
+        var working = trimmed
+        if let last = working.last,
+           let fullWidth = Self.asciiToFullWidthTerminal[last] {
+            working.removeLast()
+            working.append(fullWidth)
+        }
+
+        // Rule 4: Append `。` if text does not already end in a terminal
+        // (CJK, Western, or closing quote/bracket).
+        if let last = working.last, !Self.zhTerminalPunctuation.contains(last) {
+            working.append("。")
+        }
+
+        return working
     }
 }
