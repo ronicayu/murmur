@@ -175,6 +175,13 @@ final class AppCoordinator: ObservableObject {
     /// the log readable when the model is missing or broken.
     private var hasLoggedFireRedFailureThisSession = false
 
+    /// CT-Transformer punctuation service. Active when the user has enabled
+    /// the ASR-punctuation toggle AND the aux model is on disk. nil otherwise.
+    private var asrPunc: ASRPunctuationService?
+
+    /// Suppress repeat punc-failure logs the same way as FireRed.
+    private var hasLoggedASRPuncFailureThisSession = false
+
     private var isStreamingEnabled: Bool {
         UserDefaults.standard.bool(forKey: "streamingInputEnabled")
     }
@@ -204,6 +211,14 @@ final class AppCoordinator: ObservableObject {
         self.fireRed = service
         self.fireRedModelDirectory = modelDirectory
         self.hasLoggedFireRedFailureThisSession = false
+    }
+
+    /// Wire up (or tear down) the ASR-punctuation service. Called from
+    /// `MurmurApp` in response to `committedUseASRPunctuationChange`.
+    /// Passing `nil` releases the recognizer.
+    func setASRPunctuationService(_ service: ASRPunctuationService?) {
+        self.asrPunc = service
+        self.hasLoggedASRPuncFailureThisSession = false
     }
 
     /// Preload the model so the first transcription is instant.
@@ -774,10 +789,12 @@ final class AppCoordinator: ObservableObject {
             // The "actual" language used for this transcription, post-retry.
             let lang = Self.cohereCode(for: result.language) ?? initialLang
 
-            // Pipeline: transcribe → correction (LLM, 2.5 s cap) → cleanup (rules, 250 ms cap) → inject.
-            // Each step silently falls back to its input on timeout or error.
+            // Pipeline: transcribe → ASR-punc (CT-Transformer, ~1 ms) → correction (LLM, 2.5 s cap)
+            // → cleanup (rules, 250 ms cap) → inject. Each step silently falls back to its input on
+            // timeout or error.
             let rawTranscribed = result.text
-            let corrected = await applyCorrectionIfEnabled(text: rawTranscribed, language: lang)
+            let punctuated = await applyASRPunctuationIfEnabled(text: rawTranscribed, language: lang)
+            let corrected = await applyCorrectionIfEnabled(text: punctuated, language: lang)
             let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
 
             transition(to: .injecting)
@@ -823,6 +840,25 @@ final class AppCoordinator: ObservableObject {
             pendingRecording = false
             await startRecordingFlow()
         }
+    }
+
+    /// Runs the CT-Transformer punctuation model on the bare ASR transcript
+    /// if the toggle is ON and the service is wired in. Pure additive: the
+    /// model only inserts ，。？！ and never paraphrases, so we don't apply
+    /// the LLM safety rails here. Silent fallback to `rawText` on any throw.
+    /// English (`en`) skips this step because the CT-Transformer trained on
+    /// zh-dominant data appends a Chinese 。 in pure-English context — see
+    /// the spike report at ~/work/firered-spike/run_punc.py case 4.
+    private func applyASRPunctuationIfEnabled(text rawText: String, language: String) async -> String {
+        guard let svc = asrPunc else { return rawText }
+        guard language != "en" else { return rawText }
+        let punctuated = await svc.addPunctuation(to: rawText)
+        if !hasLoggedASRPuncFailureThisSession && punctuated.isEmpty && !rawText.isEmpty {
+            hasLoggedASRPuncFailureThisSession = true
+            Self.log.warning("ASR punctuation returned empty for non-empty input; falling back to raw")
+            return rawText
+        }
+        return punctuated.isEmpty ? rawText : punctuated
     }
 
     /// Runs the cleanup service if the toggle is on and a service is wired in.
@@ -877,7 +913,8 @@ final class AppCoordinator: ObservableObject {
             }
 
             let rawTranscribed = result.text
-            let corrected = await applyCorrectionIfEnabled(text: rawTranscribed, language: lang)
+            let punctuated = await applyASRPunctuationIfEnabled(text: rawTranscribed, language: lang)
+            let corrected = await applyCorrectionIfEnabled(text: punctuated, language: lang)
             let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
 
             // Skip real injection in tests — just record what would be injected.

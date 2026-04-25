@@ -44,6 +44,15 @@ struct MurmurApp: App {
             }
         }
 
+        // Build ASR-punctuation service if the toggle is on and the aux model is on disk.
+        if mm.useASRPunctuation {
+            if let svc = try? ASRPunctuationService(
+                modelDirectory: mm.auxiliaryModelDirectory(.punctuationCT)
+            ) {
+                coord.setASRPunctuationService(svc)
+            }
+        }
+
         // Whisper-tiny LID was removed in favour of Cohere-echo retry — see
         // AppCoordinator.transcribeWithAutoDetectIfNeeded. The on-disk
         // ~/Library/Application Support/Murmur/Models-LID/ directory is no
@@ -126,6 +135,17 @@ struct MurmurApp: App {
                         }
                     } else {
                         coordinator.setFireRedService(nil, modelDirectory: nil)
+                    }
+                }
+                .onReceive(modelManager.committedUseASRPunctuationChange) { isOn in
+                    if isOn {
+                        if let svc = try? ASRPunctuationService(
+                            modelDirectory: modelManager.auxiliaryModelDirectory(.punctuationCT)
+                        ) {
+                            coordinator.setASRPunctuationService(svc)
+                        }
+                    } else {
+                        coordinator.setASRPunctuationService(nil)
                     }
                 }
                 .onReceive(modelManager.$state) { newState in

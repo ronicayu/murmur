@@ -226,6 +226,10 @@ struct SettingsView: View {
                 }
             }
 
+            Section("ASR Punctuation") {
+                asrPunctuationToggleRow
+            }
+
             Section("Model — \(modelManager.activeBackend.shortName)") {
                 LabeledContent("Status") {
                     modelStatusBadge
@@ -655,6 +659,64 @@ struct SettingsView: View {
         } catch {
             _ = modelManager.setActiveBackend(savedBackend)
             // Error alert is handled by the existing ModelManager status path.
+        }
+    }
+
+    /// Toggle row for the CT-Transformer ASR-punctuation aux model.
+    /// Always visible (independent of active backend), since it works as
+    /// a post-processor for any backend's bare transcript.
+    @ViewBuilder
+    private var asrPunctuationToggleRow: some View {
+        let isOn = modelManager.useASRPunctuation
+        let auxState = modelManager.auxiliaryState(for: .punctuationCT)
+        let isReady: Bool = {
+            if case .ready = auxState { return true }
+            return false
+        }()
+        let isDownloading: Bool = {
+            if case .downloading = auxState { return true }
+            return false
+        }()
+
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: Binding(
+                get: { isOn },
+                set: { newValue in
+                    if newValue && !isReady {
+                        Task { await downloadASRPuncFromToggle() }
+                    } else {
+                        _ = modelManager.setUseASRPunctuation(newValue)
+                    }
+                }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Add punctuation to ASR transcripts")
+                        .font(.body)
+                    Text("\(AuxiliaryModel.punctuationCT.sizeDescription) additional · "
+                         + "Adds ，。？！ to bare ASR output (FireRed never emits punctuation; "
+                         + "Cohere's punctuation is preserved unchanged). Skipped for English. "
+                         + "~1 ms per clip.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(isDownloading)
+
+            if isDownloading,
+               let progress = modelManager.auxiliaryProgress[.punctuationCT] {
+                ProgressView(value: progress).controlSize(.small)
+            }
+        }
+    }
+
+    /// Download the punctuation aux model on behalf of a user enabling the
+    /// toggle. On success, commit the toggle ON; on failure, leave OFF.
+    private func downloadASRPuncFromToggle() async {
+        do {
+            try await modelManager.downloadAuxiliary(.punctuationCT)
+            _ = modelManager.setUseASRPunctuation(true)
+        } catch {
+            // Error surfaces via auxiliary state; toggle simply stays OFF.
         }
     }
 

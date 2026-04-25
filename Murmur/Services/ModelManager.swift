@@ -134,23 +134,33 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
     /// language detection.
     case lidWhisperTiny
 
+    /// Sherpa-onnx CT-Transformer punctuation model (Chinese + English).
+    /// Used by `ASRPunctuationService` when the user enables ASR-side
+    /// punctuation. Adds ，。？！ to bare ASR transcripts at ~1 ms / clip.
+    /// F1 ~62.77% on Chinese; weaker than LLM correction but offline,
+    /// instant, and never paraphrases.
+    case punctuationCT
+
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
         case .lidWhisperTiny: return "Language Detection Model"
+        case .punctuationCT: return "Punctuation Model"
         }
     }
 
     var modelRepo: String {
         switch self {
         case .lidWhisperTiny: return "onnx-community/whisper-tiny"
+        case .punctuationCT: return "csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12"
         }
     }
 
     var modelSubdirectory: String {
         switch self {
         case .lidWhisperTiny: return "Murmur/Models-LID"
+        case .punctuationCT: return "Murmur/Models-PuncCT"
         }
     }
 
@@ -158,12 +168,14 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
     var requiredDiskSpace: Int64 {
         switch self {
         case .lidWhisperTiny: return 100_000_000
+        case .punctuationCT: return 320_000_000   // 280 MB ONNX + 4 MB tokens.json + headroom
         }
     }
 
     var sizeDescription: String {
         switch self {
         case .lidWhisperTiny: return "~40 MB"
+        case .punctuationCT: return "~280 MB"
         }
     }
 
@@ -175,6 +187,9 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
                 "onnx/decoder_model_quantized.onnx",
                 "*.json",
             ]
+        case .punctuationCT:
+            // Skip the upstream test.py / show-model-input-output.py / add-model-metadata.py.
+            return ["model.onnx", "tokens.json", "*.yaml"]
         }
     }
 
@@ -186,6 +201,8 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
                 "onnx/decoder_model_quantized.onnx",
                 "config.json",
             ]
+        case .punctuationCT:
+            return ["model.onnx", "tokens.json"]
         }
     }
 }
@@ -265,6 +282,18 @@ final class ModelManager: ObservableObject {
     /// Subscribers (e.g. AppCoordinator) can re-evaluate the routing function.
     let committedUseFireRedChange = PassthroughSubject<Bool, Never>()
 
+    /// Whether to apply ASR-side punctuation (CT-Transformer) to bare
+    /// transcripts before correction/cleanup. OFF by default. Adds ，。？！
+    /// at ~1 ms per clip. Particularly useful with FireRed (which never
+    /// emits punctuation); harmless with Cohere (which already does, but
+    /// the model is idempotent on already-punctuated text).
+    /// Callers MUST go through `setUseASRPunctuation(_:)` — same gating
+    /// pattern as `useFireRedForChinese`.
+    @Published private(set) var useASRPunctuation: Bool
+
+    /// Emits when `setUseASRPunctuation(_:)` actually commits a change.
+    let committedUseASRPunctuationChange = PassthroughSubject<Bool, Never>()
+
     /// Attempt to switch the active backend.
     ///
     /// - Returns: `true` if the switch was accepted and persisted; `false` if a
@@ -313,6 +342,38 @@ final class ModelManager: ObservableObject {
         useFireRedForChinese = newValue
         UserDefaults.standard.set(newValue, forKey: "useFireRedForChinese")
         committedUseFireRedChange.send(newValue)
+        return true
+    }
+
+    /// Attempt to set the ASR-punctuation toggle.
+    ///
+    /// - Parameter newValue: desired toggle state.
+    /// - Returns: `true` if the change was accepted and persisted; `false` if:
+    ///   - a primary download is in progress (newValue=true rejected), OR
+    ///   - newValue=true but the punctuation model is not on disk (caller
+    ///     must trigger `downloadAuxiliary(.punctuationCT)` first).
+    @discardableResult
+    func setUseASRPunctuation(_ newValue: Bool) -> Bool {
+        guard newValue != useASRPunctuation else { return true }
+
+        if newValue == true {
+            guard !isDownloadActive else {
+                logger.warning("Refused ASR-punc toggle ON — primary download in progress")
+                return false
+            }
+            let dir = auxiliaryModelDirectory(.punctuationCT)
+            let allPresent = AuxiliaryModel.punctuationCT.requiredFiles.allSatisfy {
+                FileManager.default.fileExists(atPath: dir.appendingPathComponent($0).path)
+            }
+            guard allPresent else {
+                logger.warning("Refused ASR-punc toggle ON — model not downloaded")
+                return false
+            }
+        }
+
+        useASRPunctuation = newValue
+        UserDefaults.standard.set(newValue, forKey: "useASRPunctuation")
+        committedUseASRPunctuationChange.send(newValue)
         return true
     }
 
@@ -554,6 +615,20 @@ final class ModelManager: ObservableObject {
             UserDefaults.standard.set(false, forKey: "useFireRedForChinese")
         }
         self.useFireRedForChinese = effectiveToggle
+
+        // Same downgrade-on-missing-model logic for the ASR-punctuation toggle.
+        let persistedPunc = UserDefaults.standard.bool(forKey: "useASRPunctuation")
+        let puncDir = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(AuxiliaryModel.punctuationCT.modelSubdirectory)
+        let puncFilesPresent = AuxiliaryModel.punctuationCT.requiredFiles.allSatisfy {
+            FileManager.default.fileExists(atPath: puncDir.appendingPathComponent($0).path)
+        }
+        let effectivePunc = persistedPunc && puncFilesPresent
+        if persistedPunc && !effectivePunc {
+            UserDefaults.standard.set(false, forKey: "useASRPunctuation")
+        }
+        self.useASRPunctuation = effectivePunc
 
         // One-time migration: move the old shared "modelConfigHash" key to the
         // per-backend key so that existing hash verifications keep working.
