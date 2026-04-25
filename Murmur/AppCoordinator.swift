@@ -56,7 +56,13 @@ final class AppCoordinator: ObservableObject {
     @Published var lastTranscription: String?
     @Published var lastLanguage: DetectedLanguage?
     @Published private(set) var currentAudioLevel: Float = 0
-    @Published private(set) var transcriptionHistory: [(text: String, language: DetectedLanguage, date: Date)] = []
+    /// In-memory recent transcriptions. `rawText` is populated only when the
+    /// LLM correction step actually changed the transcribed words (e.g.
+    /// homophone fix), so the menu-bar UI can show the user a before/after
+    /// diff when correction is on. Rule-based cleanup (punctuation/casing) is
+    /// NOT reflected here — its effect is deterministic and not interesting
+    /// to compare. nil `rawText` means "no correction diff to show."
+    @Published private(set) var transcriptionHistory: [(text: String, rawText: String?, language: DetectedLanguage, date: Date)] = []
 
     private let maxHistoryCount = 20
 
@@ -304,8 +310,10 @@ final class AppCoordinator: ObservableObject {
 
                 self.lastTranscription = result.text
                 self.lastLanguage = result.language
+                // transcribeLong path does not currently run the correction
+                // pipeline, so rawText is always nil here.
                 self.transcriptionHistory.insert(
-                    (text: result.text, language: result.language, date: Date()), at: 0
+                    (text: result.text, rawText: nil, language: result.language, date: Date()), at: 0
                 )
                 if self.transcriptionHistory.count > self.maxHistoryCount {
                     self.transcriptionHistory.removeLast()
@@ -696,7 +704,8 @@ final class AppCoordinator: ObservableObject {
 
             // Pipeline: transcribe → correction (LLM, 2.5 s cap) → cleanup (rules, 250 ms cap) → inject.
             // Each step silently falls back to its input on timeout or error.
-            let corrected = await applyCorrectionIfEnabled(text: result.text, language: lang)
+            let rawTranscribed = result.text
+            let corrected = await applyCorrectionIfEnabled(text: rawTranscribed, language: lang)
             let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
 
             transition(to: .injecting)
@@ -708,12 +717,13 @@ final class AppCoordinator: ObservableObject {
 
             lastTranscription = textToInject
             lastLanguage = result.language
-            // History records the same text that was injected (cleaned when the toggle is on,
-            // raw when it is off). This keeps injection and history consistent — the entry in
-            // history always matches what the user actually received. Known trade-off: if the
-            // user toggles cleanup mid-session, earlier entries will be cleaned and later ones
-            // raw. That is acknowledged and intentional, not a bug.
-            transcriptionHistory.insert((text: textToInject, language: result.language, date: Date()), at: 0)
+            // History records the injected (final) text. `rawText` captures the
+            // pre-correction transcription only when correction actually changed
+            // words (homophone fix, character substitution) — that is the only
+            // transformation the user wants to verify. Rule-based cleanup
+            // (punctuation/casing) is not surfaced because it is deterministic.
+            let rawForHistory: String? = (corrected != rawTranscribed) ? rawTranscribed : nil
+            transcriptionHistory.insert((text: textToInject, rawText: rawForHistory, language: result.language, date: Date()), at: 0)
             if transcriptionHistory.count > maxHistoryCount {
                 transcriptionHistory.removeLast()
             }
@@ -792,13 +802,15 @@ final class AppCoordinator: ObservableObject {
                 return try await self.transcription.transcribe(audioURL: wav, language: lang)
             }
 
-            let corrected = await applyCorrectionIfEnabled(text: result.text, language: lang)
+            let rawTranscribed = result.text
+            let corrected = await applyCorrectionIfEnabled(text: rawTranscribed, language: lang)
             let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
 
             // Skip real injection in tests — just record what would be injected.
             lastTranscription = textToInject
             lastLanguage = result.language
-            transcriptionHistory.insert((text: textToInject, language: result.language, date: Date()), at: 0)
+            let rawForHistory: String? = (corrected != rawTranscribed) ? rawTranscribed : nil
+            transcriptionHistory.insert((text: textToInject, rawText: rawForHistory, language: result.language, date: Date()), at: 0)
             if transcriptionHistory.count > maxHistoryCount {
                 transcriptionHistory.removeLast()
             }

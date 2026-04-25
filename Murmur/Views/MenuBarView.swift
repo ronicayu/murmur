@@ -214,16 +214,16 @@ struct MenuBarView: View {
             ScrollView {
                 VStack(spacing: 0) {
                     ForEach(Array(coordinator.transcriptionHistory.enumerated()), id: \.offset) { _, entry in
-                        transcriptionRow(entry.text, language: entry.language)
+                        transcriptionRow(entry.text, rawText: entry.rawText, language: entry.language)
                     }
                 }
             }
-            .frame(maxHeight: 150)
+            .frame(maxHeight: 180)
             .padding(.bottom, 4)
         }
     }
 
-    private func transcriptionRow(_ text: String, language: DetectedLanguage) -> some View {
+    private func transcriptionRow(_ text: String, rawText: String?, language: DetectedLanguage) -> some View {
         Button {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
@@ -235,6 +235,20 @@ struct MenuBarView: View {
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                         .foregroundStyle(.primary)
+
+                    // Before/after: when LLM correction rewrote the raw
+                    // transcription, show the original in a smaller,
+                    // strike-through secondary line so the user can verify
+                    // the change. nil rawText means the correction step was
+                    // off, unchanged, or not applicable — no second line.
+                    if let rawText, !rawText.isEmpty {
+                        Text(rawText)
+                            .font(.system(size: 10))
+                            .lineLimit(1)
+                            .multilineTextAlignment(.leading)
+                            .foregroundStyle(.secondary)
+                            .strikethrough(true, color: .secondary)
+                    }
                 }
 
                 Spacer(minLength: 0)
