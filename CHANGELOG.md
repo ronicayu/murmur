@@ -6,6 +6,15 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.3.2] — 2026-04-26
+
+### Fixed
+- **ASR punctuation skipped on Chinese speech when IME was English**. Two stacked bugs both rooted in trusting the IME-derived language hint instead of the actual transcript content:
+  1. `routedTranscribeV1` tagged FireRed transcripts with the *input language hint* — so an English IME + Chinese audio yielded `result.language = .english`. The auto-detect retry then logged "english matched — no retry" even though the transcript was 中文.
+  2. `applyASRPunctuationIfEnabled` skipped when `language == "en"` to avoid the CT-Transformer appending a Chinese 。 to pure-English text. Combined with #1, Chinese audio under English IME got no punctuation at all.
+
+  Both checks now look at content: FireRed transcripts are tagged by CJK-character ratio (mirrors `NativeTranscriptionService.detectLanguage`), and ASR-punc runs whenever the transcript contains CJK Unified Ideographs (and no Japanese hiragana/katakana, since CT-Transformer is zh-en only).
+
 ## [0.3.1] — 2026-04-26
 
 ### Removed

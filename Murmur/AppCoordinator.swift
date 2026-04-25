@@ -846,12 +846,17 @@ final class AppCoordinator: ObservableObject {
     /// if the toggle is ON and the service is wired in. Pure additive: the
     /// model only inserts ，。？！ and never paraphrases, so we don't apply
     /// the LLM safety rails here. Silent fallback to `rawText` on any throw.
-    /// English (`en`) skips this step because the CT-Transformer trained on
-    /// zh-dominant data appends a Chinese 。 in pure-English context — see
-    /// the spike report at ~/work/firered-spike/run_punc.py case 4.
+    ///
+    /// Decides whether to run based on text content (`looksChineseEnough`),
+    /// NOT the `language` parameter. The IME-derived language can be wrong
+    /// (English IME + Chinese speech is common), and Cohere/FireRed both
+    /// faithfully produce CJK chars from Chinese audio regardless of the
+    /// input hint. The CT-Transformer trained on zh-en data would otherwise
+    /// append a Chinese 。 to pure-English text — see spike at
+    /// ~/work/firered-spike/run_punc.py case 4.
     private func applyASRPunctuationIfEnabled(text rawText: String, language: String) async -> String {
         guard let svc = asrPunc else { return rawText }
-        guard language != "en" else { return rawText }
+        guard Self.looksChineseEnough(rawText) else { return rawText }
         let punctuated = await svc.addPunctuation(to: rawText)
         if !hasLoggedASRPuncFailureThisSession && punctuated.isEmpty && !rawText.isEmpty {
             hasLoggedASRPuncFailureThisSession = true
@@ -1124,7 +1129,13 @@ final class AppCoordinator: ObservableObject {
             do {
                 let samples = try Self.loadSamples16k(url: wav)
                 let text = try await svc.transcribe(samples: samples, sampleRate: 16000)
-                let lang: DetectedLanguage = (language == "zh") ? .chinese : .english
+                // Tag the result by content, NOT by the input language hint —
+                // a user with an English IME can still speak Chinese, and FireRed
+                // will faithfully transcribe Chinese characters. Echoing the input
+                // hint here would lie to the auto-detect retry path AND make the
+                // ASR-punc guard skip Chinese text. Mirrors NativeTranscriptionService's
+                // detectLanguage(_:) heuristic (CJK-char ratio > 30%).
+                let lang: DetectedLanguage = Self.detectLanguageFromText(text)
                 return TranscriptionResult(text: text, language: lang, durationMs: 0)
             } catch {
                 if !hasLoggedFireRedFailureThisSession {
@@ -1256,6 +1267,40 @@ final class AppCoordinator: ObservableObject {
 
     /// Load 16 kHz mono Float32 samples from a wav. Mirrors
     /// NativeTranscriptionService.loadAudio for the same conversion semantics.
+    /// Decide whether a transcript is "Chinese-ish" enough to deserve the
+    /// CT-Transformer ASR punctuation pass. Looks at content, NOT at the
+    /// language hint or IME, because the hint may have been wrong (English
+    /// IME with Chinese speech is a real and common case). The CT-Transformer
+    /// is trained on zh-en specifically, so we also bail when the text
+    /// contains hiragana / katakana — Japanese-only text would otherwise get
+    /// a Chinese 。 appended.
+    fileprivate static func looksChineseEnough(_ text: String) -> Bool {
+        var hasCJK = false
+        for scalar in text.unicodeScalars {
+            let v = scalar.value
+            if (0x3040...0x309F).contains(v) || (0x30A0...0x30FF).contains(v) {
+                return false  // Japanese hiragana / katakana detected — skip
+            }
+            if (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v) {
+                hasCJK = true
+            }
+        }
+        return hasCJK
+    }
+
+    /// Content-based language detection, used to tag FireRed transcripts
+    /// because FireRed itself doesn't return a language. Mirrors
+    /// NativeTranscriptionService.detectLanguage(_:): if Chinese characters
+    /// make up >30% of the alphabetic chars, call it Chinese.
+    fileprivate static func detectLanguageFromText(_ text: String) -> DetectedLanguage {
+        let chineseChars = text.unicodeScalars.filter { (0x4E00...0x9FFF).contains($0.value) }.count
+        let totalAlpha = text.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
+        if totalAlpha > 0 && Double(chineseChars) / Double(totalAlpha) > 0.3 {
+            return .chinese
+        }
+        return .english
+    }
+
     fileprivate static func loadSamples16k(url: URL) throws -> [Float] {
         let file = try AVAudioFile(forReading: url)
         let srcFormat = file.processingFormat
