@@ -6,9 +6,10 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
-## [0.3.0] — 2026-04-25 (unreleased)
+## [0.3.0] — 2026-04-26
 
 ### Added
+- **ASR Punctuation** as an opt-in toggle in Settings → ASR Punctuation. Runs the [sherpa-onnx CT-Transformer](https://huggingface.co/csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12) zh-en model on the bare ASR transcript at ~1 ms per clip, inserting `，。？！` into otherwise unpunctuated output. Particularly useful with FireRed (which never emits punctuation on its own); harmless with Cohere (whose punctuation is preserved unchanged — the model is conservative on already-punctuated text). Skipped for pure-English audio (the zh-dominant CT-Transformer otherwise appends a Chinese 。 in English context). ~280 MB aux model, downloaded on demand. Recommended for Chinese users together with the FireRed backend.
 - **Post-transcription cleanup** as an opt-in toggle in Settings → Model. After V1 transcription succeeds and before text is injected, the cleanup service applies rule-based fixes on a 250 ms hard cap; any timeout or error silently falls back to the raw text.
   - **English:** sentence-initial capitalisation, capitalisation after `.?!` + whitespace, standalone "i" → "I" (word-boundary, no proper-noun gazetteer), terminal period if missing, leading/trailing whitespace trim.
   - **Chinese:** appends `。` if the text doesn't already end in a recognised CJK or Western terminal (or closing CJK quote/bracket); converts a trailing ASCII `.` `?` `!` to the full-width equivalent (`。` `？` `！`); leaves mid-text ASCII punctuation alone so embedded Latin fragments like "Python 3.11" are preserved.
@@ -20,7 +21,10 @@
   - **V3 streaming unchanged:** sherpa-onnx FireRedASR2-AED has no streaming mode; V3 always uses Cohere regardless of toggle/backend.
   - **Bundling:** Adds vendored sherpa-onnx v1.12.40 macOS xcframework (~42 MB compressed in repo, links to existing `onnxruntime-swift-package-manager` — no duplicate ONNX runtime).
 
-## [0.2.4] — 2026-04-25 (unreleased)
+### Fixed
+- **Local-LLM correction with reasoning models (Qwen3, DeepSeek-R1, OpenAI o1-style)** silently produced empty output, causing every correction to fall back to the raw transcript and effectively disabling punctuation/sound-alike fixes. Root cause: those models put their answer in `message.reasoning` and leave `message.content` null, which the correction safety-rail reads as empty and discards. The OpenAI-compatible corrector now sends `chat_template_kwargs={enable_thinking: false}` so reasoning models emit their answer directly into `content`. Backends that don't honour this kwarg (Ollama, plain llama.cpp) ignore it harmlessly.
+
+## [0.2.4] — 2026-04-25
 
 ### Added
 - Audio-based language identification (LID) as an opt-in auxiliary model. When enabled, the app runs a locally-installed Whisper-tiny ONNX encoder + one decoder step on the first 5 s of the recording to pick a language before handing audio to Cohere. Falls through to the existing IME-based resolver on any failure or low-confidence result. Streaming V3 deliberately skips LID to avoid pre-roll latency. Opt-in via a new Settings section that downloads the ~40 MB auxiliary model on demand.

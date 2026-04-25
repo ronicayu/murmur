@@ -119,6 +119,18 @@ You can also pin a language manually via the menu bar dropdown or Settings.
 
 The menu bar shows quick-switch capsule buttons: **Auto | EN | 中文 | 日 | 한**
 
+### Recommended setup for Chinese users 中文用户推荐配置
+
+Murmur ships with [Cohere Transcribe](https://cohere.com/blog/transcribe) by default — multilingual, fast, accurate on English. For Chinese (and Chinese-English code-switching) we recommend two opt-in toggles, both in **Settings → Speech Engine** / **ASR Punctuation**:
+
+1. **Enable FireRed for Chinese** (~1.24 GB additional download) — Xiaohongshu's [FireRedASR2-AED](https://github.com/FireRedTeam/FireRedASR2S), specialised for Mandarin + 20+ Chinese dialects + Chinese-English mixing. On the SenseVoice cn-en mixed benchmark FireRed achieves **CER 8.94%** vs Cohere's 22.76% (zh prompt). FireRed is character-faithful — it preserves "做 machine learning 做 deep learning…" verbatim instead of paraphrasing. English audio continues to use Cohere.
+
+2. **Add punctuation to ASR transcripts** (~280 MB additional download) — runs the [sherpa-onnx CT-Transformer](https://huggingface.co/csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12) zh-en punctuation model on the bare transcript at ~1 ms per clip. **FireRed never emits punctuation on its own**, so this toggle is what gives you `，。？！` automatically. Skipped for pure-English audio.
+
+中文场景启用这两项后,转写质量(尤其是字面忠实度)和标点完整度都会显著好于默认配置。完全离线,无需 LLM。
+
+> Use the toggles together. FireRed gives the most accurate Chinese characters; the punctuation model adds the marks FireRed itself never produces.
+
 ### How text insertion works
 
 Murmur inserts text using **clipboard paste** (Cmd+V):
