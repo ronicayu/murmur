@@ -127,7 +127,14 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
             ],
             "stream": false,
             "temperature": 0.0,
-            "max_tokens": maxTokens
+            "max_tokens": maxTokens,
+            // Disable "thinking" / chain-of-thought on Qwen3 / DeepSeek-R1 / o1-style
+            // reasoning variants. Without this, those models return their answer in
+            // `message.reasoning` and leave `message.content` null, which our parser
+            // reads as empty → safety-rail falls back to the raw transcription
+            // (silent regression: punctuation never gets added). Backends that don't
+            // honour this kwarg (Ollama, plain llama.cpp) ignore it harmlessly.
+            "chat_template_kwargs": ["enable_thinking": false]
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
