@@ -35,6 +35,15 @@ struct MurmurApp: App {
             ts = TranscriptionService(modelPath: modelPath)
         }
         let coord = AppCoordinator(transcription: ts)
+        coord.modelManager = mm
+
+        // Build FireRed service if either route is active and the model is on disk.
+        if Self.shouldHaveFireRed(modelManager: mm) {
+            if let svc = try? FireRedTranscriptionService(modelDirectory: mm.modelDirectory(for: .fireRed)) {
+                coord.setFireRedService(svc, modelDirectory: mm.modelDirectory(for: .fireRed))
+            }
+        }
+
         // Whisper-tiny LID was removed in favour of Cohere-echo retry — see
         // AppCoordinator.transcribeWithAutoDetectIfNeeded. The on-disk
         // ~/Library/Application Support/Murmur/Models-LID/ directory is no
@@ -93,6 +102,31 @@ struct MurmurApp: App {
                         ? NativeTranscriptionService(modelPath: newPath)
                         : TranscriptionService(modelPath: newPath)
                     coordinator.replaceTranscriptionService(newService)
+
+                    if Self.shouldHaveFireRed(modelManager: modelManager) {
+                        if let svc = try? FireRedTranscriptionService(
+                            modelDirectory: modelManager.modelDirectory(for: .fireRed)
+                        ) {
+                            coordinator.setFireRedService(
+                                svc, modelDirectory: modelManager.modelDirectory(for: .fireRed)
+                            )
+                        }
+                    } else {
+                        coordinator.setFireRedService(nil, modelDirectory: nil)
+                    }
+                }
+                .onReceive(modelManager.committedUseFireRedChange) { _ in
+                    if Self.shouldHaveFireRed(modelManager: modelManager) {
+                        if let svc = try? FireRedTranscriptionService(
+                            modelDirectory: modelManager.modelDirectory(for: .fireRed)
+                        ) {
+                            coordinator.setFireRedService(
+                                svc, modelDirectory: modelManager.modelDirectory(for: .fireRed)
+                            )
+                        }
+                    } else {
+                        coordinator.setFireRedService(nil, modelDirectory: nil)
+                    }
                 }
                 .onReceive(modelManager.$state) { newState in
                     // Preload model immediately after download completes
@@ -172,6 +206,22 @@ struct MurmurApp: App {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow = window
+    }
+
+    /// FireRed should be loaded if (a) the FireRed backend is active, OR
+    /// (b) the cross-backend toggle is on. Both require the FireRed model
+    /// to be present on disk — we re-check at construction time to guard
+    /// against stale UserDefaults.
+    private static func shouldHaveFireRed(modelManager mm: ModelManager) -> Bool {
+        let modelExists = FileManager.default.fileExists(
+            atPath: mm.modelDirectory(for: .fireRed).path
+        )
+        guard modelExists else { return false }
+        if mm.activeBackend == .fireRed { return true }
+        if mm.useFireRedForChinese && (mm.activeBackend == .onnx || mm.activeBackend == .huggingface) {
+            return true
+        }
+        return false
     }
 
     private func showRecentHistory() {
