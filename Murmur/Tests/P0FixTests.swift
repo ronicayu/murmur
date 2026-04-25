@@ -131,7 +131,8 @@ final class ModelBackendTests: XCTestCase {
         XCTAssertFalse(ModelBackend.onnx.requiresHFLogin)
     }
 
-    func testHuggingfaceRequiresHFLogin() {
-        XCTAssertTrue(ModelBackend.huggingface.requiresHFLogin)
-    }
+    // The HuggingFace backend was removed in v0.3.1; `requiresHFLogin` is now
+    // a hard-coded `false` for all remaining backends, asserted in
+    // `testOnnxDoesNotRequireHFLogin` above. The Chinese-first FireRed
+    // backend's repo is also public so no per-backend gate is needed.
 }

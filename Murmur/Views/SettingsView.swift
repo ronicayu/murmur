@@ -200,13 +200,27 @@ struct SettingsView: View {
                     }
                 }
             }
+
+            Section {
+                LabeledContent("Version") {
+                    Text(Self.appVersionString)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .monospacedDigit()
+                }
+            }
         }
         .formStyle(.grouped)
     }
 
-    // MARK: - Model Tab
+    /// Reads `CFBundleShortVersionString` (set by Info.plist; CI overrides from
+    /// the git tag at release time). Falls back to "?" if the dictionary is
+    /// missing — should never happen in a real build but keeps the binding safe.
+    private static var appVersionString: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    }
 
-    @State private var showAdvancedEngines = false
+    // MARK: - Model Tab
 
     private var modelTab: some View {
         Form {
@@ -216,14 +230,7 @@ struct SettingsView: View {
                     fireRedToggleRow
                 }
 
-                DisclosureGroup("Advanced", isExpanded: $showAdvancedEngines) {
-                    engineRow(.huggingface)
-                    if modelManager.activeBackend == .huggingface {
-                        fireRedToggleRow
-                    }
-                    engineRow(.whisper)
-                    engineRow(.fireRed)
-                }
+                engineRow(.fireRed)
             }
 
             Section("ASR Punctuation") {

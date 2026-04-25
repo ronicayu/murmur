@@ -85,35 +85,9 @@ final class TranscriptionRouterTests: XCTestCase {
         )
     }
 
-    func test_hfBackend_toggleOn_zh_routesToFireRed() {
-        XCTAssertEqual(
-            TranscriptionRouter.route(activeBackend: .huggingface, useFireRedForChinese: true,
-                                      language: "zh", version: .v1FullPass),
-            .fireRed
-        )
-    }
-
-    func test_hfBackend_toggleOn_en_routesToHF() {
-        XCTAssertEqual(
-            TranscriptionRouter.route(activeBackend: .huggingface, useFireRedForChinese: true,
-                                      language: "en", version: .v1FullPass),
-            .existing(.huggingface)
-        )
-    }
-
-    func test_whisperBackend_toggleOn_zh_stillRoutesToWhisper() {
-        XCTAssertEqual(
-            TranscriptionRouter.route(activeBackend: .whisper, useFireRedForChinese: true,
-                                      language: "zh", version: .v1FullPass),
-            .existing(.whisper)
-        )
-    }
-
-    func test_whisperBackend_zh_routesToWhisper() {
-        XCTAssertEqual(
-            TranscriptionRouter.route(activeBackend: .whisper, useFireRedForChinese: false,
-                                      language: "zh", version: .v1FullPass),
-            .existing(.whisper)
-        )
-    }
+    // .huggingface and .whisper backends were removed in v0.3.1; the tests
+    // that exercised those routes are deleted with them. The router code
+    // still works correctly for any future case via the fall-through
+    // `.existing(activeBackend)` path — covered indirectly by the
+    // FireRed/ONNX cases above.
 }

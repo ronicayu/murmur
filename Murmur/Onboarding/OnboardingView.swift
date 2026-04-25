@@ -5,7 +5,6 @@ enum OnboardingStep: Int, CaseIterable {
     case microphone
     case accessibility
     case modelChoice
-    case huggingfaceLogin
     case modelDownload
     case testTranscription
     case done
@@ -31,7 +30,7 @@ struct OnboardingView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Progress bar — maps actual step to visible progress (skipping modelChoice + huggingfaceLogin)
+            // Progress bar — maps actual step to visible progress (skipping modelChoice)
             ProgressView(value: Double(viewModel.visibleStepIndex), total: Double(viewModel.visibleStepCount - 1))
                 .padding(.horizontal, 32)
                 .padding(.top, 20)
@@ -47,8 +46,6 @@ struct OnboardingView: View {
                     accessibilityStep
                 case .modelChoice:
                     modelChoiceStep
-                case .huggingfaceLogin:
-                    huggingfaceLoginStep
                 case .modelDownload:
                     modelDownloadStep
                 case .testTranscription:
@@ -194,75 +191,6 @@ struct OnboardingView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-        }
-    }
-
-    // MARK: - Step 5: HuggingFace Login
-
-    private var huggingfaceLoginStep: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            Image(systemName: "person.badge.key.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.indigo)
-            Text("Free Account Required")
-                .font(.title2.bold())
-            Text("The High Quality engine is hosted on a platform called HuggingFace. You need a free account to download it.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
-            VStack(alignment: .leading, spacing: 12) {
-                Label("1. Create a free account (opens in browser)", systemImage: "1.circle")
-                Label("2. Request access to the model", systemImage: "2.circle")
-                Label("3. Come back here and click \"Login\"", systemImage: "3.circle")
-            }
-            .font(.callout)
-            .foregroundStyle(.secondary)
-
-            if viewModel.hfLoggedIn {
-                Label("Logged in to HuggingFace", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            }
-
-            if !viewModel.hfStatusMessage.isEmpty {
-                Text(viewModel.hfStatusMessage)
-                    .font(.caption)
-                    .foregroundStyle(viewModel.hfStatusMessage.hasPrefix("Error") ? .red : .secondary)
-                    .multilineTextAlignment(.center)
-            }
-
-            Spacer()
-
-            HStack(spacing: 12) {
-                Button("Open HuggingFace") {
-                    NSWorkspace.shared.open(URL(string: "https://huggingface.co/CohereLabs/cohere-transcribe-03-2026")!)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-
-                if viewModel.hfLoggedIn {
-                    Button("Continue") {
-                        viewModel.nextStep()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                } else {
-                    Button("Login") {
-                        Task { await viewModel.loginHuggingFace() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                }
-            }
-
-            Button("Skip (I'll set this up later)") {
-                viewModel.nextStep()
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .font(.caption)
-            .padding(.bottom, 4)
         }
     }
 
@@ -625,8 +553,6 @@ struct OnboardingView: View {
     private func backendIcon(_ backend: ModelBackend) -> String {
         switch backend {
         case .onnx: return "hare.fill"
-        case .huggingface: return "wand.and.stars"
-        case .whisper: return "waveform"
         case .fireRed: return "flame.fill"
         }
     }
@@ -634,8 +560,6 @@ struct OnboardingView: View {
     private func backendColor(_ backend: ModelBackend) -> Color {
         switch backend {
         case .onnx: return .blue
-        case .huggingface: return .purple
-        case .whisper: return .orange
         case .fireRed: return .red
         }
     }

@@ -38,7 +38,7 @@ enum TranscriptionRouter {
             return .cohereONNX
         }
 
-        if (activeBackend == .onnx || activeBackend == .huggingface)
+        if activeBackend == .onnx
             && useFireRedForChinese
             && language == "zh"
         {

@@ -15,13 +15,11 @@ final class OnboardingViewModel: ObservableObject {
     @Published var hotkeyConflictDetected = false
     @Published var customKey: Key = .space
     @Published var customModifiers: NSEvent.ModifierFlags = .command // fallback if user switches off Right Command
-    @Published var hfLoggedIn = false
-    @Published var hfStatusMessage = ""
 
     let coordinator: AppCoordinator
     let modelManager: ModelManager
 
-    /// Steps actually shown to the user (mic merged into welcome; modelChoice and huggingfaceLogin skipped)
+    /// Steps actually shown to the user (mic merged into welcome; modelChoice skipped)
     private static let visibleSteps: [OnboardingStep] = [
         .welcome, .accessibility, .modelDownload, .testTranscription, .done
     ]
@@ -68,13 +66,9 @@ final class OnboardingViewModel: ObservableObject {
             step = .accessibility
             nextStep()
         case .modelChoice:
-            // Always use ONNX during onboarding — advanced backends are in Settings
+            // Always use ONNX during onboarding — advanced backends (FireRed) are in Settings
             modelManager.setActiveBackend(.onnx)
             step = .modelChoice
-            nextStep()
-        case .huggingfaceLogin:
-            // Skip — ONNX doesn't need HF login
-            step = .huggingfaceLogin
             nextStep()
         case .modelDownload where modelManager.state == .ready:
             step = .modelDownload
@@ -153,94 +147,6 @@ final class OnboardingViewModel: ObservableObject {
                     lastKnownResult = text
                 }
             }
-        }
-    }
-
-    func loginHuggingFace() async {
-        hfStatusMessage = "Opening browser for login..."
-
-        // Find python
-        let pythonPaths = [
-            modelManager.pythonEnvPath.appendingPathComponent("bin/python3").path,
-            "/opt/homebrew/bin/python3",
-            "/usr/local/bin/python3",
-            "/usr/bin/python3"
-        ]
-        guard let pythonPath = pythonPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
-            hfStatusMessage = "Error: Python3 not found. Install via: brew install python3"
-            return
-        }
-
-        // Use huggingface-cli login which opens browser
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: pythonPath)
-        proc.arguments = ["-m", "huggingface_hub.commands.huggingface_cli", "login"]
-
-        // This needs a terminal for interactive login. Instead, open the token page
-        // and have the user paste the token.
-        NSWorkspace.shared.open(URL(string: "https://huggingface.co/settings/tokens")!)
-        hfStatusMessage = "Create an access token, then paste it below."
-
-        // For now, prompt via a dialog
-        let alert = NSAlert()
-        alert.messageText = "Paste your access token"
-        alert.informativeText = "1. Copy a token from the page that just opened\n2. Paste it below\n\nThis lets Murmur download the speech model."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Save Token")
-        alert.addButton(withTitle: "Cancel")
-
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        input.placeholderString = "hf_..."
-        alert.accessoryView = input
-        alert.window.initialFirstResponder = input
-
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            let token = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !token.isEmpty else {
-                hfStatusMessage = "Error: No token entered"
-                return
-            }
-
-            // Save token using huggingface_hub
-            hfStatusMessage = "Saving token..."
-            let saveScript = """
-            from huggingface_hub import login
-            login(token="\(token)")
-            print("ok")
-            """
-
-            let saveProc = Process()
-            saveProc.executableURL = URL(fileURLWithPath: pythonPath)
-            saveProc.arguments = ["-c", saveScript]
-            let stdout = Pipe()
-            let stderr = Pipe()
-            saveProc.standardOutput = stdout
-            saveProc.standardError = stderr
-
-            do {
-                try saveProc.run()
-
-                // Wait on a background thread to avoid blocking the main actor
-                let exitStatus: Int32 = await withCheckedContinuation { continuation in
-                    saveProc.terminationHandler = { proc in
-                        continuation.resume(returning: proc.terminationStatus)
-                    }
-                }
-
-                if exitStatus == 0 {
-                    hfLoggedIn = true
-                    hfStatusMessage = "Token saved successfully"
-                } else {
-                    let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-                    let errStr = String(data: errData, encoding: .utf8) ?? "Unknown error"
-                    hfStatusMessage = "Error: \(String(errStr.suffix(150)))"
-                }
-            } catch {
-                hfStatusMessage = "Error: \(error.localizedDescription)"
-            }
-        } else {
-            hfStatusMessage = "Login cancelled"
         }
     }
 

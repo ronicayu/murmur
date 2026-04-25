@@ -25,23 +25,23 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
     override func setUpWithError() throws {
         try super.setUpWithError()
 
-        // Redirect both .onnx AND .whisper model directories to isolated temp
+        // Redirect both .onnx AND .fireRed model directories to isolated temp
         // dirs via `__testing_setModelDirectory`. Several tests below read both
         // backends' paths; redirecting up-front prevents any accidental writes
-        // to ~/Library/Application Support/Murmur/{Models-ONNX,Models-Whisper}/.
+        // to ~/Library/Application Support/Murmur/{Models-ONNX,Models-FireRed}/.
         defaults.set(ModelBackend.onnx.rawValue, forKey: backendKey)
         manager = ModelManager()
 
         let onnxTemp = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
             .appendingPathComponent("b3b4-onnx-\(UUID().uuidString)")
-        let whisperTemp = FileManager.default.temporaryDirectory
+        let fireRedTemp = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
-            .appendingPathComponent("b3b4-whisper-\(UUID().uuidString)")
+            .appendingPathComponent("b3b4-fireRed-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: onnxTemp, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: whisperTemp, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: fireRedTemp, withIntermediateDirectories: true)
         manager.__testing_setModelDirectory(onnxTemp, for: .onnx)
-        manager.__testing_setModelDirectory(whisperTemp, for: .whisper)
+        manager.__testing_setModelDirectory(fireRedTemp, for: .fireRed)
 
         _ = manager.setActiveBackend(.onnx)
 
@@ -65,16 +65,16 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
         try manager.writeManifest(manifest, for: .onnx)
 
         tempModelRoot = dir
-        whisperTempRoot = whisperTemp
+        fireRedTempRoot = fireRedTemp
     }
 
-    private var whisperTempRoot: URL!
+    private var fireRedTempRoot: URL!
 
     override func tearDownWithError() throws {
         if let root = tempModelRoot, FileManager.default.fileExists(atPath: root.path) {
             try? FileManager.default.removeItem(at: root)
         }
-        if let wRoot = whisperTempRoot, FileManager.default.fileExists(atPath: wRoot.path) {
+        if let wRoot = fireRedTempRoot, FileManager.default.fileExists(atPath: wRoot.path) {
             try? FileManager.default.removeItem(at: wRoot)
         }
         manager = nil
@@ -97,18 +97,18 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
     // MARK: .notDownloaded + files absent → false (initial state, no files)
 
     func test_activeBackend_notDownloadedState_filesAbsent_returnsFalse() {
-        // Arrange — use a fresh manager pointing at .whisper (no files exist for it)
-        _ = manager.setActiveBackend(.whisper)
-        // refreshState() is called by setActiveBackend; .whisper has no planted files so
+        // Arrange — use a fresh manager pointing at .fireRed (no files exist for it)
+        _ = manager.setActiveBackend(.fireRed)
+        // refreshState() is called by setActiveBackend; .fireRed has no planted files so
         // state will be .notDownloaded
         XCTAssertEqual(manager.state, .notDownloaded,
                        "Precondition: state must be .notDownloaded when no files exist")
 
         // Assert
-        XCTAssertFalse(manager.isModelDownloaded(for: .whisper),
+        XCTAssertFalse(manager.isModelDownloaded(for: .fireRed),
                        "Active backend in .notDownloaded state must return false")
 
-        // Clean up .whisper switch
+        // Clean up .fireRed switch
         _ = manager.setActiveBackend(.onnx)
     }
 
@@ -138,15 +138,15 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
     // MARK: Non-active backend: file-existence is the only signal
 
     func test_nonActiveBackend_filesPresent_returnsTrue() throws {
-        // Arrange — ensure active is .onnx, plant files for .whisper
+        // Arrange — ensure active is .onnx, plant files for .fireRed
         _ = manager.setActiveBackend(.onnx)
-        let whisperDir = manager.modelDirectory(for: .whisper)
-        let onnxSubdir = whisperDir.appendingPathComponent("onnx")
+        let fireRedDir = manager.modelDirectory(for: .fireRed)
+        let onnxSubdir = fireRedDir.appendingPathComponent("onnx")
         try FileManager.default.createDirectory(at: onnxSubdir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: whisperDir) }
+        defer { try? FileManager.default.removeItem(at: fireRedDir) }
 
-        for file in ModelBackend.whisper.requiredFiles {
-            let url = whisperDir.appendingPathComponent(file)
+        for file in ModelBackend.fireRed.requiredFiles {
+            let url = fireRedDir.appendingPathComponent(file)
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true
@@ -155,31 +155,31 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
         }
 
         // FU-04: write a manifest so manifestIsValid(for:) returns true.
-        let manifest = try manager.buildManifest(for: .whisper)
-        try manager.writeManifest(manifest, for: .whisper)
+        let manifest = try manager.buildManifest(for: .fireRed)
+        try manager.writeManifest(manifest, for: .fireRed)
 
-        // Act + Assert — .whisper is NOT active; result is manifest validity
-        XCTAssertTrue(manager.isModelDownloaded(for: .whisper),
+        // Act + Assert — .fireRed is NOT active; result is manifest validity
+        XCTAssertTrue(manager.isModelDownloaded(for: .fireRed),
                       "Non-active backend with files and manifest present must return true")
     }
 
     func test_nonActiveBackend_filesAbsent_returnsFalse() {
         // Arrange — ensure active is .onnx.
-        // Use .whisper as the probe: plant no files for it, then verify.
-        // We guard against an environment where whisper files already exist.
+        // Use .fireRed as the probe: plant no files for it, then verify.
+        // We guard against an environment where fireRed files already exist.
         _ = manager.setActiveBackend(.onnx)
-        let whisperDir = manager.modelDirectory(for: .whisper)
-        let whisperFilesExist = ModelBackend.whisper.requiredFiles.allSatisfy { file in
-            FileManager.default.fileExists(atPath: whisperDir.appendingPathComponent(file).path)
+        let fireRedDir = manager.modelDirectory(for: .fireRed)
+        let fireRedFilesExist = ModelBackend.fireRed.requiredFiles.allSatisfy { file in
+            FileManager.default.fileExists(atPath: fireRedDir.appendingPathComponent(file).path)
         }
-        guard !whisperFilesExist else {
-            // Skip: this machine has whisper model files downloaded — can't test "absent" case.
+        guard !fireRedFilesExist else {
+            // Skip: this machine has fireRed model files downloaded — can't test "absent" case.
             // The inverse (filesPresent → true) is already covered by test_nonActiveBackend_filesPresent_returnsTrue.
             return
         }
 
         // Act + Assert
-        XCTAssertFalse(manager.isModelDownloaded(for: .whisper),
+        XCTAssertFalse(manager.isModelDownloaded(for: .fireRed),
                        "Non-active backend with no files must return false")
     }
 
@@ -249,11 +249,11 @@ final class ActiveBackendDidSetGuardTests: XCTestCase {
         XCTAssertEqual(manager.activeBackend, .onnx)
 
         // Act
-        let accepted = manager.setActiveBackend(.whisper)
+        let accepted = manager.setActiveBackend(.fireRed)
 
         // Assert
         XCTAssertTrue(accepted)
-        XCTAssertEqual(manager.activeBackend, .whisper,
+        XCTAssertEqual(manager.activeBackend, .fireRed,
                        "Backend switch must succeed when no download is in progress")
 
         // Cleanup
@@ -265,10 +265,10 @@ final class ActiveBackendDidSetGuardTests: XCTestCase {
         XCTAssertFalse(manager.isDownloadActive)
 
         // Act
-        _ = manager.setActiveBackend(.huggingface)
+        _ = manager.setActiveBackend(.fireRed)
 
         // Assert
-        XCTAssertEqual(defaults.string(forKey: "modelBackend"), ModelBackend.huggingface.rawValue,
+        XCTAssertEqual(defaults.string(forKey: "modelBackend"), ModelBackend.fireRed.rawValue,
                        "Successful switch must persist to UserDefaults")
 
         // Cleanup
@@ -358,7 +358,7 @@ final class OnboardingViewModelRepublishTests: XCTestCase {
         // Act — switching activeBackend changes a @Published property on ModelManager,
         // which fires ModelManager.objectWillChange, which the subscription in
         // OnboardingViewModel.init must forward.
-        let newBackend: ModelBackend = modelManager.activeBackend == .onnx ? .whisper : .onnx
+        let newBackend: ModelBackend = modelManager.activeBackend == .onnx ? .fireRed : .onnx
         _ = modelManager.setActiveBackend(newBackend)
 
         // Assert — restore backend to avoid polluting other tests
@@ -383,7 +383,7 @@ final class OnboardingViewModelRepublishTests: XCTestCase {
             .store(in: &cancellables)
 
         // Act — two distinct backend switches
-        _ = modelManager.setActiveBackend(.whisper)
+        _ = modelManager.setActiveBackend(.fireRed)
         _ = modelManager.setActiveBackend(.onnx)
 
         wait(for: [expectation], timeout: 1.0)
@@ -417,7 +417,7 @@ final class OnboardingViewModelRepublishTests: XCTestCase {
         viewModel = nil
 
         // Trigger a ModelManager change after dealloc — must not crash (no zombie sink)
-        _ = modelManager.setActiveBackend(.whisper)
+        _ = modelManager.setActiveBackend(.fireRed)
         defer { _ = modelManager.setActiveBackend(.onnx) }
 
         // modelManager itself still fires — verify it's healthy
@@ -445,7 +445,7 @@ final class SetActiveBackendGuardTests: XCTestCase {
 
     private var manager: ModelManager!
     private var onnxTempRoot: URL!
-    private var whisperTempRoot: URL!
+    private var fireRedTempRoot: URL!
     private var cancellables = Set<AnyCancellable>()
 
     override func setUpWithError() throws {
@@ -458,13 +458,13 @@ final class SetActiveBackendGuardTests: XCTestCase {
         onnxTempRoot = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
             .appendingPathComponent("setactive-onnx-\(UUID().uuidString)")
-        whisperTempRoot = FileManager.default.temporaryDirectory
+        fireRedTempRoot = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
-            .appendingPathComponent("setactive-whisper-\(UUID().uuidString)")
+            .appendingPathComponent("setactive-fireRed-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: onnxTempRoot, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: whisperTempRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: fireRedTempRoot, withIntermediateDirectories: true)
         manager.__testing_setModelDirectory(onnxTempRoot, for: .onnx)
-        manager.__testing_setModelDirectory(whisperTempRoot, for: .whisper)
+        manager.__testing_setModelDirectory(fireRedTempRoot, for: .fireRed)
         // Ensure we start from a known backend
         _ = manager.setActiveBackend(.onnx)
     }
@@ -476,7 +476,7 @@ final class SetActiveBackendGuardTests: XCTestCase {
         _ = manager.setActiveBackend(.onnx)
         manager = nil
         if let root = onnxTempRoot { try? FileManager.default.removeItem(at: root) }
-        if let wRoot = whisperTempRoot { try? FileManager.default.removeItem(at: wRoot) }
+        if let wRoot = fireRedTempRoot { try? FileManager.default.removeItem(at: wRoot) }
         cancellables.removeAll()
         try super.tearDownWithError()
     }
@@ -490,7 +490,7 @@ final class SetActiveBackendGuardTests: XCTestCase {
         XCTAssertEqual(manager.activeBackend, .onnx)
 
         // Act
-        let accepted = manager.setActiveBackend(.whisper)
+        let accepted = manager.setActiveBackend(.fireRed)
 
         // Assert
         XCTAssertFalse(accepted, "setActiveBackend must refuse while state == .downloading")
@@ -503,7 +503,7 @@ final class SetActiveBackendGuardTests: XCTestCase {
         manager.__testing_setState(.downloading(progress: -1, bytesPerSec: 0))
 
         // Act
-        _ = manager.setActiveBackend(.huggingface)
+        _ = manager.setActiveBackend(.fireRed)
 
         // Assert — backend reverted
         XCTAssertEqual(manager.activeBackend, .onnx)
@@ -517,7 +517,7 @@ final class SetActiveBackendGuardTests: XCTestCase {
         XCTAssertTrue(manager.isDownloadActive, "Precondition: isDownloadActive must be true")
 
         // Act
-        let accepted = manager.setActiveBackend(.whisper)
+        let accepted = manager.setActiveBackend(.fireRed)
 
         // Assert
         XCTAssertFalse(accepted, "setActiveBackend must refuse while state == .verifying")
@@ -537,7 +537,7 @@ final class SetActiveBackendGuardTests: XCTestCase {
             .store(in: &cancellables)
 
         // Act — attempt refused switch
-        _ = manager.setActiveBackend(.whisper)
+        _ = manager.setActiveBackend(.fireRed)
 
         // Assert — the committed publisher must NOT have fired
         XCTAssertFalse(committedFired,
@@ -554,7 +554,7 @@ final class SetActiveBackendGuardTests: XCTestCase {
             .store(in: &cancellables)
 
         // Act
-        _ = manager.setActiveBackend(.whisper)
+        _ = manager.setActiveBackend(.fireRed)
 
         // Assert
         XCTAssertFalse(committedFired,
@@ -574,11 +574,11 @@ final class SetActiveBackendGuardTests: XCTestCase {
             .store(in: &cancellables)
 
         // Act
-        let accepted = manager.setActiveBackend(.whisper)
+        let accepted = manager.setActiveBackend(.fireRed)
 
         // Assert
         XCTAssertTrue(accepted)
-        XCTAssertEqual(receivedBackend, .whisper,
+        XCTAssertEqual(receivedBackend, .fireRed,
             "committedBackendChange must emit the new backend when switch is accepted")
     }
 
@@ -594,11 +594,11 @@ final class SetActiveBackendGuardTests: XCTestCase {
         XCTAssertFalse(manager.isDownloadActive, "After cancel, isDownloadActive must be false")
 
         // Act
-        let accepted = manager.setActiveBackend(.whisper)
+        let accepted = manager.setActiveBackend(.fireRed)
 
         // Assert
         XCTAssertTrue(accepted, "setActiveBackend must succeed after download is cancelled")
-        XCTAssertEqual(manager.activeBackend, .whisper)
+        XCTAssertEqual(manager.activeBackend, .fireRed)
     }
 
     // MARK: C5 — same-value short-circuit (regression test)
@@ -768,7 +768,7 @@ final class CancelDownloadTests: XCTestCase {
 
     private var manager: ModelManager!
     private var onnxTempRoot: URL!
-    private var whisperTempRoot: URL!
+    private var fireRedTempRoot: URL!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -780,18 +780,18 @@ final class CancelDownloadTests: XCTestCase {
         onnxTempRoot = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
             .appendingPathComponent("canceldl-onnx-\(UUID().uuidString)")
-        whisperTempRoot = FileManager.default.temporaryDirectory
+        fireRedTempRoot = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
-            .appendingPathComponent("canceldl-whisper-\(UUID().uuidString)")
+            .appendingPathComponent("canceldl-fireRed-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: onnxTempRoot, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: whisperTempRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: fireRedTempRoot, withIntermediateDirectories: true)
         manager.__testing_setModelDirectory(onnxTempRoot, for: .onnx)
-        manager.__testing_setModelDirectory(whisperTempRoot, for: .whisper)
+        manager.__testing_setModelDirectory(fireRedTempRoot, for: .fireRed)
     }
 
     override func tearDownWithError() throws {
         if let root = onnxTempRoot { try? FileManager.default.removeItem(at: root) }
-        if let wRoot = whisperTempRoot { try? FileManager.default.removeItem(at: wRoot) }
+        if let wRoot = fireRedTempRoot { try? FileManager.default.removeItem(at: wRoot) }
         manager = nil
         try super.tearDownWithError()
     }
@@ -829,12 +829,12 @@ final class CancelDownloadTests: XCTestCase {
         XCTAssertFalse(manager.isDownloadActive, "Precondition: download must be cancelled")
 
         // Act — backend switch should now be accepted
-        let accepted = manager.setActiveBackend(.whisper)
+        let accepted = manager.setActiveBackend(.fireRed)
 
         // Assert
         XCTAssertTrue(accepted,
             "Backend switch must be accepted immediately after cancelDownload()")
-        XCTAssertEqual(manager.activeBackend, .whisper)
+        XCTAssertEqual(manager.activeBackend, .fireRed)
     }
 
     func test_cancelDownload_clearsStatusMessage() {

@@ -26,8 +26,6 @@ private final class ResumeGuard: @unchecked Sendable {
 
 enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
     case onnx
-    case huggingface
-    case whisper
     case fireRed
 
     var id: String { rawValue }
@@ -35,8 +33,6 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
     var displayName: String {
         switch self {
         case .onnx: return "Standard (Recommended)"
-        case .huggingface: return "High Quality"
-        case .whisper: return "Whisper"
         case .fireRed: return "FireRed (Chinese-first)"
         }
     }
@@ -44,8 +40,6 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
     var shortName: String {
         switch self {
         case .onnx: return "Standard"
-        case .huggingface: return "High Quality"
-        case .whisper: return "Whisper"
         case .fireRed: return "FireRed"
         }
     }
@@ -53,8 +47,6 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
     var modelRepo: String {
         switch self {
         case .onnx: return "onnx-community/cohere-transcribe-03-2026-ONNX"
-        case .huggingface: return "CohereLabs/cohere-transcribe-03-2026"
-        case .whisper: return "openai/whisper-large-v3-turbo"
         case .fireRed: return "csukuangfj2/sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26"
         }
     }
@@ -62,17 +54,13 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
     var requiredDiskSpace: Int64 {
         switch self {
         case .onnx: return 1_600_000_000       // ~1.5 GB
-        case .huggingface: return 4_200_000_000 // ~4.1 GB
-        case .whisper: return 1_600_000_000     // ~1.6 GB
-        case .fireRed: return 1_300_000_000     // ~1.24 GB
+        case .fireRed: return 1_300_000_000    // ~1.24 GB rounded up
         }
     }
 
     var modelSubdirectory: String {
         switch self {
         case .onnx: return "Murmur/Models-ONNX"
-        case .huggingface: return "Murmur/Models"
-        case .whisper: return "Murmur/Models-Whisper"
         case .fireRed: return "Murmur/Models-FireRed"
         }
     }
@@ -81,7 +69,6 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
     var allowPatterns: [String]? {
         switch self {
         case .onnx: return ["onnx/encoder_model_q4f16*", "onnx/decoder_model_merged_q4f16*", "*.json"]
-        case .huggingface, .whisper: return nil
         case .fireRed: return ["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt", "*.json"]
         }
     }
@@ -90,24 +77,17 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
     var requiredFiles: [String] {
         switch self {
         case .onnx: return ["config.json", "onnx/encoder_model_q4f16.onnx", "onnx/decoder_model_merged_q4f16.onnx"]
-        case .huggingface, .whisper: return ["config.json", "model.safetensors"]
         case .fireRed: return ["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt"]
         }
     }
 
-    /// Whether this backend requires a HuggingFace token (gated model)
-    var requiresHFLogin: Bool {
-        switch self {
-        case .onnx, .whisper, .fireRed: return false
-        case .huggingface: return true
-        }
-    }
+    /// Whether this backend requires a HuggingFace token (gated model).
+    /// Always false now — both remaining backends are public ONNX repos.
+    var requiresHFLogin: Bool { false }
 
     var sizeDescription: String {
         switch self {
         case .onnx: return "~1.5 GB"
-        case .huggingface: return "~4 GB"
-        case .whisper: return "~1.6 GB"
         case .fireRed: return "~1.24 GB"
         }
     }
@@ -115,8 +95,6 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
     var description: String {
         switch self {
         case .onnx: return "Smaller download, fast and lightweight. Great for most users."
-        case .huggingface: return "Uses your Mac's GPU for faster transcription. Larger download, requires a free account."
-        case .whisper: return "OpenAI's Whisper model. Uses your Mac's GPU, great multilingual support. No account needed."
         case .fireRed: return "Best Chinese accuracy, including dialects and Chinese-English code-switching. Other languages fall back to Cohere ONNX (1.5 GB additional)."
         }
     }

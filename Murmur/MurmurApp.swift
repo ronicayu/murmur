@@ -206,7 +206,13 @@ struct MurmurApp: App {
     }
 
     private func showSettings() {
-        if let existing = settingsWindow, existing.isVisible {
+        // If a Settings window already exists — visible OR hidden after a previous
+        // close — reuse it instead of spawning a duplicate. With
+        // `isReleasedWhenClosed = false` (set below on first open), the NSWindow
+        // outlives every red-X close; calling makeKeyAndOrderFront brings it back
+        // exactly as it was. Without this, fast clicks during the close animation
+        // could leave two Settings windows on screen.
+        if let existing = settingsWindow {
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -238,14 +244,16 @@ struct MurmurApp: App {
         )
         guard modelExists else { return false }
         if mm.activeBackend == .fireRed { return true }
-        if mm.useFireRedForChinese && (mm.activeBackend == .onnx || mm.activeBackend == .huggingface) {
+        if mm.useFireRedForChinese && mm.activeBackend == .onnx {
             return true
         }
         return false
     }
 
     private func showRecentHistory() {
-        if let existing = recentHistoryWindow, existing.isVisible {
+        // Same reuse rule as showSettings — a closed-but-not-released window
+        // gets re-shown rather than duplicated.
+        if let existing = recentHistoryWindow {
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return

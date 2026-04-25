@@ -6,6 +6,17 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.3.1] — 2026-04-26
+
+### Removed
+- **HuggingFace ("High Quality") and Whisper backends**. Both were rarely-chosen alternatives to the default Cohere ONNX backend. Murmur now ships with two backends: **Standard** (Cohere ONNX, multilingual) and **FireRed** (Chinese-first). Existing users on `huggingface` or `whisper` backends are auto-migrated to `onnx` on next launch (the `ModelBackend.init(rawValue:)` lookup falls back to `.onnx` for unknown raw values). The on-disk `~/Library/Application Support/Murmur/Models/` (HF) and `Models-Whisper/` directories are left untouched — delete them manually to reclaim disk if you used those backends. Onboarding's HuggingFace-login step is gone too (Cohere ONNX repo is public, no token needed). Settings → Speech Engine is now a flat two-row picker, no Advanced disclosure.
+
+### Added
+- **Version label in Settings** (General tab footer) reads `CFBundleShortVersionString` from `Info.plist`. Helpful when filing bug reports.
+
+### Fixed
+- **Duplicate Settings windows** — fast clicks during the close animation could leave two windows on screen simultaneously. The reuse path no longer requires `isVisible == true`; any prior NSWindow (with `isReleasedWhenClosed = false`) is brought back to front instead. Same fix applied to Recent Transcriptions.
+
 ## [0.3.0] — 2026-04-26
 
 ### Added

@@ -132,13 +132,14 @@ final class OnboardingStepTests: XCTestCase {
         XCTAssertEqual(steps.last, .done)
     }
 
-    func testVisibleStepsExcludeModelChoiceAndHFLogin() {
-        // The visible steps (used for progress bar) should not include modelChoice or huggingfaceLogin
+    func testVisibleStepsExcludeModelChoice() {
+        // The visible steps (used for progress bar) should not include modelChoice.
+        // The huggingfaceLogin step was removed in v0.3.1 along with the HuggingFace
+        // backend; nothing to assert against on that any more.
         let visibleSteps: [OnboardingStep] = [
             .welcome, .accessibility, .modelDownload, .testTranscription, .done
         ]
         XCTAssertFalse(visibleSteps.contains(.modelChoice))
-        XCTAssertFalse(visibleSteps.contains(.huggingfaceLogin))
         XCTAssertFalse(visibleSteps.contains(.microphone), "Microphone is now merged into welcome")
         XCTAssertEqual(visibleSteps.count, 5)
     }
