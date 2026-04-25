@@ -2,6 +2,7 @@ import SwiftUI
 import Carbon
 import Combine
 import HotKey
+import AVFoundation
 import os
 
 enum AppState: Equatable, Sendable {
@@ -160,6 +161,20 @@ final class AppCoordinator: ObservableObject {
 
     private(set) var streamingCoordinator: StreamingTranscriptionCoordinator?
 
+    /// Set by MurmurApp at construction time; the coordinator queries the
+    /// router via this manager.
+    weak var modelManager: ModelManager?
+
+    /// FireRed transcription service. Lazily created when first needed AND
+    /// when the FireRed model is downloaded. nil until either condition fails.
+    /// Replaced when the model directory changes (for tests via __testing seams).
+    private var fireRed: FireRedTranscriptionService?
+    private var fireRedModelDirectory: URL?
+
+    /// True after we've logged the first FireRed failure this session — keeps
+    /// the log readable when the model is missing or broken.
+    private var hasLoggedFireRedFailureThisSession = false
+
     private var isStreamingEnabled: Bool {
         UserDefaults.standard.bool(forKey: "streamingInputEnabled")
     }
@@ -180,6 +195,15 @@ final class AppCoordinator: ObservableObject {
         Task { await transcription.killProcess() }
         transcription = newService
         preloadModelInBackground()
+    }
+
+    /// Wire up (or tear down) the FireRed service. Called from `MurmurApp` in
+    /// response to `committedUseFireRedChange` and `committedBackendChange`.
+    /// Passing `nil` releases the recognizer.
+    func setFireRedService(_ service: FireRedTranscriptionService?, modelDirectory: URL?) {
+        self.fireRed = service
+        self.fireRedModelDirectory = modelDirectory
+        self.hasLoggedFireRedFailureThisSession = false
     }
 
     /// Preload the model so the first transcription is instant.
@@ -1041,6 +1065,45 @@ final class AppCoordinator: ObservableObject {
         UserDefaults.standard.bool(forKey: "autoDetectLanguage")
     }
 
+    /// V1 transcribe path that consults `TranscriptionRouter` and dispatches to
+    /// either FireRed or the existing transcription service. On FireRed errors
+    /// we fall back to Cohere for THIS request only and log the failure once
+    /// per session.
+    private func routedTranscribeV1(wav: URL, language: String) async throws -> TranscriptionResult {
+        let mm = self.modelManager
+        let choice = TranscriptionRouter.route(
+            activeBackend: mm?.activeBackend ?? .onnx,
+            useFireRedForChinese: mm?.useFireRedForChinese ?? false,
+            language: language,
+            version: .v1FullPass
+        )
+
+        switch choice {
+        case .fireRed:
+            guard let svc = fireRed else {
+                Self.log.warning("FireRed routing chosen but service not initialised — falling back to Cohere")
+                return try await transcription.transcribe(audioURL: wav, language: language)
+            }
+            do {
+                let samples = try Self.loadSamples16k(url: wav)
+                let text = try await svc.transcribe(samples: samples, sampleRate: 16000)
+                let lang: DetectedLanguage = (language == "zh") ? .chinese : .english
+                return TranscriptionResult(text: text, language: lang, durationMs: 0)
+            } catch {
+                if !hasLoggedFireRedFailureThisSession {
+                    hasLoggedFireRedFailureThisSession = true
+                    Self.log.warning("FireRed inference failed (further failures suppressed this session): \(String(describing: error), privacy: .public)")
+                }
+                return try await transcription.transcribe(audioURL: wav, language: language)
+            }
+
+        case .cohereONNX, .cohereStreaming, .existing:
+            // Existing path — the active service is already correct because
+            // MurmurApp swaps it on backend changes.
+            return try await transcription.transcribe(audioURL: wav, language: language)
+        }
+    }
+
     /// Transcribe with optional Cohere-echo auto-detect. Replaces the old
     /// pre-flight Whisper-tiny LID step.
     ///
@@ -1063,7 +1126,7 @@ final class AppCoordinator: ObservableObject {
         initialLang: String
     ) async throws -> TranscriptionResult {
         let result1 = try await withTimeout(seconds: 120, operation: "transcription") {
-            try await self.transcription.transcribe(audioURL: wav, language: initialLang)
+            try await self.routedTranscribeV1(wav: wav, language: initialLang)
         }
         guard autoDetectLanguageEnabled else { return result1 }
 
@@ -1090,7 +1153,7 @@ final class AppCoordinator: ObservableObject {
 
         do {
             let result2 = try await withTimeout(seconds: 120, operation: "transcription-retry") {
-                try await self.transcription.transcribe(audioURL: wav, language: detectedCode)
+                try await self.routedTranscribeV1(wav: wav, language: detectedCode)
             }
             return result2
         } catch {
@@ -1152,6 +1215,60 @@ final class AppCoordinator: ObservableObject {
             group.cancelAll()
             return result
         }
+    }
+
+    /// Load 16 kHz mono Float32 samples from a wav. Mirrors
+    /// NativeTranscriptionService.loadAudio for the same conversion semantics.
+    fileprivate static func loadSamples16k(url: URL) throws -> [Float] {
+        let file = try AVAudioFile(forReading: url)
+        let srcFormat = file.processingFormat
+        let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16000,
+            channels: 1,
+            interleaved: false
+        )!
+
+        if srcFormat.sampleRate == 16000 && srcFormat.channelCount == 1
+            && srcFormat.commonFormat == .pcmFormatFloat32 {
+            let frameCount = AVAudioFrameCount(file.length)
+            guard let buf = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount) else {
+                throw MurmurError.transcriptionFailed("Failed to create audio buffer")
+            }
+            try file.read(into: buf)
+            guard let data = buf.floatChannelData?[0] else {
+                throw MurmurError.transcriptionFailed("No audio data")
+            }
+            return Array(UnsafeBufferPointer(start: data, count: Int(buf.frameLength)))
+        }
+
+        guard let conv = AVAudioConverter(from: srcFormat, to: targetFormat) else {
+            throw MurmurError.transcriptionFailed("Cannot create audio converter")
+        }
+        let inBuf = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: 4096)!
+        var allSamples = [Float]()
+        var convError: NSError?
+        let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+            do {
+                inBuf.frameLength = 0
+                try file.read(into: inBuf)
+                if inBuf.frameLength == 0 { outStatus.pointee = .endOfStream; return nil }
+                outStatus.pointee = .haveData
+                return inBuf
+            } catch { outStatus.pointee = .endOfStream; return nil }
+        }
+        var status: AVAudioConverterOutputStatus
+        repeat {
+            let chunk = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: 4096)!
+            status = conv.convert(to: chunk, error: &convError, withInputFrom: inputBlock)
+            if let data = chunk.floatChannelData?[0], chunk.frameLength > 0 {
+                allSamples.append(contentsOf: UnsafeBufferPointer(start: data, count: Int(chunk.frameLength)))
+            }
+        } while status == .haveData
+        if allSamples.isEmpty {
+            throw MurmurError.transcriptionFailed("No audio data after conversion")
+        }
+        return allSamples
     }
 }
 
