@@ -14,6 +14,11 @@
   - **Chinese:** appends `。` if the text doesn't already end in a recognised CJK or Western terminal (or closing CJK quote/bracket); converts a trailing ASCII `.` `?` `!` to the full-width equivalent (`。` `？` `！`); leaves mid-text ASCII punctuation alone so embedded Latin fragments like "Python 3.11" are preserved.
   - Japanese, Korean, and any other language code pass through unchanged.
   - V3 streaming is deliberately excluded from cleanup; only the V1 full-pass path runs it.
+- **FireRed Chinese ASR backend** as a 4th engine option, plus an opt-in "Use FireRed for Chinese transcription" toggle visible under Cohere backends. Both routes share the same on-disk FireRed model files (`csukuangfj2/sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26`, ~1.24 GB).
+  - **Quality:** in spike testing on SenseVoice's `asr_example_cn_en.wav` Chinese-English mixed sample, FireRed achieved 8.94% CER vs Cohere's 22.76% (zh prompt). FireRed preserves character-level fidelity including English code-switching ("做 machine learning 做 deep learning…"); Cohere paraphrases.
+  - **Routing:** Toggle ON: V1 Chinese audio routes to FireRed; English and other languages stay on Cohere. FireRed backend: Chinese + English use FireRed; other languages auto-fallback to Cohere ONNX (also requires Cohere ONNX downloaded).
+  - **V3 streaming unchanged:** sherpa-onnx FireRedASR2-AED has no streaming mode; V3 always uses Cohere regardless of toggle/backend.
+  - **Bundling:** Adds vendored sherpa-onnx v1.12.40 macOS xcframework (~42 MB compressed in repo, links to existing `onnxruntime-swift-package-manager` — no duplicate ONNX runtime).
 
 ## [0.2.4] — 2026-04-25 (unreleased)
 
