@@ -241,7 +241,13 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
 
         let session = makeSession()
 
-        let prompt = "Language: \(language)\nRaw transcription: \(trimmed)"
+        let glossary = CorrectionPrompts.currentGlossary()
+        let glossaryLine = glossary.isEmpty ? "(none)" : glossary.joined(separator: ", ")
+        let prompt = """
+        Language: \(language)
+        Glossary: \(glossaryLine)
+        Raw transcription: \(trimmed)
+        """
         let options = GenerationOptions(
             sampling: .greedy,
             temperature: 0.0,
