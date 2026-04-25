@@ -765,12 +765,14 @@ final class AppCoordinator: ObservableObject {
 
             lastTranscription = textToInject
             lastLanguage = result.language
-            // History records the injected (final) text. `rawText` captures the
-            // pre-correction transcription only when correction actually changed
-            // words (homophone fix, character substitution) — that is the only
-            // transformation the user wants to verify. Rule-based cleanup
-            // (punctuation/casing) is not surfaced because it is deterministic.
-            let rawForHistory: String? = (corrected != rawTranscribed) ? rawTranscribed : nil
+            // History records the injected (final) text. `rawText` captures
+            // the pre-pipeline transcription whenever ANY post-processing
+            // step (LLM correction OR rule-based cleanup) changed the text.
+            // Comparing against the final injected text — not just the
+            // correction step — means cleanup-only diffs (e.g. just adding
+            // a terminal `。`) also surface in Recent, so the user can
+            // always tell whether the pipeline did anything to their words.
+            let rawForHistory: String? = (textToInject != rawTranscribed) ? rawTranscribed : nil
             transcriptionHistory.insert((text: textToInject, rawText: rawForHistory, language: result.language, date: Date()), at: 0)
             if transcriptionHistory.count > maxHistoryCount {
                 transcriptionHistory.removeLast()
@@ -857,7 +859,8 @@ final class AppCoordinator: ObservableObject {
             // Skip real injection in tests — just record what would be injected.
             lastTranscription = textToInject
             lastLanguage = result.language
-            let rawForHistory: String? = (corrected != rawTranscribed) ? rawTranscribed : nil
+            // Capture rawText whenever the pipeline touched the words (matches production).
+            let rawForHistory: String? = (textToInject != rawTranscribed) ? rawTranscribed : nil
             transcriptionHistory.insert((text: textToInject, rawText: rawForHistory, language: result.language, date: Date()), at: 0)
             if transcriptionHistory.count > maxHistoryCount {
                 transcriptionHistory.removeLast()
