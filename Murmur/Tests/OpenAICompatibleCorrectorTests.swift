@@ -16,6 +16,7 @@ final class OpenAICompatibleCorrectorTests: XCTestCase {
             modelName: "qwen2.5:3b-instruct",
             apiKey: nil,
             language: "en",
+            glossary: [],
             trimmed: "hello world"
         )
         XCTAssertEqual(request.httpMethod, "POST")
@@ -28,6 +29,7 @@ final class OpenAICompatibleCorrectorTests: XCTestCase {
             modelName: "local-model",
             apiKey: nil,
             language: "en",
+            glossary: [],
             trimmed: "hello"
         )
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
@@ -39,6 +41,7 @@ final class OpenAICompatibleCorrectorTests: XCTestCase {
             modelName: "local-model",
             apiKey: nil,
             language: "en",
+            glossary: [],
             trimmed: "hello"
         )
         XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
@@ -50,6 +53,7 @@ final class OpenAICompatibleCorrectorTests: XCTestCase {
             modelName: "gpt-4o-mini",
             apiKey: "sk-test-123",
             language: "en",
+            glossary: [],
             trimmed: "hello"
         )
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer sk-test-123")
@@ -61,6 +65,7 @@ final class OpenAICompatibleCorrectorTests: XCTestCase {
             modelName: "qwen2.5:3b-instruct",
             apiKey: nil,
             language: "zh",
+            glossary: [],
             trimmed: "你好世界"
         )
         let body = try XCTUnwrap(request.httpBody)
@@ -87,6 +92,7 @@ final class OpenAICompatibleCorrectorTests: XCTestCase {
             modelName: "m",
             apiKey: nil,
             language: "en",
+            glossary: [],
             trimmed: "ok"
         )
         let shortJson = try JSONSerialization.jsonObject(with: short.httpBody!) as! [String: Any]
@@ -100,11 +106,66 @@ final class OpenAICompatibleCorrectorTests: XCTestCase {
             modelName: "m",
             apiKey: nil,
             language: "en",
+            glossary: [],
             trimmed: longText
         )
         let longJson = try JSONSerialization.jsonObject(with: long.httpBody!) as! [String: Any]
         XCTAssertEqual(longJson["max_tokens"] as? Int, 160,
                        "Long inputs must scale max_tokens to ⌈length × 1.6⌉")
+    }
+
+    // MARK: - Glossary in user message
+
+    func test_makeRequest_userMessage_includesGlossaryLine_whenEmpty() throws {
+        let request = try OpenAICompatibleCorrector.makeRequest(
+            baseURL: URL(string: "http://localhost:11434/v1")!,
+            modelName: "m",
+            apiKey: nil,
+            language: "en",
+            glossary: [],
+            trimmed: "hello"
+        )
+        let body = try XCTUnwrap(request.httpBody)
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let messages = try XCTUnwrap(json["messages"] as? [[String: String]])
+        let userContent = try XCTUnwrap(messages[1]["content"])
+        XCTAssertTrue(userContent.contains("Glossary: (none)"),
+                      "Empty glossary must render as '(none)' so the prompt rule degrades gracefully")
+    }
+
+    func test_makeRequest_userMessage_includesGlossaryLine_withTerms() throws {
+        let request = try OpenAICompatibleCorrector.makeRequest(
+            baseURL: URL(string: "http://localhost:11434/v1")!,
+            modelName: "m",
+            apiKey: nil,
+            language: "zh",
+            glossary: ["OKR", "对齐", "k8s"],
+            trimmed: "我们今天的奥凯阿"
+        )
+        let body = try XCTUnwrap(request.httpBody)
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let messages = try XCTUnwrap(json["messages"] as? [[String: String]])
+        let userContent = try XCTUnwrap(messages[1]["content"])
+        XCTAssertTrue(userContent.contains("Glossary: OKR, 对齐, k8s"),
+                      "Glossary terms must be joined with ', ' after the field label")
+    }
+
+    func test_makeRequest_systemMessage_isCurrentPrompt() throws {
+        UserDefaults.standard.removeObject(forKey: CorrectionPrompts.systemPromptKey)
+        let request = try OpenAICompatibleCorrector.makeRequest(
+            baseURL: URL(string: "http://localhost:11434/v1")!,
+            modelName: "m",
+            apiKey: nil,
+            language: "en",
+            glossary: [],
+            trimmed: "hello"
+        )
+        let body = try XCTUnwrap(request.httpBody)
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let messages = try XCTUnwrap(json["messages"] as? [[String: String]])
+        XCTAssertEqual(messages[0]["role"], "system")
+        XCTAssertEqual(messages[0]["content"], CorrectionPrompts.defaultSystemPrompt,
+                       "System message must use CorrectionPrompts.current (default when no override)")
     }
 
     // MARK: - parseChatResponse

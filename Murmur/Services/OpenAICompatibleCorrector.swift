@@ -44,6 +44,7 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
             modelName: modelName,
             apiKey: apiKey,
             language: language,
+            glossary: CorrectionPrompts.currentGlossary(),
             trimmed: trimmed
         )
 
@@ -75,11 +76,17 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
 
     /// Builds the `POST {baseURL}/chat/completions` request body. Broken out
     /// from `correct` so tests can assert payload shape without a live server.
+    ///
+    /// `glossary` is a normalised list of speaker-specific terms — see
+    /// `CorrectionPrompts.currentGlossary()`. An empty list renders as
+    /// `Glossary: (none)` in the user message so the system-prompt rule
+    /// degrades gracefully when the user has not entered terms.
     static func makeRequest(
         baseURL: URL,
         modelName: String,
         apiKey: String?,
         language: String,
+        glossary: [String],
         trimmed: String
     ) throws -> URLRequest {
         let endpoint = baseURL.appendingPathComponent("chat/completions")
@@ -96,11 +103,18 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
         // guard, this is just a guardrail against runaway generations.
         let maxTokens = max(64, Int((Double(trimmed.count) * 1.6).rounded(.up)))
 
+        let glossaryLine = glossary.isEmpty ? "(none)" : glossary.joined(separator: ", ")
+        let userContent = """
+        Language: \(language)
+        Glossary: \(glossaryLine)
+        Raw transcription: \(trimmed)
+        """
+
         let body: [String: Any] = [
             "model": modelName,
             "messages": [
                 ["role": "system", "content": CorrectionPrompts.current],
-                ["role": "user", "content": "Language: \(language)\nRaw transcription: \(trimmed)"]
+                ["role": "user", "content": userContent]
             ],
             "stream": false,
             "temperature": 0.0,
