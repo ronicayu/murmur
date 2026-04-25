@@ -7,6 +7,7 @@ struct MenuBarView: View {
     @AppStorage("streamingInputEnabled") private var streamingInputEnabled: Bool = false
     var onOpenSettings: () -> Void = {}
     var onOpenTranscription: () -> Void = {}
+    var onOpenRecentHistory: () -> Void = {}
 
     private static let allLanguages: [(code: String, label: String)] = [
         ("auto", "Auto"),
@@ -36,14 +37,16 @@ struct MenuBarView: View {
 
             sectionDivider
 
-            // ── Transcription history ──
-            if !coordinator.transcriptionHistory.isEmpty {
-                transcriptionHistorySection
-                sectionDivider
-            }
-
             // ── Actions ──
             VStack(spacing: 0) {
+                menuButton(
+                    icon: "clock.arrow.circlepath",
+                    label: "Recent Transcriptions",
+                    trailing: recentHistoryTrailing
+                ) {
+                    onOpenRecentHistory()
+                }
+
                 menuButton(icon: "waveform", label: "Transcription", trailing: .shortcut("⌘⇧T")) {
                     onOpenTranscription()
                 }
@@ -202,84 +205,12 @@ struct MenuBarView: View {
         Self.allLanguages.first { $0.code == transcriptionLanguage }?.label ?? transcriptionLanguage.uppercased()
     }
 
-    // MARK: - Transcription History
-
-    private var transcriptionHistorySection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            sectionLabel("Recent")
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 4)
-
-            ScrollView {
-                VStack(spacing: 0) {
-                    ForEach(Array(coordinator.transcriptionHistory.enumerated()), id: \.offset) { _, entry in
-                        transcriptionRow(entry.text, rawText: entry.rawText, language: entry.language)
-                    }
-                }
-            }
-            .frame(maxHeight: 180)
-            .padding(.bottom, 4)
-        }
-    }
-
-    private func transcriptionRow(_ text: String, rawText: String?, language: DetectedLanguage) -> some View {
-        Button {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
-        } label: {
-            HStack(alignment: .top, spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(text)
-                        .font(.system(size: 12))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                        .foregroundStyle(.primary)
-
-                    // Before/after: when LLM correction rewrote the raw
-                    // transcription, show the original in a smaller,
-                    // strike-through secondary line so the user can verify
-                    // the change. nil rawText means the correction step was
-                    // off, unchanged, or not applicable — no second line.
-                    if let rawText, !rawText.isEmpty {
-                        Text(rawText)
-                            .font(.system(size: 10))
-                            .lineLimit(1)
-                            .multilineTextAlignment(.leading)
-                            .foregroundStyle(.secondary)
-                            .strikethrough(true, color: .secondary)
-                    }
-                }
-
-                Spacer(minLength: 0)
-
-                HStack(spacing: 6) {
-                    Text(languageLabel(language))
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4))
-
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                }
-                .padding(.top, 1)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(MenuRowButtonStyle())
-        .padding(.horizontal, 6)
-        .padding(.vertical, 1)
-    }
-
-    private func languageLabel(_ lang: DetectedLanguage) -> String {
-        switch lang {
-        case .chinese: return "中文"
-        case .english: return "EN"
-        case .unknown: return "?"
-        }
+    /// Trailing label for the Recent menu row: show the entry count in
+    /// muted text when non-empty so the row is useful even without opening
+    /// the window.
+    private var recentHistoryTrailing: TrailingContent {
+        let count = coordinator.transcriptionHistory.count
+        return count > 0 ? .dimText("\(count)") : .none
     }
 
     // MARK: - Menu Rows

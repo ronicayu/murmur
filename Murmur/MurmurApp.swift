@@ -8,6 +8,7 @@ struct MurmurApp: App {
     @StateObject private var historyService: TranscriptionHistoryService
     @State private var settingsWindow: NSWindow?
     @State private var onboardingWindow: NSWindow?
+    @State private var recentHistoryWindow: NSWindow?
     @State private var transcriptionWindowController: TranscriptionWindowController?
     @State private var launched = false
 
@@ -58,7 +59,8 @@ struct MurmurApp: App {
             MenuBarView(
                 coordinator: coordinator,
                 onOpenSettings: { showSettings() },
-                onOpenTranscription: { showTranscriptionWindow() }
+                onOpenTranscription: { showTranscriptionWindow() },
+                onOpenRecentHistory: { showRecentHistory() }
             )
         } label: {
             Label("Murmur", systemImage: menuBarIconName)
@@ -189,5 +191,28 @@ struct MurmurApp: App {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow = window
+    }
+
+    private func showRecentHistory() {
+        if let existing = recentHistoryWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let view = RecentHistoryView(coordinator: coordinator)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 520),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Recent Transcriptions"
+        window.contentView = NSHostingView(rootView: view)
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        recentHistoryWindow = window
     }
 }
