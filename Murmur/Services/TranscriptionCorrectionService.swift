@@ -57,8 +57,11 @@ actor NoOpCorrector: TranscriptionCorrection {
 enum CorrectionSafetyRails {
     /// Maximum ratio between the corrected and the raw text length. A generative
     /// model that "corrects" a 10-character utterance into 60 characters is
-    /// almost certainly hallucinating — fall back to raw.
-    static let maxLengthRatio: Double = 1.5
+    /// almost certainly hallucinating — fall back to raw. Bumped from 1.5× to
+    /// 1.6× once the correction step started inserting punctuation: a short
+    /// 10-char English utterance with three inserted commas + a period + two
+    /// capitalisation tweaks can legitimately push past 1.5×.
+    static let maxLengthRatio: Double = 1.6
 
     /// Minimum ratio — protect against pathological truncation.
     static let minLengthRatio: Double = 0.5
@@ -115,38 +118,47 @@ enum CorrectionSafetyRails {
 actor FoundationModelsCorrector: TranscriptionCorrection {
     private static let log = Logger(subsystem: "com.murmur.app", category: "correction")
 
-    /// Instructions given to every session. Tightly scoped so the model
-    /// behaves like a surgical transcript editor, not a rewriter.
+    /// Instructions given to every session. Imperative, non-optional — the
+    /// old "if unsure, return unchanged" escape hatch let the model skip
+    /// punctuation too easily. Safety rails (length ratio, refusal markers,
+    /// empty output) are enforced post-hoc in `CorrectionSafetyRails`.
     private static let instructions = """
-    You are a transcript editor. Input is a single utterance produced by an \
-    automatic speech recognizer that may contain homophone mistakes, phonetic \
-    misspellings, or minor character substitutions.
+    You are a dictation post-processor. The input is a single utterance from \
+    a speech recognizer with no punctuation. You MUST return the same \
+    utterance with punctuation inserted and minor transcription errors fixed.
 
-    Your job, in order of priority:
-    1. Correct obvious ASR mistakes (wrong homophones, typos, wrong Chinese characters).
-    2. Add appropriate punctuation and sentence-initial casing so the output \
-       reads as a well-formed sentence in its language. For Chinese use \
-       full-width punctuation (。，？！); for English use ASCII punctuation and \
-       Title Case where appropriate.
-    3. Preserve the user's original meaning, tone, and word choice.
+    You MUST do these things on every input:
+    - Insert punctuation between clauses and at the end of sentences. For \
+      Chinese text use full-width punctuation: 。，？！；： For English use \
+      ASCII punctuation: . , ? ! ; :
+    - Capitalise the first letter of each English sentence.
+    - Fix obvious homophone or wrong-character errors when you are confident \
+      (e.g. "write" vs "right"; "名子" vs "名字"; "北经" vs "北京").
 
-    Hard rules — violating any of these means return the input unchanged:
-    - Do NOT translate. If the user said an English word, keep it as the \
-      same English word. If the user said a Chinese character, keep it as \
-      that Chinese character. Code-switched utterances (mixed English and \
-      Chinese) must stay code-switched — English technical terms, brand \
-      names, and identifiers stay in Latin script.
-    - Do NOT add information the user did not say.
-    - Do NOT rephrase, summarize, shorten, or expand the text beyond what \
-      punctuation and casing require.
-    - If the input looks correct or you are unsure, return it unchanged.
+    You MUST NOT do any of these:
+    - Translate anything. If the user said an English word, it stays in \
+      English with the exact same letters. If the user said a Chinese \
+      character, it stays in Chinese. Code-switched utterances (English \
+      technical terms, brand names, library names, identifiers embedded \
+      in Chinese speech, or vice versa) must stay code-switched. Never \
+      replace `Python` with `派森`; never replace `北京` with `Beijing`.
+    - Add words or meaning the user did not say.
+    - Delete words or phrases the user said.
+    - Rewrite for style, tone, or clarity beyond punctuation and casing.
 
-    Output ONLY the corrected text. No quotes, no commentary, no explanation.
+    The output length in characters MUST be close to the input length — \
+    typically within ±20% when punctuation is the main change.
+
+    Return ONLY the corrected sentence. No quotes, no commentary, no \
+    explanation, no prefixes, no "Here is" lines.
     """
 
-    /// Bound to `SystemLanguageModel.default` so we share the warm instance
-    /// with any other Murmur consumer.
-    private var session: LanguageModelSession?
+    /// A cached session is tempting for latency, but each session carries a
+    /// growing transcript of prior prompts+responses that biases subsequent
+    /// calls. We instantiate a fresh session per correction so every input
+    /// starts from the same priors — the cost is a single `init` per call,
+    /// which is small relative to the inference latency budget.
+    private var hasPrewarmedOnce = false
 
     /// Returns true if Apple Intelligence is installed, enabled, and the model
     /// is ready to serve. Called by `MurmurApp` at wire-up time to decide
@@ -158,17 +170,19 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
         return false
     }
 
-    /// Lazily create (and prewarm) the session on first use.
-    private func ensureSession() -> LanguageModelSession {
-        if let session { return session }
-        let newSession = LanguageModelSession(
+    /// Build a fresh session for a single correction call. The first call in
+    /// the app lifecycle also prewarms the underlying model so subsequent
+    /// calls hit warm weights.
+    private func makeSession() -> LanguageModelSession {
+        let session = LanguageModelSession(
             model: .default,
             instructions: Self.instructions
         )
-        // Prewarm on init so the first real call is fast.
-        newSession.prewarm()
-        session = newSession
-        return newSession
+        if !hasPrewarmedOnce {
+            session.prewarm()
+            hasPrewarmedOnce = true
+        }
+        return session
     }
 
     func correct(_ text: String, language: String) async throws -> String {
@@ -179,7 +193,7 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
         // an LLM at this length is almost guaranteed to over-produce.
         guard trimmed.count >= 4 else { return text }
 
-        let session = ensureSession()
+        let session = makeSession()
 
         let prompt = "Language: \(language)\nRaw transcription: \(trimmed)"
         let options = GenerationOptions(
@@ -192,9 +206,33 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
         let candidate = response.content
         let validated = CorrectionSafetyRails.validate(candidate: candidate, raw: trimmed)
 
-        if validated != trimmed {
-            Self.log.info("correction: \(trimmed.count, privacy: .public) → \(validated.count, privacy: .public) chars")
+        // Diagnostic logging — promoted to .public so `log stream --predicate
+        // 'subsystem == "com.murmur.app" AND category == "correction"'` shows
+        // the full pipeline. Previews are capped at 120 chars to keep Console
+        // readable; longer payloads are fine in the debugger.
+        let rawPreview = String(trimmed.prefix(120))
+        let candidatePreview = String(candidate.prefix(120))
+        let validatedPreview = String(validated.prefix(120))
+        let outcome: String
+        if validated == candidate && validated != trimmed {
+            outcome = "accepted-changed"
+        } else if validated == candidate && validated == trimmed {
+            outcome = "accepted-unchanged"
+        } else if validated == trimmed {
+            outcome = "rejected-by-safety-rails"
+        } else {
+            // Validated was whitespace-trimmed from candidate; still accepted.
+            outcome = "accepted-trimmed"
         }
+        Self.log.info("""
+        correction [\(outcome, privacy: .public)] \
+        raw=\"\(rawPreview, privacy: .public)\" \
+        candidate=\"\(candidatePreview, privacy: .public)\" \
+        final=\"\(validatedPreview, privacy: .public)\" \
+        rawLen=\(trimmed.count, privacy: .public) \
+        candLen=\(candidate.count, privacy: .public) \
+        finalLen=\(validated.count, privacy: .public)
+        """)
 
         // Preserve the original leading/trailing whitespace so downstream
         // cleanup sees a shape consistent with the raw input.

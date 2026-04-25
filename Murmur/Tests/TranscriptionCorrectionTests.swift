@@ -27,7 +27,7 @@ final class CorrectionSafetyRailsTests: XCTestCase {
     }
 
     func test_tooLong_fallsBackToRaw() {
-        // Raw 11 chars, candidate 30 → ratio 2.7, exceeds 1.5 cap.
+        // Raw 11 chars, candidate 30 → ratio 2.7, exceeds 1.6 cap.
         let raw = "hello world"
         let candidate = "hello everyone how are you all"
         XCTAssertEqual(CorrectionSafetyRails.validate(candidate: candidate, raw: raw), raw)
