@@ -239,11 +239,41 @@ final class PunctuationCleanupServicePassthroughTests: XCTestCase {
     }
 
     func test_zh_preservesEmbeddedLatinFragment() async throws {
-        // Mid-text ASCII punctuation must NOT be converted — version numbers,
-        // brand names, etc. keep their dots.
+        // Mid-text ASCII punctuation between Latin neighbours stays — version
+        // numbers, brand names, etc. keep their dots.
         let input = "我用 Python 3.11 写代码"
         let result = try await sut.improve(input, language: "zh")
         XCTAssertEqual(result, "我用 Python 3.11 写代码。")
+    }
+
+    func test_zh_convertsAsciiCommaBetweenCJK() async throws {
+        // Cohere sometimes emits ASCII `,` between Chinese characters. The
+        // CJK-context check converts it to 全角 `，`.
+        let result = try await sut.improve("我去北京,然后吃饭", language: "zh")
+        XCTAssertEqual(result, "我去北京，然后吃饭。")
+    }
+
+    func test_zh_convertsAsciiPeriodBetweenCJK() async throws {
+        let result = try await sut.improve("好的.我马上来.谢谢", language: "zh")
+        XCTAssertEqual(result, "好的。我马上来。谢谢。")
+    }
+
+    func test_zh_convertsMultiplePunctuationMarks() async throws {
+        let result = try await sut.improve("你好,你叫什么名字?我叫小明!", language: "zh")
+        XCTAssertEqual(result, "你好，你叫什么名字？我叫小明！")
+    }
+
+    func test_zh_doesNotConvertPunctuationAtScriptBoundary() async throws {
+        // ASCII period adjacent to a Latin character (left side) — leave alone.
+        // Python.我 — we keep ASCII. The trailing terminal rule still fires.
+        let input = "Python.我用很多"
+        let result = try await sut.improve(input, language: "zh")
+        XCTAssertEqual(result, "Python.我用很多。")
+    }
+
+    func test_zh_convertsSemicolonAndColonBetweenCJK() async throws {
+        let result = try await sut.improve("第一;第二;第三", language: "zh")
+        XCTAssertEqual(result, "第一；第二；第三。")
     }
 
     func test_zh_endingInEllipsis_noPeriod() async throws {

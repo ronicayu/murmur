@@ -85,12 +85,26 @@ actor PunctuationCleanupService: TranscriptionCleanup {
     ]
 
     /// Map ASCII-terminal characters to their full-width CJK equivalents.
-    /// Applied only at end-of-text in ZH cleanup; mid-text positions are left
-    /// alone to avoid mangling embedded Latin numerics like "Python 3.11".
+    /// Applied only at end-of-text in ZH cleanup; mid-text positions are
+    /// handled by `asciiToFullWidthMidText` with a CJK-context check so
+    /// embedded Latin numerics like "Python 3.11" stay intact.
     private static let asciiToFullWidthTerminal: [Character: Character] = [
         ".": "。",
         "?": "？",
         "!": "！",
+    ]
+
+    /// Map ASCII punctuation that appears MID-TEXT to its full-width CJK
+    /// equivalent. Includes comma, semicolon, and colon in addition to the
+    /// terminal characters because these are common clause separators that
+    /// Cohere sometimes emits as ASCII when transcribing Chinese.
+    private static let asciiToFullWidthMidText: [Character: Character] = [
+        ",": "，",
+        ".": "。",
+        "?": "？",
+        "!": "！",
+        ";": "；",
+        ":": "：",
     ]
 
     func improve(_ text: String, language: String) async throws -> String {
@@ -243,23 +257,87 @@ actor PunctuationCleanupService: TranscriptionCleanup {
         // Rule 2: Empty / whitespace-only → return early.
         guard !trimmed.isEmpty else { return trimmed }
 
-        // Rule 3: Replace ASCII terminal `.?!` at end-of-text with full-width
-        // equivalent. We deliberately do not touch mid-text ASCII punctuation
-        // because it may belong to an embedded Latin fragment (e.g. version
-        // numbers, English brand names).
-        var working = trimmed
+        // Rule 3: Convert ASCII punctuation to its full-width CJK equivalent
+        // at any position where BOTH adjacent non-whitespace characters are
+        // CJK ideographs. This catches Cohere outputs like "我去北京,然后吃饭"
+        // → "我去北京，然后吃饭" while leaving "Python 3.11" and "Mr. Smith"
+        // alone (their punctuation is between Latin/digit characters).
+        var working = convertMidTextAsciiPunctuation(in: trimmed)
+
+        // Rule 4: Replace ASCII terminal `.?!` at end-of-text with full-width
+        // equivalent. (Mid-text occurrences were already handled by Rule 3
+        // when surrounded by CJK; this catches the end-of-text case where
+        // there's only one neighbour to inspect.)
         if let last = working.last,
            let fullWidth = Self.asciiToFullWidthTerminal[last] {
             working.removeLast()
             working.append(fullWidth)
         }
 
-        // Rule 4: Append `。` if text does not already end in a terminal
+        // Rule 5: Append `。` if text does not already end in a terminal
         // (CJK, Western, or closing quote/bracket).
         if let last = working.last, !Self.zhTerminalPunctuation.contains(last) {
             working.append("。")
         }
 
         return working
+    }
+
+    /// Walks `text` and converts each ASCII punctuation character (`, . ? ! ; :`)
+    /// to its full-width CJK equivalent IFF the immediately preceding and
+    /// following non-whitespace characters are CJK ideographs. Single-side
+    /// CJK neighbour is not enough — that protects against false positives
+    /// at script boundaries (e.g. `我用 Python` should keep `Python` intact;
+    /// `Python.` at end of a Chinese sentence is handled by Rule 4 instead).
+    private func convertMidTextAsciiPunctuation(in text: String) -> String {
+        let chars = Array(text)
+        var result: [Character] = []
+        result.reserveCapacity(chars.count)
+
+        for i in 0..<chars.count {
+            let c = chars[i]
+            guard let fullWidth = Self.asciiToFullWidthMidText[c] else {
+                result.append(c)
+                continue
+            }
+            // Walk outward through whitespace to find the nearest non-whitespace
+            // neighbours on both sides. Whitespace between a CJK char and ASCII
+            // punctuation is rare but possible.
+            let prevCJK = nearestNonWhitespace(chars: chars, from: i, direction: -1).map(Self.isCJKIdeograph) ?? false
+            let nextCJK = nearestNonWhitespace(chars: chars, from: i, direction: +1).map(Self.isCJKIdeograph) ?? false
+            if prevCJK && nextCJK {
+                result.append(fullWidth)
+            } else {
+                result.append(c)
+            }
+        }
+        return String(result)
+    }
+
+    /// Look up the nearest non-whitespace character in `chars` starting from
+    /// `from + direction`. Returns nil if we run off the array.
+    private func nearestNonWhitespace(chars: [Character], from: Int, direction: Int) -> Character? {
+        var i = from + direction
+        while i >= 0 && i < chars.count {
+            if !chars[i].isWhitespace { return chars[i] }
+            i += direction
+        }
+        return nil
+    }
+
+    /// True for characters in the main CJK Unified Ideographs blocks. Does
+    /// NOT include CJK punctuation, hiragana/katakana, or Hangul — we only
+    /// want to identify "this is Chinese-text context."
+    private static func isCJKIdeograph(_ c: Character) -> Bool {
+        for scalar in c.unicodeScalars {
+            let v = scalar.value
+            if (v >= 0x4E00 && v <= 0x9FFF) ||         // CJK Unified Ideographs
+               (v >= 0x3400 && v <= 0x4DBF) ||         // CJK Ext A
+               (v >= 0x20000 && v <= 0x2A6DF) ||       // CJK Ext B
+               (v >= 0xF900 && v <= 0xFAFF) {          // CJK Compatibility
+                return true
+            }
+        }
+        return false
     }
 }
