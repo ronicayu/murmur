@@ -116,9 +116,15 @@ enum CorrectionPrompts {
     /// Effective glossary as a normalised list. Returns the user-entered
     /// terms with surrounding whitespace trimmed and empty entries dropped.
     /// Empty when the user has not set a glossary.
+    ///
+    /// Accepts both ASCII `,` and full-width `，` (U+FF0C) as separators —
+    /// CJK IMEs frequently emit the full-width form, and a user pasting from
+    /// a Chinese-language source would otherwise see the entire glossary
+    /// silently collapse to one term.
     static func currentGlossary() -> [String] {
         let raw = UserDefaults.standard.string(forKey: glossaryKey) ?? ""
-        return raw
+        let normalised = raw.replacingOccurrences(of: "，", with: ",")
+        return normalised
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }

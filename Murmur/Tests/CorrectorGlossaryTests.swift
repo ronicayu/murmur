@@ -1,4 +1,5 @@
 import XCTest
+import os
 @testable import Murmur
 
 /// Glossary-feature regression suite. Asserts request shape (does the user
@@ -129,15 +130,37 @@ final class CorrectorGlossaryTests: XCTestCase {
 // MARK: - URLProtocol stub
 
 /// In-process URL stub for end-to-end corrector tests. Records the most
-/// recent request body and returns a canned response. Configured per test
-/// via the static `cannedBody` field; reset between tests.
+/// recent request body and returns a canned response.
+///
+/// Mutable state lives behind an `OSAllocatedUnfairLock` so tests are safe
+/// to run under `swift test --parallel` even if multiple `CorrectorGlossaryTests`
+/// methods overlap. Each test calls `cannedBody=...; lastRequestBody=nil`
+/// during setup; the lock keeps the read-modify pair from interleaving
+/// with another test's `startLoading`.
 private final class StubProtocol: URLProtocol, @unchecked Sendable {
-    nonisolated(unsafe) static var cannedBody: String = "{}"
-    nonisolated(unsafe) static var lastRequestBody: Data?
+
+    private struct State {
+        var cannedBody: String = "{}"
+        var lastRequestBody: Data?
+    }
+
+    private static let state = OSAllocatedUnfairLock<State>(initialState: State())
+
+    static var cannedBody: String {
+        get { state.withLock { $0.cannedBody } }
+        set { state.withLock { $0.cannedBody = newValue } }
+    }
+
+    static var lastRequestBody: Data? {
+        get { state.withLock { $0.lastRequestBody } }
+        set { state.withLock { $0.lastRequestBody = newValue } }
+    }
 
     static func reset() {
-        cannedBody = "{}"
-        lastRequestBody = nil
+        state.withLock {
+            $0.cannedBody = "{}"
+            $0.lastRequestBody = nil
+        }
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -146,6 +169,7 @@ private final class StubProtocol: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         // URLRequest.httpBody is dropped when going through URLProtocol; the
         // body lives on httpBodyStream. Read it.
+        let collectedBody: Data
         if let stream = request.httpBodyStream {
             stream.open()
             defer { stream.close() }
@@ -157,12 +181,17 @@ private final class StubProtocol: URLProtocol, @unchecked Sendable {
                 if n <= 0 { break }
                 data.append(buffer, count: n)
             }
-            StubProtocol.lastRequestBody = data
+            collectedBody = data
         } else {
-            StubProtocol.lastRequestBody = request.httpBody
+            collectedBody = request.httpBody ?? Data()
         }
 
-        let body = StubProtocol.cannedBody.data(using: .utf8)!
+        let canned = Self.state.withLock { state -> String in
+            state.lastRequestBody = collectedBody
+            return state.cannedBody
+        }
+
+        let body = canned.data(using: .utf8)!
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: 200,

@@ -389,7 +389,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Glossary")
                 .font(.subheadline)
-            Text("Comma-separated terms the speaker uses (acronyms, jargon, code-switched words). Treated as authoritative spellings — verbatim hits stay, near-miss mistranscriptions are snapped to these spellings.")
+            Text("Comma-separated terms the speaker uses (acronyms, jargon, code-switched words). Treated as authoritative spellings — verbatim hits stay, near-miss mistranscriptions are snapped to these spellings. Both `,` and full-width `，` work as separators.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -415,13 +415,27 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            TextEditor(text: $correctionSystemPrompt)
-                .font(.system(.body, design: .monospaced))
-                .frame(minHeight: 160, maxHeight: 240)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4)
-                        .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
-                )
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $correctionSystemPrompt)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 160, maxHeight: 240)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
+                    )
+
+                // Placeholder — TextEditor lacks native placeholder support
+                // on macOS 14. We overlay a hint when the field is empty so
+                // the user knows leaving it blank uses the default prompt.
+                if correctionSystemPrompt.isEmpty {
+                    Text("Empty = use built-in default. Click Reset to load the default for editing.")
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 8)
+                        .padding(.leading, 5)
+                        .allowsHitTesting(false)
+                }
+            }
             promptCharacterCount
         }
         .padding(.top, 6)

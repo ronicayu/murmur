@@ -354,6 +354,20 @@ final class CorrectionPromptsTests: XCTestCase {
         XCTAssertEqual(CorrectionPrompts.currentGlossary(), ["OKR", "k8s"])
     }
 
+    func test_currentGlossary_acceptsFullWidthComma() {
+        // CJK IMEs emit U+FF0C; treat it as equivalent to ASCII ','.
+        UserDefaults.standard.set("OKR，对齐，k8s", forKey: glossaryKey)
+        XCTAssertEqual(CorrectionPrompts.currentGlossary(), ["OKR", "对齐", "k8s"])
+    }
+
+    func test_currentGlossary_acceptsMixedCommas() {
+        UserDefaults.standard.set("OKR, 对齐，shipping ,k8s", forKey: glossaryKey)
+        XCTAssertEqual(
+            CorrectionPrompts.currentGlossary(),
+            ["OKR", "对齐", "shipping", "k8s"]
+        )
+    }
+
     // MARK: defaultSystemPrompt — sanity invariants
 
     func test_defaultSystemPrompt_isNonEmpty() {
