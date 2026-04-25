@@ -289,3 +289,79 @@ final class CoordinatorCorrectionTests: XCTestCase {
 }
 
 #endif
+
+// MARK: - CorrectionPrompts façade
+
+/// Tests for the `CorrectionPrompts` façade — the indirection between callers
+/// (the two corrector backends) and the user's optional Settings overrides.
+/// These tests touch real `UserDefaults`, so each test cleans up the keys it
+/// writes to keep the suite hermetic.
+final class CorrectionPromptsTests: XCTestCase {
+
+    private let promptKey = CorrectionPrompts.systemPromptKey
+    private let glossaryKey = CorrectionPrompts.glossaryKey
+
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: promptKey)
+        UserDefaults.standard.removeObject(forKey: glossaryKey)
+        super.tearDown()
+    }
+
+    // MARK: current — system prompt resolution
+
+    func test_current_returnsDefault_whenUnset() {
+        UserDefaults.standard.removeObject(forKey: promptKey)
+        XCTAssertEqual(CorrectionPrompts.current, CorrectionPrompts.defaultSystemPrompt)
+    }
+
+    func test_current_returnsDefault_whenEmptyString() {
+        UserDefaults.standard.set("", forKey: promptKey)
+        XCTAssertEqual(CorrectionPrompts.current, CorrectionPrompts.defaultSystemPrompt)
+    }
+
+    func test_current_returnsDefault_whenWhitespaceOnly() {
+        UserDefaults.standard.set("   \n\t  ", forKey: promptKey)
+        XCTAssertEqual(CorrectionPrompts.current, CorrectionPrompts.defaultSystemPrompt)
+    }
+
+    func test_current_returnsTrimmedOverride_whenSet() {
+        UserDefaults.standard.set("  custom prompt body  ", forKey: promptKey)
+        XCTAssertEqual(CorrectionPrompts.current, "custom prompt body")
+    }
+
+    // MARK: currentGlossary — comma-split + trim + drop empties
+
+    func test_currentGlossary_returnsEmpty_whenUnset() {
+        UserDefaults.standard.removeObject(forKey: glossaryKey)
+        XCTAssertEqual(CorrectionPrompts.currentGlossary(), [])
+    }
+
+    func test_currentGlossary_returnsEmpty_whenEmptyString() {
+        UserDefaults.standard.set("", forKey: glossaryKey)
+        XCTAssertEqual(CorrectionPrompts.currentGlossary(), [])
+    }
+
+    func test_currentGlossary_splitsAndTrims() {
+        UserDefaults.standard.set("OKR, shipping ,  对齐, k8s", forKey: glossaryKey)
+        XCTAssertEqual(
+            CorrectionPrompts.currentGlossary(),
+            ["OKR", "shipping", "对齐", "k8s"]
+        )
+    }
+
+    func test_currentGlossary_dropsEmptyEntries() {
+        UserDefaults.standard.set(",, OKR ,,  ,k8s,", forKey: glossaryKey)
+        XCTAssertEqual(CorrectionPrompts.currentGlossary(), ["OKR", "k8s"])
+    }
+
+    // MARK: defaultSystemPrompt — sanity invariants
+
+    func test_defaultSystemPrompt_isNonEmpty() {
+        XCTAssertFalse(CorrectionPrompts.defaultSystemPrompt.isEmpty)
+    }
+
+    func test_defaultSystemPrompt_mentionsGlossary() {
+        XCTAssertTrue(CorrectionPrompts.defaultSystemPrompt.contains("Glossary"),
+                      "Default prompt must explain the Glossary field so the rule is grounded")
+    }
+}

@@ -99,7 +99,7 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
         let body: [String: Any] = [
             "model": modelName,
             "messages": [
-                ["role": "system", "content": Self.systemPrompt],
+                ["role": "system", "content": CorrectionPrompts.current],
                 ["role": "user", "content": "Language: \(language)\nRaw transcription: \(trimmed)"]
             ],
             "stream": false,
@@ -155,9 +155,4 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
         """)
     }
 
-    // MARK: - Prompt
-
-    /// Shared prompt — same source of truth as the Apple Foundation Models
-    /// corrector so behaviour matches across engines.
-    static let systemPrompt = CorrectionPrompts.systemPrompt
 }

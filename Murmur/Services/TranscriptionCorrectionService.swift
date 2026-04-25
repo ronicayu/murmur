@@ -49,98 +49,80 @@ actor NoOpCorrector: TranscriptionCorrection {
     }
 }
 
-// MARK: - Shared prompt
+// MARK: - Shared prompt façade
 
-/// Single source of truth for the correction system prompt — both the
-/// Apple Foundation Models and the OpenAI-compatible (Ollama / LM Studio /
-/// llamafile) correctors reference `CorrectionPrompts.systemPrompt`. Kept
-/// in one place so behaviour stays consistent across engines.
+/// Façade between callers (the two corrector backends) and the user's
+/// optional Settings overrides.
+///
+/// `defaultSystemPrompt` is the built-in prompt — also the seed for the
+/// editable Settings field. `current` reads the user override, falling back
+/// to the default when unset or whitespace-only. `currentGlossary()` parses
+/// the comma-separated glossary the user enters in Settings.
 enum CorrectionPrompts {
 
-    static let systemPrompt = """
-    You are a dictation post-processor. The input is a single utterance from \
-    a speech recognizer that is missing punctuation and may contain words \
-    transcribed wrongly because they sound similar to the intended ones. \
-    Your job is to return the SAME utterance with these issues fixed.
+    /// `UserDefaults` key for the editable system-prompt override.
+    static let systemPromptKey = "correctionSystemPrompt"
 
-    YOU MUST:
+    /// `UserDefaults` key for the comma-separated glossary text.
+    static let glossaryKey = "correctionGlossary"
 
-    1. Insert punctuation between clauses and at the end of sentences.
+    /// Built-in default prompt. The user can override it from Settings; an
+    /// empty / whitespace-only override falls back here, so users who never
+    /// touch Settings see this prompt verbatim.
+    static let defaultSystemPrompt: String = """
+    You are a dictation post-processor. Fix punctuation and obvious
+    sound-alike errors in the raw transcription. Return ONLY the corrected
+    sentence — no quotes, no commentary, no prefixes.
 
-       For CHINESE text use FULL-WIDTH punctuation only:
-         comma → ， (NEVER ASCII , )
-         period → 。 (NEVER ASCII . )
-         question → ？ (NEVER ASCII ? )
-         exclamation → ！ (NEVER ASCII ! )
-         semicolon → ；   colon → ：
-       Punctuation examples:
-         "我今天去北京开会然后吃了麻辣烫" → "我今天去北京开会，然后吃了麻辣烫。"
-         "你好你叫什么名字"             → "你好，你叫什么名字？"
-         "为什么这么晚"                → "为什么这么晚？"
-         "他是不是来了"                → "他是不是来了？"
-       Sentences ending in 吗 / 呢 / 么 are questions — use ？ not 。
-       Sentences with 什么 / 怎么 / 为什么 / 是不是 / 有没有 / 多少 are questions.
+    Input fields:
+      Language          BCP-47 code, for context.
+      Glossary          comma-separated terms the speaker uses, or "(none)".
+      Raw transcription text from the speech recognizer.
 
-       For ENGLISH use ASCII: . , ? ! ; :
-         "hello how are you"                       → "Hello, how are you?"
-         "i went to the store and bought milk"     → "I went to the store and bought milk."
+    Rules:
+
+    1. Add punctuation between clauses and at sentence ends.
+       Chinese → use full-width: ，。？！；：
+       English → use ASCII: . , ? ! ; :
        Capitalise the first letter of each English sentence.
+       Sentences ending in 吗 / 呢 / or starting with 什么 / 怎么 / 为什么
+       / 是不是 are questions — use ？ not 。.
 
-    2. Fix individual words the speech recognizer got wrong because they \
-       sound similar to the intended one. Replace the wrong word with the \
-       phonetically-similar correct one when context makes the right choice \
-       clear. Be confident — DO NOT leave an obvious wrong word in.
+    2. Fix words the recognizer obviously got wrong because they sound like
+       the intended one (e.g. 再/在, 得/的/地, their/there/they're, write/right).
+       Only when context makes the right choice unambiguous.
 
-       Common Chinese sound-alike confusions you should fix:
-         在 / 再     ("at, currently" vs "again"): "我再公司" → "我在公司"
-         做 / 坐     ("do" vs "sit"):              "他做下来" → "他坐下来"
-         的 / 得 / 地  (grammatical, by syntactic role):
-                      "他跑的很快" → "他跑得很快"
-                      "美丽得花朵" → "美丽的花朵"
-         那 / 哪     ("that" vs "which/where"):    "你住那里" → "你住哪里" (if question)
-         是 / 事     ("be" vs "thing/matter"):     "好事情" / "他是" — distinguish by role
-         向 / 像     ("toward" vs "resemble"):     "向你这样的人" → "像你这样的人"
-         他 / 她 / 它  (gendered pronouns) — keep the user's intended one if context says
-         进 / 近 / 经  ("enter" / "near" / "through"): pick by meaning
-         即 / 及     ("namely" vs "and"): pick by role
-         以 / 已 / 一 (homophones): pick by meaning
-         做 / 作      (often interchangeable; pick the more idiomatic one)
-         名子 → 名字 ; 北经 → 北京 ; 商业 vs 商页 ; 元 vs 圆
+    3. If Glossary is not "(none)", treat its entries as the authoritative
+       spelling. Snap clear phonetic near-misses to the glossary entry using
+       its exact casing. Leave verbatim hits untouched. Don't force a match
+       when the word isn't clearly the glossary term.
 
-       Common English sound-alike confusions:
-         their / there / they're; your / you're; its / it's; to / too / two;
-         hear / here; right / write; principal / principle; affect / effect;
-         then / than; whose / who's; loose / lose; cite / sight / site
+    4. Never translate. Code-switched words stay in their original language
+       (Python stays Python, 北京 stays 北京).
 
-       When the wrong word is obviously wrong given the surrounding words, \
-       fix it. Examples (input → output):
-         "我得名子叫小明"          → "我的名字叫小明。"
-         "他做在椅子上"            → "他坐在椅子上。"
-         "我门要去公园"            → "我们要去公园。"
-         "i need to right an email" → "I need to write an email."
-         "their going to the store" → "They're going to the store."
-
-    YOU MUST NOT:
-
-    - Translate. English words stay in English with the exact same letters; \
-      Chinese characters stay Chinese. Code-switched utterances (English \
-      brand / library / technical names inside Chinese speech, or Chinese \
-      embedded in English) MUST stay code-switched. Never replace `Python` \
-      with `派森`. Never replace `北京` with `Beijing`.
-    - Use ASCII punctuation in Chinese text. `,` is wrong in Chinese — use \
-      `，`. `.` is wrong in Chinese — use `。`.
-    - Add new sentences, clauses, or information the user did not say.
-    - Delete content the user said.
-    - Paraphrase or rewrite for style or clarity beyond punctuation, casing, \
-      and sound-alike word fixes. Don't change idiom or word choice unless \
-      the original word is clearly an ASR mistake.
-
-    The output character count MUST be close to the input — typically within \
-    ±20%. Word-level homophone fixes don't change length.
-
-    Return ONLY the corrected sentence. No quotes, no commentary, no \
-    explanation, no prefixes, no "Here is" lines.
+    5. Never paraphrase, add, or remove content. Output length must stay
+       within ±20% of input.
     """
+
+    /// Effective system prompt. Returns the trimmed user override when
+    /// non-empty, else the built-in default. Both correctors call this on
+    /// every correction so changes in Settings take effect immediately.
+    static var current: String {
+        let raw = UserDefaults.standard.string(forKey: systemPromptKey) ?? ""
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? defaultSystemPrompt : trimmed
+    }
+
+    /// Effective glossary as a normalised list. Returns the user-entered
+    /// terms with surrounding whitespace trimmed and empty entries dropped.
+    /// Empty when the user has not set a glossary.
+    static func currentGlossary() -> [String] {
+        let raw = UserDefaults.standard.string(forKey: glossaryKey) ?? ""
+        return raw
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
 }
 
 // MARK: - Safety rails (shared)
@@ -212,12 +194,6 @@ enum CorrectionSafetyRails {
 actor FoundationModelsCorrector: TranscriptionCorrection {
     private static let log = Logger(subsystem: "com.murmur.app", category: "correction")
 
-    /// Instructions given to every session. Imperative, non-optional. Safety
-    /// rails (length ratio, refusal markers, empty output) are enforced
-    /// post-hoc in `CorrectionSafetyRails`. Shared prompt with the
-    /// OpenAI-compatible corrector so behaviour matches across engines.
-    private static let instructions = CorrectionPrompts.systemPrompt
-
     /// A cached session is tempting for latency, but each session carries a
     /// growing transcript of prior prompts+responses that biases subsequent
     /// calls. We instantiate a fresh session per correction so every input
@@ -238,10 +214,15 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
     /// Build a fresh session for a single correction call. The first call in
     /// the app lifecycle also prewarms the underlying model so subsequent
     /// calls hit warm weights.
+    /// Build a session with the user's currently-effective system prompt.
+    /// `CorrectionPrompts.current` is read per call so a Settings edit takes
+    /// effect on the next correction without app restart. Safety rails
+    /// (length ratio, refusal markers, empty output) are enforced post-hoc
+    /// in `CorrectionSafetyRails`.
     private func makeSession() -> LanguageModelSession {
         let session = LanguageModelSession(
             model: .default,
-            instructions: Self.instructions
+            instructions: CorrectionPrompts.current
         )
         if !hasPrewarmedOnce {
             session.prewarm()
