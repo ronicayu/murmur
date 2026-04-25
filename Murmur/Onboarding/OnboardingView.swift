@@ -627,6 +627,7 @@ struct OnboardingView: View {
         case .onnx: return "hare.fill"
         case .huggingface: return "wand.and.stars"
         case .whisper: return "waveform"
+        case .fireRed: return "flame.fill"
         }
     }
 
@@ -635,6 +636,7 @@ struct OnboardingView: View {
         case .onnx: return .blue
         case .huggingface: return .purple
         case .whisper: return .orange
+        case .fireRed: return .red
         }
     }
 
