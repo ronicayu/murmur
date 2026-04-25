@@ -139,6 +139,11 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
         "我今天去北京开会然后吃了麻辣烫" → "我今天去北京开会，然后吃了麻辣烫。"
         "你好你叫什么名字" → "你好，你叫什么名字？"
         "对不起我不知道" → "对不起，我不知道。"
+        "你吃了吗" → "你吃了吗？"
+        "他是不是来了" → "他是不是来了？"
+        "为什么这么晚" → "为什么这么晚？"
+      Chinese sentences ending in 吗 / 呢 / 么 are questions — use ？ not 。
+      Sentences containing 什么 / 怎么 / 为什么 / 是不是 / 有没有 are also questions.
     - For ENGLISH text use ASCII punctuation: . , ? ! ; :
       Examples:
         "hello how are you" → "Hello, how are you?"

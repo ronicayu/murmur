@@ -276,6 +276,72 @@ final class PunctuationCleanupServicePassthroughTests: XCTestCase {
         XCTAssertEqual(result, "第一；第二；第三。")
     }
 
+    // MARK: ZH question detection — append `？` instead of `。`
+
+    func test_zh_endsInMa_appendsQuestionMark() async throws {
+        let result = try await sut.improve("你好吗", language: "zh")
+        XCTAssertEqual(result, "你好吗？")
+    }
+
+    func test_zh_endsInNe_appendsQuestionMark() async throws {
+        let result = try await sut.improve("你呢", language: "zh")
+        XCTAssertEqual(result, "你呢？")
+    }
+
+    func test_zh_endsInMo_appendsQuestionMark() async throws {
+        let result = try await sut.improve("是么", language: "zh")
+        XCTAssertEqual(result, "是么？")
+    }
+
+    func test_zh_containsShenme_appendsQuestionMark() async throws {
+        let result = try await sut.improve("你叫什么名字", language: "zh")
+        XCTAssertEqual(result, "你叫什么名字？")
+    }
+
+    func test_zh_containsZenme_appendsQuestionMark() async throws {
+        let result = try await sut.improve("他怎么了", language: "zh")
+        XCTAssertEqual(result, "他怎么了？")
+    }
+
+    func test_zh_containsWeishenme_appendsQuestionMark() async throws {
+        let result = try await sut.improve("为什么这样", language: "zh")
+        XCTAssertEqual(result, "为什么这样？")
+    }
+
+    func test_zh_aBuA_pattern_appendsQuestionMark() async throws {
+        let result = try await sut.improve("你是不是中国人", language: "zh")
+        XCTAssertEqual(result, "你是不是中国人？")
+    }
+
+    func test_zh_haveOrNot_appendsQuestionMark() async throws {
+        let result = try await sut.improve("你有没有时间", language: "zh")
+        XCTAssertEqual(result, "你有没有时间？")
+    }
+
+    func test_zh_statement_appendsPeriodNotQuestion() async throws {
+        // No question signal — statement gets a period.
+        let result = try await sut.improve("我去北京", language: "zh")
+        XCTAssertEqual(result, "我去北京。")
+    }
+
+    func test_zh_jihu_doesNotMisfireAsQuestion() async throws {
+        // 几乎 contains 几 but is "almost" — must NOT trigger question detection.
+        let result = try await sut.improve("我几乎忘了", language: "zh")
+        XCTAssertEqual(result, "我几乎忘了。")
+    }
+
+    func test_zh_existingQuestionMark_unchanged() async throws {
+        let result = try await sut.improve("你叫什么名字？", language: "zh")
+        XCTAssertEqual(result, "你叫什么名字？")
+    }
+
+    func test_zh_asciiPeriodOnQuestion_upgradedToQuestionMark() async throws {
+        // Cohere ended with ASCII `.` but the sentence is clearly a question.
+        // We should produce ？, not 。
+        let result = try await sut.improve("你叫什么名字.", language: "zh")
+        XCTAssertEqual(result, "你叫什么名字？")
+    }
+
     func test_zh_endingInEllipsis_noPeriod() async throws {
         let result = try await sut.improve("好吧…", language: "zh")
         XCTAssertEqual(result, "好吧…")

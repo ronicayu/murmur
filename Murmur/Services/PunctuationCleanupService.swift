@@ -107,6 +107,27 @@ actor PunctuationCleanupService: TranscriptionCleanup {
         ":": "：",
     ]
 
+    /// Sentence-final particles that mark a question in Mandarin. When a
+    /// Chinese sentence with no explicit terminal punctuation ends with one
+    /// of these, the appended terminal must be `？`, not `。`. These three
+    /// particles are unambiguously interrogative in sentence-final position.
+    private static let zhSentenceFinalQuestionParticles: Set<Character> = [
+        "吗",   // standard yes/no
+        "呢",   // continuing/follow-up question
+        "么",   // informal yes/no (eg 是么, 真么)
+    ]
+
+    /// Multi-character interrogative words. If any of these appears anywhere
+    /// in the sentence and there is no explicit terminal punctuation, treat
+    /// the sentence as a question. Single-character question words (谁, 哪,
+    /// 几) are deliberately excluded — too many false positives in compounds
+    /// like 几乎 / 哪怕 / 谁知道 (rhetorical).
+    private static let zhMultiCharQuestionWords: [String] = [
+        "什么", "怎么", "怎样", "为什么", "为何",
+        "多少", "哪里", "哪儿", "哪个", "哪些",
+        "是不是", "对不对", "有没有", "行不行", "好不好", "可不可以", "能不能",
+    ]
+
     func improve(_ text: String, language: String) async throws -> String {
         switch language {
         case "en":
@@ -268,19 +289,48 @@ actor PunctuationCleanupService: TranscriptionCleanup {
         // equivalent. (Mid-text occurrences were already handled by Rule 3
         // when surrounded by CJK; this catches the end-of-text case where
         // there's only one neighbour to inspect.)
+        // Special case: if the text reads as a question but Cohere put a
+        // period, upgrade `.` → `？` instead of `。`.
         if let last = working.last,
            let fullWidth = Self.asciiToFullWidthTerminal[last] {
             working.removeLast()
-            working.append(fullWidth)
+            if last == "." && Self.looksLikeChineseQuestion(working) {
+                working.append("？")
+            } else {
+                working.append(fullWidth)
+            }
         }
 
-        // Rule 5: Append `。` if text does not already end in a terminal
-        // (CJK, Western, or closing quote/bracket).
+        // Rule 5: Append a terminal punctuation if the text does not already
+        // end in one (CJK, Western, or closing quote/bracket). Pick `？` for
+        // questions, `。` for statements.
         if let last = working.last, !Self.zhTerminalPunctuation.contains(last) {
-            working.append("。")
+            working.append(Self.looksLikeChineseQuestion(working) ? "？" : "。")
         }
 
         return working
+    }
+
+    /// Heuristic: does this Chinese text end / read as a question? Used to
+    /// pick `？` over `。` when appending a missing terminal.
+    ///
+    /// Two conservative signals — only one needs to fire:
+    /// 1. Last non-whitespace character is a sentence-final question
+    ///    particle (吗 / 呢 / 么).
+    /// 2. The text contains an unambiguous multi-character interrogative
+    ///    (什么, 怎么, 为什么, 是不是, 有没有, …). Single-char question
+    ///    words like 谁/哪/几 are NOT included because compounds (几乎,
+    ///    哪怕, 谁知道) generate too many false positives.
+    static func looksLikeChineseQuestion(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if let last = trimmed.last, zhSentenceFinalQuestionParticles.contains(last) {
+            return true
+        }
+        for word in zhMultiCharQuestionWords where trimmed.contains(word) {
+            return true
+        }
+        return false
     }
 
     /// Walks `text` and converts each ASCII punctuation character (`, . ? ! ; :`)
