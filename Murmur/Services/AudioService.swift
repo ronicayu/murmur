@@ -244,12 +244,26 @@ final class AudioService: AudioServiceProtocol {
         let duration = recordingStart.map { Date().timeIntervalSince($0) } ?? 0
         logger.info("Recording stopped, duration: \(duration, format: .fixed(precision: 1))s")
 
-        // VAD: check if audio was silence
+        // VAD: check if audio was silence. We compute BOTH the average and
+        // the peak RMS — peak handles the case where the user spoke clearly
+        // but Apple's voice-processing AGC pushed the average way down,
+        // causing the old average-only check to false-fire on real speech.
+        //
+        // With voice-processing enabled the noise floor drops dramatically,
+        // so the average RMS of a real utterance can land around -65 to -75 dB
+        // even when individual speech frames peak at -25 dB. The thresholds
+        // below tolerate that — only fire silenceDetected when even the loud
+        // moments are quiet (peak < -50 dB) AND the overall average is
+        // exceptionally low (avg < -78 dB).
         let avgRMS = accum.isEmpty ? Float(-100) : accum.reduce(0, +) / Float(accum.count)
-        let dbRMS = 20 * Foundation.log10(max(avgRMS, 1e-10))
-        logger.info("Audio RMS: \(dbRMS) dB (threshold: -60 dB)")
-        if dbRMS < -60 {
-            logger.info("Silence detected")
+        let peakRMS = accum.max() ?? 0
+        let dbAvg = 20 * Foundation.log10(max(avgRMS, 1e-10))
+        let dbPeak = 20 * Foundation.log10(max(peakRMS, 1e-10))
+        logger.info("Audio RMS avg: \(dbAvg, format: .fixed(precision: 1)) dB, peak: \(dbPeak, format: .fixed(precision: 1)) dB")
+
+        let isSilent = dbPeak < -50 && dbAvg < -78
+        if isSilent {
+            logger.info("Silence detected (peak \(dbPeak, format: .fixed(precision: 1)) dB, avg \(dbAvg, format: .fixed(precision: 1)) dB)")
             try? FileManager.default.removeItem(at: url)
             throw MurmurError.silenceDetected
         }
