@@ -212,10 +212,17 @@ struct SettingsView: View {
         Form {
             Section("Speech Engine") {
                 engineRow(.onnx)
+                if modelManager.activeBackend == .onnx {
+                    fireRedToggleRow
+                }
 
                 DisclosureGroup("Advanced", isExpanded: $showAdvancedEngines) {
                     engineRow(.huggingface)
+                    if modelManager.activeBackend == .huggingface {
+                        fireRedToggleRow
+                    }
                     engineRow(.whisper)
+                    engineRow(.fireRed)
                 }
             }
 
@@ -580,6 +587,75 @@ struct SettingsView: View {
         // defense-in-depth layer that also gives the user a visual affordance.
         .disabled(isLocked)
         .help(isLocked ? "Locked during download — wait for it to finish or cancel first." : "")
+    }
+
+    /// Sub-toggle visible under Cohere ONNX or HF backends. Routes Chinese
+    /// audio to FireRed when ON. Triggers a download if the FireRed model is
+    /// not yet on disk.
+    @ViewBuilder
+    private var fireRedToggleRow: some View {
+        let isOn = modelManager.useFireRedForChinese
+        let fireRedReady = modelManager.isModelDownloaded(for: .fireRed)
+        let isDownloadingFireRed = (modelManager.statusMessage.contains("FireRed"))
+            && (modelManager.isDownloadActive)
+
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: Binding(
+                get: { isOn },
+                set: { newValue in
+                    if newValue && !fireRedReady {
+                        Task { await downloadFireRedFromToggle() }
+                    } else {
+                        _ = modelManager.setUseFireRedForChinese(newValue)
+                    }
+                }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Use FireRed for Chinese transcription")
+                        .font(.body)
+                    Text("\(ModelBackend.fireRed.sizeDescription) additional · "
+                         + "Routes Chinese audio to FireRed for better accuracy. "
+                         + "Other languages stay on Cohere. V1 only.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(modelManager.isDownloadActive && !isDownloadingFireRed)
+
+            if isDownloadingFireRed {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .padding(.leading, 24)
+    }
+
+    /// Download the FireRed model on behalf of a user enabling the toggle.
+    /// On success, set the toggle ON. On failure or cancellation, leave it OFF.
+    ///
+    /// Note: `ModelManager.statusMessage` is `@Published private(set)` so we
+    /// cannot set a custom "Downloading FireRed model..." string from here.
+    /// The user-facing label comes from the existing `statusMessage` writes
+    /// inside `download()` (e.g. "Downloading speech model...", "Downloading:
+    /// X MB"). The Model Status section already reflects active backend, so
+    /// the in-progress download is attributed to FireRed via the section
+    /// header. The `isDownloadingFireRed` heuristic above looks for "FireRed"
+    /// in the status string — see `engineRow(.fireRed)` style if richer state
+    /// signaling becomes needed.
+    private func downloadFireRedFromToggle() async {
+        let savedBackend = modelManager.activeBackend
+        // Temporarily flip activeBackend to .fireRed so download() targets it.
+        // Restore after the download completes (success or failure).
+        guard modelManager.setActiveBackend(.fireRed) else {
+            return
+        }
+        do {
+            try await modelManager.download()
+            _ = modelManager.setActiveBackend(savedBackend)
+            _ = modelManager.setUseFireRedForChinese(true)
+        } catch {
+            _ = modelManager.setActiveBackend(savedBackend)
+            // Error alert is handled by the existing ModelManager status path.
+        }
     }
 
     // MARK: - Helpers
