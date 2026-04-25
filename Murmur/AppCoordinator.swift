@@ -88,9 +88,54 @@ final class AppCoordinator: ObservableObject {
 
     /// Optional ASR error-correction service. When non-nil and the
     /// `correctTranscription` UserDefault is on, runs BEFORE `cleanup` on the
-    /// raw transcribed text. MurmurApp wires `FoundationModelsCorrector` on
-    /// macOS 26+ with Apple Intelligence available, `NoOpCorrector` otherwise.
+    /// raw transcribed text. Concrete implementation is chosen by
+    /// `reconfigureCorrectionEngine()` based on the `correctionEngine`
+    /// UserDefault: `"apple"` → `FoundationModelsCorrector` (or NoOp on
+    /// older systems), `"ollama"` → `OllamaCorrector`. Re-wired whenever
+    /// Settings changes the picker values.
     var correction: (any TranscriptionCorrection)?
+
+    /// Re-reads `correctionEngine`, `localLLMBaseURL`, `localLLMModel`, and
+    /// `localLLMAPIKey` from UserDefaults and wires the appropriate concrete
+    /// corrector into `self.correction`. Safe to call repeatedly — each call
+    /// is cheap. Invoke from MurmurApp at launch and from Settings whenever
+    /// the engine picker / URL / model fields change.
+    func reconfigureCorrectionEngine() {
+        let defaults = UserDefaults.standard
+        let engine = defaults.string(forKey: "correctionEngine") ?? "apple"
+
+        switch engine {
+        case "local":
+            // Any OpenAI-compatible local server (Ollama, LM Studio, llamafile, …).
+            // User fills in the full base URL including `/v1`.
+            let urlString = defaults.string(forKey: "localLLMBaseURL") ?? "http://localhost:11434/v1"
+            let model = defaults.string(forKey: "localLLMModel") ?? "qwen2.5:3b-instruct"
+            let apiKey = defaults.string(forKey: "localLLMAPIKey")
+            if let url = URL(string: urlString) {
+                self.correction = OpenAICompatibleCorrector(
+                    baseURL: url,
+                    modelName: model,
+                    apiKey: (apiKey?.isEmpty ?? true) ? nil : apiKey
+                )
+                Self.log.info("correction engine: local @ \(urlString, privacy: .public) (\(model, privacy: .public))")
+            } else {
+                Self.log.error("correction engine: invalid local URL \(urlString, privacy: .public); falling back to NoOp")
+                self.correction = NoOpCorrector()
+            }
+
+        default:
+            // "apple" or unknown — prefer Foundation Models when available.
+            #if canImport(FoundationModels)
+            if #available(macOS 26.0, *), FoundationModelsCorrector.isSystemModelAvailable {
+                self.correction = FoundationModelsCorrector()
+                Self.log.info("correction engine: apple on-device")
+                return
+            }
+            #endif
+            self.correction = NoOpCorrector()
+            Self.log.info("correction engine: noop (apple unavailable)")
+        }
+    }
 
     private var cleanupEnabled: Bool {
         UserDefaults.standard.bool(forKey: "cleanupTranscription")

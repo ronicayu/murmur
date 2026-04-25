@@ -16,6 +16,10 @@ struct SettingsView: View {
     @AppStorage("undoAfterTranscription") private var undoAfterTranscription: Bool = false
     @AppStorage("cleanupTranscription") private var cleanupTranscription: Bool = false
     @AppStorage("correctTranscription") private var correctTranscription: Bool = false
+    @AppStorage("correctionEngine") private var correctionEngine: String = "apple"
+    @AppStorage("localLLMBaseURL") private var localLLMBaseURL: String = "http://localhost:11434/v1"
+    @AppStorage("localLLMModel") private var localLLMModel: String = "qwen2.5:3b-instruct"
+    @AppStorage("localLLMAPIKey") private var localLLMAPIKey: String = ""
 
     @State private var useRightCommand: Bool = true
     @State private var showDeleteConfirmation = false
@@ -402,18 +406,77 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var transcriptionCorrectionRow: some View {
-        LabeledContent {
-            Toggle("", isOn: $correctTranscription)
-                .labelsHidden()
-                .toggleStyle(.switch)
-        } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Correct transcription errors")
-                Text("Uses Apple's on-device model to fix homophone mistakes, phonetic errors, and wrong Chinese characters; also adds sentence punctuation. English words in a Chinese sentence (and vice versa) are preserved — the model never translates. Adds up to 2.5 s; falls back to the raw transcription on timeout. Requires macOS 26 and Apple Intelligence. V1 full-pass only — streaming is bypassed.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            LabeledContent {
+                Toggle("", isOn: $correctTranscription)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Correct transcription errors")
+                    Text("Fix homophone/phonetic errors, wrong Chinese characters, and add sentence punctuation. English words in a Chinese sentence (and vice versa) are preserved — the model never translates. Adds up to 2.5 s; falls back to the raw transcription on timeout. V1 full-pass only — streaming is bypassed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if correctTranscription {
+                // Engine picker — only relevant when correction is on.
+                Picker("Engine", selection: $correctionEngine) {
+                    Text("Apple on-device").tag("apple")
+                    Text("Local LLM (OpenAI-compatible)").tag("local")
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: correctionEngine) { _, _ in
+                    coordinator.reconfigureCorrectionEngine()
+                }
+
+                if correctionEngine == "apple" {
+                    Text("Uses Apple Intelligence. Requires macOS 26 and the on-device model to be downloaded and enabled.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    localLLMConfigFields
+                }
             }
         }
+    }
+
+    @ViewBuilder
+    private var localLLMConfigFields: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Any OpenAI-compatible server. Examples — Ollama: http://localhost:11434/v1 · LM Studio: http://localhost:1234/v1 · llamafile / vLLM / a cloud OpenAI-compatible proxy.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            LabeledContent("Base URL") {
+                TextField("http://localhost:11434/v1", text: $localLLMBaseURL)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { coordinator.reconfigureCorrectionEngine() }
+            }
+
+            LabeledContent("Model") {
+                TextField("qwen2.5:3b-instruct", text: $localLLMModel)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { coordinator.reconfigureCorrectionEngine() }
+            }
+
+            LabeledContent("API Key") {
+                SecureField("optional — leave empty for local servers", text: $localLLMAPIKey)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { coordinator.reconfigureCorrectionEngine() }
+            }
+
+            HStack {
+                Spacer()
+                Button("Apply") {
+                    coordinator.reconfigureCorrectionEngine()
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(.leading, 4)
     }
 
     @ViewBuilder

@@ -34,20 +34,10 @@ struct MurmurApp: App {
         // classifier once AuxiliaryModel.punctuationCleanup lands.
         coord.cleanup = PunctuationCleanupService()
 
-        // ASR-error correction: on macOS 26+ with Apple Intelligence ready, use
-        // Apple's on-device Foundation Model. On any older / ineligible system,
-        // wire a NoOpCorrector so the coordinator's correction slot is always
-        // non-nil (simpler enabled/disabled logic; the toggle still gates the
-        // call path). Availability decision happens exactly once, at launch.
-        #if canImport(FoundationModels)
-        if #available(macOS 26.0, *), FoundationModelsCorrector.isSystemModelAvailable {
-            coord.correction = FoundationModelsCorrector()
-        } else {
-            coord.correction = NoOpCorrector()
-        }
-        #else
-        coord.correction = NoOpCorrector()
-        #endif
+        // Wire the ASR-error correction engine chosen by Settings. Supports
+        // swapping between Apple on-device and a local Ollama server — see
+        // AppCoordinator.reconfigureCorrectionEngine for the decision logic.
+        coord.reconfigureCorrectionEngine()
 
         _modelManager = StateObject(wrappedValue: mm)
         _coordinator = StateObject(wrappedValue: coord)
