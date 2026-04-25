@@ -256,7 +256,7 @@ final class AudioService: AudioServiceProtocol {
         let peakRMS = accum.max() ?? 0
         let dbAvg = 20 * Foundation.log10(max(avgRMS, 1e-10))
         let dbPeak = 20 * Foundation.log10(max(peakRMS, 1e-10))
-        logger.info("Audio RMS avg: \(dbAvg, format: .fixed(precision: 1)) dB, peak: \(dbPeak, format: .fixed(precision: 1)) dB (frames=\(accum.count, format: .fixed(precision: 0)))")
+        logger.info("Audio RMS avg: \(dbAvg, format: .fixed(precision: 1)) dB, peak: \(dbPeak, format: .fixed(precision: 1)) dB (frames=\(accum.count))")
 
         if dbPeak < -65 {
             logger.info("Silence detected (peak \(dbPeak, format: .fixed(precision: 1)) dB)")
