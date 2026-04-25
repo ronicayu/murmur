@@ -148,6 +148,23 @@ final class AudioService: AudioServiceProtocol {
         // available — fail early with a clear message rather than letting the
         // engine throw -10868 later.
         let inputNode = engine.inputNode
+
+        // Voice processing — Apple's built-in noise suppression + echo
+        // cancellation + AGC, the same audio unit FaceTime / Zoom use.
+        // Significant quality gain in noisy environments. MUST be set before
+        // `engine.start()` and BEFORE the format is read (the IO unit forces
+        // the input format to 16 kHz mono when enabled, which is exactly
+        // what we want for ASR anyway).
+        let voiceProcessingEnabled = UserDefaults.standard.object(forKey: "voiceProcessingEnabled") as? Bool ?? true
+        do {
+            try inputNode.setVoiceProcessingEnabled(voiceProcessingEnabled)
+        } catch {
+            // Non-fatal: log and proceed with raw input. Older external USB
+            // mics occasionally refuse the voice-processing unit; we'd
+            // rather record imperfectly than hard-fail.
+            logger.warning("setVoiceProcessingEnabled(\(voiceProcessingEnabled)) failed: \(String(describing: error))")
+        }
+
         let hardwareFormat = inputNode.inputFormat(forBus: 0)
         guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
             logger.error("No audio input available (sampleRate=\(hardwareFormat.sampleRate), channels=\(hardwareFormat.channelCount))")
