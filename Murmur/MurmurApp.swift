@@ -13,6 +13,18 @@ struct MurmurApp: App {
     @State private var launched = false
 
     init() {
+        // One-shot migration: an earlier build defaulted `voiceProcessingEnabled`
+        // to true, but Apple's voice-processing IO unit produces silent buffers
+        // on some macOS device/route combinations (verified user report — the
+        // VAD reported -200 dB peak, i.e. literal zeros, which fired
+        // silenceDetected on every recording). Force it off once for users
+        // who never explicitly toggled it; honour the choice afterwards.
+        let defaults = UserDefaults.standard
+        if !defaults.bool(forKey: "voiceProcessingMigrationV1") {
+            defaults.set(false, forKey: "voiceProcessingEnabled")
+            defaults.set(true, forKey: "voiceProcessingMigrationV1")
+        }
+
         let mm = ModelManager()
         let backend = mm.activeBackend
         let modelPath = mm.modelDirectory(for: backend)

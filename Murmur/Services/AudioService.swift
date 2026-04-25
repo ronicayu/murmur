@@ -149,21 +149,15 @@ final class AudioService: AudioServiceProtocol {
         // engine throw -10868 later.
         let inputNode = engine.inputNode
 
-        // Voice processing — Apple's built-in noise suppression + echo
-        // cancellation + AGC, the same audio unit FaceTime / Zoom use.
-        // Significant quality gain in noisy environments. MUST be set before
-        // `engine.start()` and BEFORE the format is read (the IO unit forces
-        // the input format to 16 kHz mono when enabled, which is exactly
-        // what we want for ASR anyway).
-        let voiceProcessingEnabled = UserDefaults.standard.object(forKey: "voiceProcessingEnabled") as? Bool ?? true
-        do {
-            try inputNode.setVoiceProcessingEnabled(voiceProcessingEnabled)
-        } catch {
-            // Non-fatal: log and proceed with raw input. Older external USB
-            // mics occasionally refuse the voice-processing unit; we'd
-            // rather record imperfectly than hard-fail.
-            logger.warning("setVoiceProcessingEnabled(\(voiceProcessingEnabled)) failed: \(String(describing: error))")
-        }
+        // We deliberately do NOT call `setVoiceProcessingEnabled` here.
+        // The AVAudioEngine voice-processing IO unit is fragile on macOS —
+        // multiple device / route combinations (notably AirPods and EarPods,
+        // verified on a user's M-series Mac) return all-zero buffers, which
+        // manifests as VAD firing silenceDetected on every recording.
+        // For noise reduction in noisy environments, point users at
+        // macOS-system Voice Isolation (Control Center → Microphone Mode)
+        // — see README. That path is OS-level, applies to any input, and
+        // does not break our audio pipeline.
 
         let hardwareFormat = inputNode.inputFormat(forBus: 0)
         guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {

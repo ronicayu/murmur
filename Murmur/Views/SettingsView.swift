@@ -14,7 +14,6 @@ struct SettingsView: View {
     @AppStorage("streamingDiscoveryBadgeDismissed") private var discoveryBadgeDismissed: Bool = false
     @AppStorage("streamingFocusAbandonSeconds") private var focusAbandonSeconds: Double = 10.0
     @AppStorage("undoAfterTranscription") private var undoAfterTranscription: Bool = false
-    @AppStorage("voiceProcessingEnabled") private var voiceProcessingEnabled: Bool = true
     @AppStorage("cleanupTranscription") private var cleanupTranscription: Bool = false
     @AppStorage("correctTranscription") private var correctTranscription: Bool = false
     @AppStorage("correctionEngine") private var correctionEngine: String = "apple"
@@ -160,18 +159,6 @@ struct SettingsView: View {
                         .onChange(of: launchAtLogin) { _, newValue in
                             setLaunchAtLogin(newValue)
                         }
-                }
-                LabeledContent {
-                    Toggle("", isOn: $voiceProcessingEnabled)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Voice processing (recommended)")
-                        Text("Apple's built-in noise suppression, echo cancellation, and automatic gain control — the same audio pipeline FaceTime uses. Strongly recommended in noisy environments. Takes effect on the next recording.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
                 }
             }
 

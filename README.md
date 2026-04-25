@@ -84,6 +84,19 @@ With **streaming mode** enabled (Settings > Experimental), text appears in real-
 
 The hotkey and recording mode (toggle vs hold-to-talk) are customizable in Settings.
 
+### Recording in noisy environments — turn on macOS Voice Isolation
+
+Murmur intentionally does NOT enable AVAudioEngine voice processing — on macOS that audio unit returns silent buffers with several common device routes (notably AirPods, EarPods, and some external USB mics), which would break recording entirely.
+
+Instead, use macOS's system-level **Voice Isolation** mic mode. It runs in the OS, applies to any input device, and uses Apple's ML noise-suppression model:
+
+1. Start a recording in any app once (e.g., open the Murmur recording pill — Voice Isolation only appears in Control Center while a process is using the mic).
+2. Open **Control Center** (top-right menu bar).
+3. Click **Microphone Mode**.
+4. Select **Voice Isolation**.
+
+The setting persists per app. With AirPods Pro you also get the headset's own hardware noise cancellation on top — that combination is dramatically better than anything Murmur could do in-process.
+
 ### Audio Transcription
 
 Open the transcription window from the menu bar to transcribe long audio files:
