@@ -409,7 +409,7 @@ struct SettingsView: View {
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Correct transcription errors")
-                Text("Uses Apple's on-device model to fix homophone mistakes and phonetic errors while preserving your original meaning. Adds up to 2.5 s; falls back to the raw transcription on timeout. Requires macOS 26 and Apple Intelligence. V1 full-pass only — streaming is bypassed.")
+                Text("Uses Apple's on-device model to fix homophone mistakes, phonetic errors, and wrong Chinese characters; also adds sentence punctuation. English words in a Chinese sentence (and vice versa) are preserved — the model never translates. Adds up to 2.5 s; falls back to the raw transcription on timeout. Requires macOS 26 and Apple Intelligence. V1 full-pass only — streaming is bypassed.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

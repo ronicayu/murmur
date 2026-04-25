@@ -8,12 +8,16 @@ import FoundationModels
 // MARK: - Protocol
 
 /// Corrects likely ASR errors (homophones, phonetic mistranscriptions) in a
-/// raw transcription while preserving the original meaning. Distinct from
-/// `TranscriptionCleanup` which only handles punctuation and casing — this
-/// layer actually rewrites words / characters.
+/// raw transcription while preserving the original meaning. Also inserts
+/// appropriate punctuation and sentence-initial casing so the output reads
+/// as a well-formed sentence. Never translates — code-switched utterances
+/// (English technical terms inside Chinese speech, etc.) must stay
+/// code-switched.
 ///
 /// Runs BEFORE `TranscriptionCleanup` in the coordinator pipeline:
 ///   `transcribe → correction → cleanup → inject`
+/// Cleanup is a deterministic safety net for when correction is off or times
+/// out; when correction runs and adds its own punctuation, cleanup is a no-op.
 ///
 /// Implementations MUST be safe to time out: the coordinator enforces a hard
 /// deadline and falls back to the raw text on any throw. The concrete Apple
@@ -118,12 +122,23 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
     automatic speech recognizer that may contain homophone mistakes, phonetic \
     misspellings, or minor character substitutions.
 
-    Your only job:
-    - Correct obvious ASR mistakes (wrong homophones, typos, wrong Chinese characters).
-    - Preserve the user's original meaning, tone, and word choice.
+    Your job, in order of priority:
+    1. Correct obvious ASR mistakes (wrong homophones, typos, wrong Chinese characters).
+    2. Add appropriate punctuation and sentence-initial casing so the output \
+       reads as a well-formed sentence in its language. For Chinese use \
+       full-width punctuation (。，？！); for English use ASCII punctuation and \
+       Title Case where appropriate.
+    3. Preserve the user's original meaning, tone, and word choice.
+
+    Hard rules — violating any of these means return the input unchanged:
+    - Do NOT translate. If the user said an English word, keep it as the \
+      same English word. If the user said a Chinese character, keep it as \
+      that Chinese character. Code-switched utterances (mixed English and \
+      Chinese) must stay code-switched — English technical terms, brand \
+      names, and identifiers stay in Latin script.
     - Do NOT add information the user did not say.
-    - Do NOT rephrase, summarize, shorten, or expand the text.
-    - Do NOT add punctuation or casing changes — that is handled downstream.
+    - Do NOT rephrase, summarize, shorten, or expand the text beyond what \
+      punctuation and casing require.
     - If the input looks correct or you are unsure, return it unchanged.
 
     Output ONLY the corrected text. No quotes, no commentary, no explanation.
