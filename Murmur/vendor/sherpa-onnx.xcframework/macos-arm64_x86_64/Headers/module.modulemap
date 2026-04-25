@@ -1,0 +1,5 @@
+module SherpaOnnxC {
+    umbrella header "sherpa-onnx/c-api/c-api.h"
+    export *
+    link "sherpa-onnx"
+}
