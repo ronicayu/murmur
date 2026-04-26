@@ -6,6 +6,11 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.3.4] — 2026-04-26
+
+### Fixed
+- **Model download failed under Cloudflare WARP / Zero Trust** with `CERTIFICATE_VERIFY_FAILED`. The bundled Python uses certifi's CA bundle and ignores the macOS keychain, so WARP's intercepted TLS chain (its root lives only in the System keychain) was rejected at every HTTPS call — `pip install` for the env, `huggingface_hub.snapshot_download` for FireRed/Cohere/CT-Transformer. All Python subprocesses now inherit `SSL_CERT_FILE=/etc/ssl/cert.pem` and `REQUESTS_CA_BUNDLE=/etc/ssl/cert.pem`. macOS regenerates that file from the System keychain, so it picks up the WARP root automatically. Transparent for non-WARP users — the bundle is a superset of certifi's defaults, no behaviour change. (`Murmur/Services/ModelManager.swift`.)
+
 ## [0.3.3] — 2026-04-26
 
 ### Performance

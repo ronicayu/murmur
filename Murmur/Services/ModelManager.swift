@@ -716,6 +716,7 @@ final class ModelManager: ObservableObject {
         let process = Process()
         process.executableURL = pythonBin
         process.arguments = ["-c", downloadScript]
+        process.environment = pythonSubprocessEnvironment()
 
         let stdout = Pipe()
         let stderr = Pipe()
@@ -1204,10 +1205,30 @@ final class ModelManager: ObservableObject {
         let stderr: String
     }
 
+    /// Environment for Python subprocesses.
+    ///
+    /// Python's `ssl`/`requests`/`urllib3` use certifi's bundled CA store and
+    /// ignore the macOS keychain. Under TLS-intercepting clients like Cloudflare
+    /// WARP / Zero Trust (which install their own root CA into System keychain),
+    /// every HTTPS call from the subprocess fails with `CERTIFICATE_VERIFY_FAILED`.
+    /// `/etc/ssl/cert.pem` is regenerated from the System keychain and includes
+    /// any user-installed roots, so pointing certifi consumers at it makes pip
+    /// and huggingface_hub trust the intercepted chain.
+    private func pythonSubprocessEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let systemBundle = "/etc/ssl/cert.pem"
+        if FileManager.default.fileExists(atPath: systemBundle) {
+            if env["SSL_CERT_FILE"] == nil { env["SSL_CERT_FILE"] = systemBundle }
+            if env["REQUESTS_CA_BUNDLE"] == nil { env["REQUESTS_CA_BUNDLE"] = systemBundle }
+        }
+        return env
+    }
+
     private func runProcess(_ executable: URL, args: [String]) async throws -> ProcessResult {
         let proc = Process()
         proc.executableURL = executable
         proc.arguments = args
+        proc.environment = pythonSubprocessEnvironment()
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -1248,6 +1269,7 @@ final class ModelManager: ObservableObject {
         let proc = Process()
         proc.executableURL = executable
         proc.arguments = args
+        proc.environment = pythonSubprocessEnvironment()
 
         let stderrPipe = Pipe()
         proc.standardOutput = FileHandle.nullDevice
@@ -1443,6 +1465,7 @@ final class ModelManager: ObservableObject {
         let process = Process()
         process.executableURL = pythonBin
         process.arguments = ["-c", script]
+        process.environment = pythonSubprocessEnvironment()
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
