@@ -6,6 +6,11 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.3.3] — 2026-04-26
+
+### Performance
+- **FireRed transcription ~17% faster** by passing `numThreads: 4` to sherpa-onnx (default was 1 — single-threaded CPU inference for a 1B-param int8 ONNX). Measured on the spike's 14.7 s reference clip: RTF 0.545 → 0.450. CoreML execution provider was *evaluated and rejected* — it's ~15× slower on this int8 model because most ops can't be delegated and the fallback path is slow. 8 threads was also evaluated and is slightly *worse* than 4 due to perf-cluster contention. See `run_speed_sweep.py` in the spike workspace.
+
 ## [0.3.2] — 2026-04-26
 
 ### Fixed

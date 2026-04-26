@@ -35,8 +35,17 @@ actor FireRedTranscriptionService {
         let fireRedAsr = sherpaOnnxOfflineFireRedAsrModelConfig(
             encoder: encoder, decoder: decoder
         )
+        // numThreads=4 is the measured sweet spot on the FireRedASR2-AED int8 ONNX
+        // (~17% faster than the default 1 on the 14.7 s benchmark clip). 8 threads
+        // is *slower* than 4 due to perf-cluster contention; provider="coreml"
+        // is dramatically slower (~15×) because the int8 ops can't be delegated
+        // and the EP falls back to a slow path. See run_speed_sweep.py in spike.
         let modelConfig = sherpaOnnxOfflineModelConfig(
-            tokens: tokens, debug: 0, fireRedAsr: fireRedAsr
+            tokens: tokens,
+            numThreads: 4,
+            provider: "cpu",
+            debug: 0,
+            fireRedAsr: fireRedAsr
         )
         let featConfig = sherpaOnnxFeatureConfig(sampleRate: 16000, featureDim: 80)
         var config = sherpaOnnxOfflineRecognizerConfig(
