@@ -379,6 +379,8 @@ final class ModelManager: ObservableObject {
     private var activeDownloadProcess: Process?
     private var urlSession: URLSession?
     private var resumeData: Data?
+    /// Cached path to the keychain-aware CA bundle (lazy, built once per launch).
+    private var cachedCABundlePath: String?
 
     var modelDirectory: URL {
         modelDirectory(for: activeBackend)
@@ -694,10 +696,14 @@ final class ModelManager: ObservableObject {
         }
 
         let downloadScript = """
-        import sys, json, os
+        import sys, json, os, traceback
+        print("[murmur] python", sys.version.split()[0], "starting download", flush=True)
+        print("[murmur] SSL_CERT_FILE=" + repr(os.environ.get("SSL_CERT_FILE")), flush=True)
+        print("[murmur] REQUESTS_CA_BUNDLE=" + repr(os.environ.get("REQUESTS_CA_BUNDLE")), flush=True)
         from huggingface_hub import snapshot_download
 
         try:
+            print("[murmur] calling snapshot_download(\(backend.modelRepo))", flush=True)
             path = snapshot_download(
                 "\(backend.modelRepo)",
                 local_dir="\(modelDirectory.path)",
@@ -705,12 +711,20 @@ final class ModelManager: ObservableObject {
             )
             print(json.dumps({"status": "ok", "path": path}), flush=True)
         except Exception as e:
+            etype = type(e).__name__
+            tb = traceback.format_exc()
+            print("[murmur] download failed: " + etype + ": " + str(e), flush=True)
+            print(tb, flush=True)
             msg = str(e)
             if "401" in msg or "gated" in msg.lower() or "restricted" in msg.lower():
                 msg = "Access denied. Please log in and request access at huggingface.co first."
             elif "404" in msg:
                 msg = "Model not found. Please check your internet connection and try again."
-            print(json.dumps({"status": "error", "error": msg}), flush=True)
+            elif "CERTIFICATE_VERIFY_FAILED" in msg or "SSLError" in etype or "SSLCertVerificationError" in etype:
+                msg = "TLS certificate verification failed. If you use Cloudflare WARP / Zero Trust or another TLS-intercepting proxy, set Settings → Advanced → Custom CA bundle to a PEM file containing the intercepting root."
+            elif "ConnectionError" in etype or "Timeout" in etype or "NameResolutionError" in etype or "getaddrinfo" in msg:
+                msg = "Could not reach huggingface.co (" + etype + "). Check your network or try again later."
+            print(json.dumps({"status": "error", "error": msg, "type": etype}), flush=True)
         """
 
         let process = Process()
@@ -722,6 +736,34 @@ final class ModelManager: ObservableObject {
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
+
+        // Stream subprocess output to the logger as it arrives. Without this,
+        // a hung huggingface_hub call (e.g. waiting on a TLS handshake under
+        // WARP) produces zero log output until the process eventually times
+        // out — leaving the user looking at "Starting model download" with
+        // nothing else for minutes. We read stdout incrementally for the
+        // [murmur] probe markers and stderr for tqdm/urllib3 chatter.
+        // Output is captured into accumulators that are returned via the
+        // continuation below (so the post-exit JSON parser still sees it).
+        let outputAccumulator = OutputAccumulator()
+        let logger = self.logger
+        let streamStdout = Task {
+            for try await line in stdout.fileHandleForReading.bytes.lines {
+                outputAccumulator.appendStdout(line)
+                if line.hasPrefix("[murmur]") || line.hasPrefix("{") {
+                    logger.info("py> \(line)")
+                }
+            }
+        }
+        let streamStderr = Task {
+            for try await line in stderr.fileHandleForReading.bytes.lines {
+                outputAccumulator.appendStderr(line)
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty {
+                    logger.info("py! \(trimmed)")
+                }
+            }
+        }
 
         // Monitor download activity: show downloaded size and speed.
         // We don't know the exact total, so we show an indeterminate progress
@@ -821,11 +863,21 @@ final class ModelManager: ObservableObject {
         monitorTask.cancel()
         activeDownloadProcess = nil
 
-        // Read stdout for JSON result (our script always prints JSON)
-        let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
-        let outputStr = String(data: outputData, encoding: .utf8) ?? ""
-        let stderrStr = String(data: stderrData, encoding: .utf8) ?? ""
+        // Drain any remaining buffered output the streaming tasks may not have
+        // observed yet (race between EOF and AsyncStream cancellation), then
+        // stop them.
+        let leftoverStdout = (try? stdout.fileHandleForReading.readToEnd()) ?? Data()
+        let leftoverStderr = (try? stderr.fileHandleForReading.readToEnd()) ?? Data()
+        if let s = String(data: leftoverStdout, encoding: .utf8), !s.isEmpty {
+            outputAccumulator.appendStdout(s)
+        }
+        if let s = String(data: leftoverStderr, encoding: .utf8), !s.isEmpty {
+            outputAccumulator.appendStderr(s)
+        }
+        streamStdout.cancel()
+        streamStderr.cancel()
+        let outputStr = outputAccumulator.stdoutText
+        let stderrStr = outputAccumulator.stderrText
 
         // Try to parse JSON response from our script
         if let jsonLine = outputStr.components(separatedBy: "\n").last(where: { $0.contains("{") }),
@@ -1205,23 +1257,158 @@ final class ModelManager: ObservableObject {
         let stderr: String
     }
 
+    /// Thread-safe accumulator for subprocess output streamed line-by-line.
+    /// Sendable so it can be captured by detached Tasks reading the pipes.
+    private final class OutputAccumulator: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stdoutLines: [String] = []
+        private var stderrLines: [String] = []
+
+        func appendStdout(_ line: String) {
+            lock.lock(); defer { lock.unlock() }
+            stdoutLines.append(line)
+        }
+        func appendStderr(_ line: String) {
+            lock.lock(); defer { lock.unlock() }
+            stderrLines.append(line)
+        }
+        var stdoutText: String {
+            lock.lock(); defer { lock.unlock() }
+            return stdoutLines.joined(separator: "\n")
+        }
+        var stderrText: String {
+            lock.lock(); defer { lock.unlock() }
+            return stderrLines.joined(separator: "\n")
+        }
+    }
+
     /// Environment for Python subprocesses.
     ///
     /// Python's `ssl`/`requests`/`urllib3` use certifi's bundled CA store and
     /// ignore the macOS keychain. Under TLS-intercepting clients like Cloudflare
     /// WARP / Zero Trust (which install their own root CA into System keychain),
     /// every HTTPS call from the subprocess fails with `CERTIFICATE_VERIFY_FAILED`.
-    /// `/etc/ssl/cert.pem` is regenerated from the System keychain and includes
-    /// any user-installed roots, so pointing certifi consumers at it makes pip
-    /// and huggingface_hub trust the intercepted chain.
+    ///
+    /// Resolution order for the CA bundle path:
+    ///   1. User override from Settings → Advanced → Custom CA bundle
+    ///      (`UserDefaults.customCABundlePath`).
+    ///   2. Caller-supplied env var (anyone who launched Murmur with
+    ///      `SSL_CERT_FILE=...` already gets their way).
+    ///   3. Auto-generated bundle that concatenates certifi's defaults with the
+    ///      macOS System keychains' anchor certs (built once per app launch into
+    ///      `~/Library/Application Support/Murmur/cabundle.pem`). This is what
+    ///      makes Cloudflare WARP work without user setup.
     private func pythonSubprocessEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        let systemBundle = "/etc/ssl/cert.pem"
-        if FileManager.default.fileExists(atPath: systemBundle) {
-            if env["SSL_CERT_FILE"] == nil { env["SSL_CERT_FILE"] = systemBundle }
-            if env["REQUESTS_CA_BUNDLE"] == nil { env["REQUESTS_CA_BUNDLE"] = systemBundle }
+        let chosen = resolveCABundlePath(env: env)
+        if let path = chosen {
+            env["SSL_CERT_FILE"] = path
+            env["REQUESTS_CA_BUNDLE"] = path
         }
         return env
+    }
+
+    private func resolveCABundlePath(env: [String: String]) -> String? {
+        // 1. User override
+        if let custom = UserDefaults.standard.string(forKey: "customCABundlePath"),
+           !custom.isEmpty,
+           FileManager.default.fileExists(atPath: custom) {
+            return custom
+        }
+        // 2. Caller-supplied (preserve whichever env var the user pre-set)
+        if let preset = env["SSL_CERT_FILE"], FileManager.default.fileExists(atPath: preset) {
+            return preset
+        }
+        if let preset = env["REQUESTS_CA_BUNDLE"], FileManager.default.fileExists(atPath: preset) {
+            return preset
+        }
+        // 3. Auto-generated keychain-aware bundle
+        return ensureKeychainCABundle()
+    }
+
+    /// Builds `~/Library/Application Support/Murmur/cabundle.pem` once per app
+    /// launch by concatenating certifi's bundle (so we don't lose any default
+    /// public roots) with anchor certs dumped from the macOS System keychains
+    /// (so we pick up any user-installed roots, including Cloudflare WARP).
+    /// Returns nil only if writing to disk fails — callers fall through to
+    /// certifi's defaults in that case.
+    private func ensureKeychainCABundle() -> String? {
+        if let cached = cachedCABundlePath { return cached }
+
+        let bundleURL = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Murmur/cabundle.pem")
+
+        do {
+            try FileManager.default.createDirectory(
+                at: bundleURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+
+            var combined = Data()
+
+            // Start with the bundled Python's certifi roots (best-effort —
+            // missing file just means we skip this layer).
+            let certifiPath = pythonEnvPath
+                .appendingPathComponent("lib")
+            if let certifi = locateCertifiBundle(under: certifiPath),
+               let data = try? Data(contentsOf: certifi) {
+                combined.append(data)
+                combined.append(Data([0x0A])) // newline between concatenated PEMs
+            }
+
+            // Append macOS System keychain anchors. Two locations cover all
+            // user-installed and Apple-shipped roots.
+            for keychain in [
+                "/Library/Keychains/System.keychain",
+                "/System/Library/Keychains/SystemRootCertificates.keychain",
+            ] {
+                if let data = dumpKeychainPEM(path: keychain) {
+                    combined.append(data)
+                    combined.append(Data([0x0A]))
+                }
+            }
+
+            try combined.write(to: bundleURL, options: .atomic)
+            cachedCABundlePath = bundleURL.path
+            logger.info("CA bundle ready at \(bundleURL.path) (\(combined.count) bytes)")
+            return bundleURL.path
+        } catch {
+            logger.warning("Failed to build CA bundle: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func locateCertifiBundle(under root: URL) -> URL? {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+        for case let url as URL in enumerator {
+            if url.lastPathComponent == "cacert.pem", url.path.contains("certifi") {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private func dumpKeychainPEM(path: String) -> Data? {
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        proc.arguments = ["find-certificate", "-a", "-p", path]
+        let stdout = Pipe()
+        proc.standardOutput = stdout
+        proc.standardError = Pipe()
+        do {
+            try proc.run()
+            let data = stdout.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            return proc.terminationStatus == 0 ? data : nil
+        } catch {
+            return nil
+        }
     }
 
     private func runProcess(_ executable: URL, args: [String]) async throws -> ProcessResult {

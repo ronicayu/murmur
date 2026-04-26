@@ -6,10 +6,23 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.3.5] — 2026-04-26
+
+### Fixed
+- **Model download failed silently under Cloudflare WARP / Zero Trust.** Two compounding problems: (1) the v0.3.4 fix pointed Python at `/etc/ssl/cert.pem`, which on macOS is an Apple-shipped static bundle — *not* regenerated from the System keychain, so WARP's intercepting root was never trusted; (2) the Python subprocess only printed output after termination, so a hung TLS handshake produced zero log signal until eventual timeout. Both fixed: Murmur now builds `~/Library/Application Support/Murmur/cabundle.pem` once per launch by concatenating certifi's defaults with anchor certs dumped from `/Library/Keychains/System.keychain` and `/System/Library/Keychains/SystemRootCertificates.keychain` via `security find-certificate -a -p`. That bundle picks up any user-installed roots (including Cloudflare WARP / Zero Trust). Subprocess stdout/stderr are now streamed line-by-line into the unified log (`py>` / `py!` prefixes), and the download script prints probe markers and tags exceptions with their type so failures stop being invisible.
+
+### Added
+- **Settings → General → Network (Advanced) → Custom CA bundle.** File picker for a `.pem`/`.crt`/`.cer` containing the root(s) you want trusted during model downloads. Overrides the auto-generated bundle. Useful for enterprise environments where the keychain dump is incomplete or you keep your own portable PEM. Stored in `UserDefaults` under `customCABundlePath`.
+
+### Resolution order for the CA bundle
+1. `customCABundlePath` from Settings, if set and the file exists.
+2. `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` if you launched Murmur with them pre-set.
+3. The auto-generated keychain-aware bundle.
+
 ## [0.3.4] — 2026-04-26
 
 ### Fixed
-- **Model download failed under Cloudflare WARP / Zero Trust** with `CERTIFICATE_VERIFY_FAILED`. The bundled Python uses certifi's CA bundle and ignores the macOS keychain, so WARP's intercepted TLS chain (its root lives only in the System keychain) was rejected at every HTTPS call — `pip install` for the env, `huggingface_hub.snapshot_download` for FireRed/Cohere/CT-Transformer. All Python subprocesses now inherit `SSL_CERT_FILE=/etc/ssl/cert.pem` and `REQUESTS_CA_BUNDLE=/etc/ssl/cert.pem`. macOS regenerates that file from the System keychain, so it picks up the WARP root automatically. Transparent for non-WARP users — the bundle is a superset of certifi's defaults, no behaviour change. (`Murmur/Services/ModelManager.swift`.)
+- **Model download failed under Cloudflare WARP / Zero Trust** with `CERTIFICATE_VERIFY_FAILED`. *(Superseded by 0.3.5 — the fix pointed at `/etc/ssl/cert.pem`, which on macOS does not include user-installed keychain roots.)*
 
 ## [0.3.3] — 2026-04-26
 

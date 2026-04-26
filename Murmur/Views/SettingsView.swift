@@ -1,6 +1,8 @@
 import SwiftUI
 import ServiceManagement
 import HotKey
+import AppKit
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @ObservedObject var coordinator: AppCoordinator
@@ -22,6 +24,7 @@ struct SettingsView: View {
     @AppStorage("localLLMAPIKey") private var localLLMAPIKey: String = ""
     @AppStorage(CorrectionPrompts.glossaryKey) private var correctionGlossary: String = ""
     @AppStorage(CorrectionPrompts.systemPromptKey) private var correctionSystemPrompt: String = ""
+    @AppStorage("customCABundlePath") private var customCABundlePath: String = ""
 
     @State private var useRightCommand: Bool = true
     @State private var showDeleteConfirmation = false
@@ -201,6 +204,24 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Network (Advanced)") {
+                LabeledContent("Custom CA bundle") {
+                    HStack(spacing: 6) {
+                        Text(customCABundlePath.isEmpty ? "macOS keychain (default)" : (customCABundlePath as NSString).lastPathComponent)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Button("Choose…") { pickCustomCABundle() }
+                        if !customCABundlePath.isEmpty {
+                            Button("Reset") { customCABundlePath = "" }
+                        }
+                    }
+                }
+                Text("Used when downloading speech models. If your network uses TLS interception (e.g. Cloudflare WARP / Zero Trust), point this at a `.pem` file containing the intercepting root. Leave at default to use the macOS System keychain.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 LabeledContent("Version") {
                     Text(Self.appVersionString)
@@ -211,6 +232,21 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func pickCustomCABundle() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "pem") ?? .data,
+            UTType(filenameExtension: "crt") ?? .data,
+            UTType(filenameExtension: "cer") ?? .data,
+        ]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.message = "Select a PEM file containing the root certificate(s) to trust for model downloads."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        customCABundlePath = url.path
     }
 
     /// Reads `CFBundleShortVersionString` (set by Info.plist; CI overrides from
