@@ -11,6 +11,11 @@ enum HotkeyEvent: Sendable {
 enum RecordingMode: String, Sendable, CaseIterable {
     case toggle
     case hold
+    /// Tap to start; recording auto-stops after a configurable trailing
+    /// silence window detected by Silero VAD. Hotkey routing is identical
+    /// to `.toggle` (tap to start, tap to stop manually). The auto-stop
+    /// behaviour lives in `AudioService`, not here.
+    case handsFree
 }
 
 enum HotkeyTrigger: Equatable, Sendable {
@@ -170,7 +175,7 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
         let currentMode = mode
         let wasRecording = isRecording
         switch currentMode {
-        case .toggle:
+        case .toggle, .handsFree:
             isRecording = !wasRecording
         case .hold:
             isRecording = true
@@ -184,10 +189,13 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
             unregisterCancelHotKey()
         }
 
-        if currentMode == .toggle {
+        switch currentMode {
+        case .toggle, .handsFree:
             continuation.yield(nowRecording ? .startRecording : .stopRecording)
-        } else if !wasRecording {
-            continuation.yield(.startRecording)
+        case .hold:
+            if !wasRecording {
+                continuation.yield(.startRecording)
+            }
         }
     }
 

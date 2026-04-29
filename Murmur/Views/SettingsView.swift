@@ -8,6 +8,7 @@ struct SettingsView: View {
     @ObservedObject var coordinator: AppCoordinator
     @ObservedObject var modelManager: ModelManager
     @AppStorage("recordingMode") private var recordingMode: String = RecordingMode.toggle.rawValue
+    @AppStorage("handsFreeTrailingSilenceSeconds") private var handsFreeTrailingSilenceSeconds: Double = AppCoordinator.defaultHandsFreeTrailingSilenceSeconds
     @AppStorage("soundEffects") private var soundEffects: Bool = true
     @AppStorage("launchAtLogin") private var launchAtLogin: Bool = true
     @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
@@ -92,13 +93,32 @@ struct SettingsView: View {
                     Picker("", selection: $recordingMode) {
                         Text("Toggle").tag(RecordingMode.toggle.rawValue)
                         Text("Hold").tag(RecordingMode.hold.rawValue)
+                        Text("Hands-free").tag(RecordingMode.handsFree.rawValue)
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
-                    .frame(width: 160)
+                    .frame(width: 240)
                     .onChange(of: recordingMode) { _, newValue in
                         if let mode = RecordingMode(rawValue: newValue) {
-                            coordinator.hotkey.setMode(mode)
+                            coordinator.applyRecordingMode(mode)
+                        }
+                    }
+                }
+                if recordingMode == RecordingMode.handsFree.rawValue {
+                    LabeledContent("Auto-stop after") {
+                        HStack(spacing: 8) {
+                            Slider(
+                                value: $handsFreeTrailingSilenceSeconds,
+                                in: 1.0...3.0,
+                                step: 0.5
+                            )
+                            .frame(width: 160)
+                            .onChange(of: handsFreeTrailingSilenceSeconds) { _, _ in
+                                coordinator.applyRecordingMode(.handsFree)
+                            }
+                            Text(String(format: "%.1fs", handsFreeTrailingSilenceSeconds))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }

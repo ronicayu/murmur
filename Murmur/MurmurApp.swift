@@ -53,6 +53,36 @@ struct MurmurApp: App {
             }
         }
 
+        // Build Silero VAD service if the model is on disk. Phase 2 is
+        // opportunistic — if a previous build downloaded the model (or a
+        // future Settings toggle does), AudioService swaps its peak-RMS
+        // gate for VAD. Without the file we silently fall back to RMS,
+        // so this is purely additive. Check the file directly rather
+        // than via `auxiliaryModelPath` so manifest gaps from manual
+        // installs don't disable VAD.
+        //
+        // Two consumers:
+        //   • AudioService — one shared `VadService` for the post-record
+        //     silence gate and hands-free auto-stop.
+        //   • StreamingCoordinator — gets only the model URL and builds
+        //     a fresh `VadService` per session so streaming chunking has
+        //     its own detector state.
+        let vadFile = mm.auxiliaryModelDirectory(.sileroVad)
+            .appendingPathComponent("onnx/model.onnx")
+        if FileManager.default.fileExists(atPath: vadFile.path) {
+            if let svc = try? VadService(modelURL: vadFile) {
+                coord.setVadService(svc)
+            }
+            coord.streamingCoordinator?.setVadModelURL(vadFile)
+            // Phase 5: long-audio chunking + paragraph breaks. Only the
+            // native ONNX backend has a Swift transcription pipeline we
+            // can VAD-pre-process in-process; the Python subprocess
+            // backends keep the legacy 30 s + 5 s overlap path.
+            if let native = ts as? NativeTranscriptionService {
+                Task { await native.setVadModelURL(vadFile) }
+            }
+        }
+
         // Whisper-tiny LID was removed in favour of Cohere-echo retry — see
         // AppCoordinator.transcribeWithAutoDetectIfNeeded. The on-disk
         // ~/Library/Application Support/Murmur/Models-LID/ directory is no
@@ -111,6 +141,17 @@ struct MurmurApp: App {
                         ? NativeTranscriptionService(modelPath: newPath)
                         : TranscriptionService(modelPath: newPath)
                     coordinator.replaceTranscriptionService(newService)
+
+                    // Re-attach VAD model URL to the freshly-built native
+                    // service so file/long-audio chunking keeps Phase 5
+                    // behaviour across backend switches.
+                    if let native = newService as? NativeTranscriptionService {
+                        let vadFile = modelManager.auxiliaryModelDirectory(.sileroVad)
+                            .appendingPathComponent("onnx/model.onnx")
+                        if FileManager.default.fileExists(atPath: vadFile.path) {
+                            Task { await native.setVadModelURL(vadFile) }
+                        }
+                    }
 
                     if Self.shouldHaveFireRed(modelManager: modelManager) {
                         if let svc = try? FireRedTranscriptionService(

@@ -274,6 +274,10 @@ final class ONNXTranscriptionBackend {
     // MARK: - Private: KV Cache Initialization
 
     private func makeInitialKVCache() throws -> [String: ORTValue] {
+        // `.float16` is added to the ORT Obj-C enum by
+        // `Murmur/Scripts/patch-ort-float16.sh` — run by CI after
+        // `swift package resolve` and before `swift build`. Local clean
+        // builds need to run that script once too.
         var kv: [String: ORTValue] = [:]
         let emptyData = NSMutableData()
         let shape: [NSNumber] = [

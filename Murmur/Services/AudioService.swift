@@ -28,6 +28,31 @@ final class AudioService: AudioServiceProtocol {
     /// V3: optional streaming accumulator attached during a streaming session.
     private var streamingAccumulator: AudioBufferAccumulator?
 
+    /// Voice activity detector for the current recording session. Set via
+    /// `setVad(_:)` from the coordinator once the Silero model is on disk
+    /// and ready. When non-nil, replaces the post-recording RMS gate with
+    /// model-based silence detection. When nil, AudioService falls back
+    /// to the legacy peak-RMS gate (handles cold-start before the model
+    /// has been downloaded).
+    ///
+    /// Lifetime: the same `VadService` instance is reused across
+    /// recordings — `endOfStream()` resets internal state so a session
+    /// can't leak into the next.
+    private var vad: VadService?
+    /// Whether VAD was active for the current session (i.e., we fed
+    /// samples in). Used by `stopRecording` to decide whether to consult
+    /// VAD or fall back to RMS.
+    private var vadActive = false
+
+    /// Trailing silence window for hands-free auto-stop, or nil if
+    /// hands-free is off. When set AND a vad is attached, `startRecording`
+    /// spawns a polling task that fires `maxDurationContinuation` after
+    /// this many seconds of consecutive non-speech (gated on at least one
+    /// speech segment having been seen, so a silent start doesn't
+    /// auto-fire instantly).
+    private var handsFreeTrailingSilence: TimeInterval?
+    private var handsFreeTask: Task<Void, Never>?
+
     /// URL of the WAV file currently being written (nil when not recording).
     private(set) var currentRecordingURL: URL?
 
@@ -93,6 +118,25 @@ final class AudioService: AudioServiceProtocol {
         lock.unlock()
     }
 
+    /// Inject (or clear) the VAD service used by the next recording.
+    /// Pass nil to disable VAD entirely and revert to the RMS gate.
+    func setVad(_ vad: VadService?) {
+        lock.lock()
+        self.vad = vad
+        lock.unlock()
+    }
+
+    /// Configure hands-free auto-stop. Pass `nil` to disable. The window
+    /// applies from the first speech segment onward — silent starts don't
+    /// trigger an instant stop. Requires a `VadService` attached via
+    /// `setVad(_:)`; without one the setter is a no-op at recording time
+    /// (logged once per session).
+    func setHandsFreeAutoStop(trailingSilenceSeconds: TimeInterval?) {
+        lock.lock()
+        handsFreeTrailingSilence = trailingSilenceSeconds
+        lock.unlock()
+    }
+
     // MARK: - Recording
 
     /// Tracks whether we have an active tap installed on the input node.
@@ -141,6 +185,10 @@ final class AudioService: AudioServiceProtocol {
         outputFile = file
         tempURL = url
         rmsAccumulator = []
+        // Reset VAD state for this recording. If a vad is present, we'll
+        // feed it inside the tap; if not, we fall back to RMS at stop.
+        vad?.reset()
+        vadActive = (vad != nil)
         lock.unlock()
 
         // Read the hardware format live at start-time and pass it explicitly
@@ -191,10 +239,15 @@ final class AudioService: AudioServiceProtocol {
                 self.rmsAccumulator.append(rms)
                 // V3 dual-output: feed streaming accumulator (if attached)
                 let acc = self.streamingAccumulator
+                let vad = self.vad
+                let vadIsActive = self.vadActive
                 self.lock.unlock()
                 self.levelContinuation.yield(rms)
                 // Invoke outside the lock to prevent deadlock inside onChunkReady
                 acc?.append(convertedBuffer)
+                if vadIsActive, let vad {
+                    self.feedVad(vad, buffer: convertedBuffer)
+                }
             }
         }
 
@@ -210,6 +263,53 @@ final class AudioService: AudioServiceProtocol {
             self?.logger.info("Max recording duration reached")
             self?.maxDurationContinuation.yield()
         }
+
+        // Hands-free auto-stop. Only meaningful with a VAD attached; if
+        // the user picked hands-free without the model, log and skip —
+        // recording still works, it just behaves like .toggle.
+        lock.lock()
+        let trailing = handsFreeTrailingSilence
+        let activeVad = vad
+        lock.unlock()
+        if let trailing, let activeVad {
+            handsFreeTask = Task { [weak self] in
+                await self?.runHandsFreeAutoStop(vad: activeVad, trailingSilence: trailing)
+            }
+        } else if trailing != nil {
+            logger.info("Hands-free requested but VAD not attached — falling back to manual stop")
+        }
+    }
+
+    /// Poll the VAD's live speech state at 10 Hz. Once we see speech at
+    /// least once, start a stopwatch on every transition into silence;
+    /// fire `maxDurationContinuation` if silence persists for
+    /// `trailingSilence`. Resets the stopwatch on any speech frame.
+    /// Cancellation propagates from `stopRecording` / `cancelRecording`.
+    private func runHandsFreeAutoStop(vad: VadService, trailingSilence: TimeInterval) async {
+        var sawSpeech = false
+        var silenceStart: Date?
+        let pollInterval: Duration = .milliseconds(100)
+        while !Task.isCancelled {
+            try? await Task.sleep(for: pollInterval)
+            if Task.isCancelled { return }
+            let speechNow = vad.isCurrentlySpeech
+            if speechNow {
+                sawSpeech = true
+                silenceStart = nil
+                continue
+            }
+            guard sawSpeech else { continue }
+            let now = Date()
+            if let start = silenceStart {
+                if now.timeIntervalSince(start) >= trailingSilence {
+                    logger.info("Hands-free auto-stop: \(trailingSilence, format: .fixed(precision: 2))s trailing silence")
+                    maxDurationContinuation.yield()
+                    return
+                }
+            } else {
+                silenceStart = now
+            }
+        }
     }
 
     func stopRecording() async throws -> URL {
@@ -222,12 +322,17 @@ final class AudioService: AudioServiceProtocol {
         engine.stop()
         maxDurationTask?.cancel()
         maxDurationTask = nil
+        handsFreeTask?.cancel()
+        handsFreeTask = nil
 
         lock.lock()
         let url = tempURL
         let accum = rmsAccumulator
+        let activeVad = vad
+        let vadWasActive = vadActive
         outputFile = nil
         streamingAccumulator = nil
+        vadActive = false
         lock.unlock()
         currentRecordingURL = nil
 
@@ -238,24 +343,36 @@ final class AudioService: AudioServiceProtocol {
         let duration = recordingStart.map { Date().timeIntervalSince($0) } ?? 0
         logger.info("Recording stopped, duration: \(duration, format: .fixed(precision: 1))s")
 
-        // VAD — peak-only because Apple's voice-processing AGC ruins the
-        // average. With voice processing on, a normal utterance's average
-        // RMS can land around -75 dB while individual speech frames still
-        // peak at -25 dB or louder. Average-based silence detection
-        // false-fires on real speech in that regime. Switch to peak-only
-        // with a very permissive threshold — anything quieter than -65 dB
-        // peak is "absolute silence" (mic muted, wrong device, accidental
-        // hotkey press). Whisper-tier whispering still peaks above -50 dB.
+        // RMS log line stays for telemetry — useful when debugging mic /
+        // route issues even when the VAD path is the gate.
         let avgRMS = accum.isEmpty ? Float(-100) : accum.reduce(0, +) / Float(accum.count)
         let peakRMS = accum.max() ?? 0
         let dbAvg = 20 * Foundation.log10(max(avgRMS, 1e-10))
         let dbPeak = 20 * Foundation.log10(max(peakRMS, 1e-10))
         logger.info("Audio RMS avg: \(dbAvg, format: .fixed(precision: 1)) dB, peak: \(dbPeak, format: .fixed(precision: 1)) dB (frames=\(accum.count))")
 
-        if dbPeak < -65 {
-            logger.info("Silence detected (peak \(dbPeak, format: .fixed(precision: 1)) dB)")
-            try? FileManager.default.removeItem(at: url)
-            throw MurmurError.silenceDetected
+        // Decide silence by VAD when it was active for this session;
+        // otherwise fall back to the legacy peak-RMS gate. The fallback
+        // covers cold-start before the Silero model has been downloaded.
+        if vadWasActive, let activeVad {
+            let segments = activeVad.endOfStream()
+            if segments.isEmpty {
+                logger.info("Silence detected (VAD: no speech segments; peak \(dbPeak, format: .fixed(precision: 1)) dB)")
+                try? FileManager.default.removeItem(at: url)
+                throw MurmurError.silenceDetected
+            }
+            let totalSpeechSamples = segments.reduce(0) { $0 + $1.sampleCount }
+            logger.info("VAD: \(segments.count) speech segment(s), \(totalSpeechSamples) samples")
+        } else {
+            // Legacy peak-RMS gate (see commit history for rationale —
+            // peak-only because voice-processing AGC ruins the average).
+            // Whisper-tier whispering still peaks above -50 dB; -65 dB is
+            // "mic muted / wrong device / accidental hotkey press."
+            if dbPeak < -65 {
+                logger.info("Silence detected (peak \(dbPeak, format: .fixed(precision: 1)) dB, RMS fallback)")
+                try? FileManager.default.removeItem(at: url)
+                throw MurmurError.silenceDetected
+            }
         }
 
         return url
@@ -269,12 +386,16 @@ final class AudioService: AudioServiceProtocol {
         if engine.isRunning { engine.stop() }
         maxDurationTask?.cancel()
         maxDurationTask = nil
+        handsFreeTask?.cancel()
+        handsFreeTask = nil
 
         lock.lock()
         outputFile = nil
         let url = tempURL
         tempURL = nil
         streamingAccumulator = nil
+        vad?.reset()
+        vadActive = false
         lock.unlock()
         currentRecordingURL = nil
 
@@ -282,6 +403,16 @@ final class AudioService: AudioServiceProtocol {
             try? FileManager.default.removeItem(at: url)
         }
         logger.info("Recording cancelled")
+    }
+
+    /// Push a 16 kHz mono float32 buffer into the VAD detector. Called
+    /// from the audio tap thread — VadService serialises internally.
+    private func feedVad(_ vad: VadService, buffer: AVAudioPCMBuffer) {
+        guard let channelData = buffer.floatChannelData?[0] else { return }
+        let count = Int(buffer.frameLength)
+        guard count > 0 else { return }
+        let samples = Array(UnsafeBufferPointer(start: channelData, count: count))
+        vad.feed(samples)
     }
 
     private func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {

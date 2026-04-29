@@ -6,6 +6,21 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.4.0] — 2026-04-29
+
+### Added
+- **Voice Activity Detection across all transcription paths.** Silero VAD (~2 MB ONNX, lazy-downloaded as `AuxiliaryModel.sileroVad`) now drives endpointing app-wide. New `VadService` wraps the vendored `SherpaOnnxVoiceActivityDetectorWrapper`; `AudioService`, `AudioBufferAccumulator`, `StreamingTranscriptionCoordinator`, and `NativeTranscriptionService` all consume it with graceful fallback to the legacy paths when the model is missing.
+- **Hands-free recording mode.** New `RecordingMode.handsFree` in Settings → Recording → Mode. Tap the hotkey to start; recording auto-stops after a configurable trailing-silence window (slider, 1.0–3.0 s, default 1.5 s). Push-to-talk and toggle modes preserved; hands-free is opt-in.
+- **VAD-driven streaming chunks (V3).** `AudioBufferAccumulator` accepts a `VadService` and emits one chunk per detected speech segment instead of fixed 3-second slices. Cap raised to 8 s `maxSpeechDuration` for ASR context. Cleaner clause boundaries, fewer mid-word breaks.
+- **VAD-driven long-audio chunking + paragraph breaks.** `NativeTranscriptionService.transcribeLong` runs a one-shot VAD pass over loaded audio, merges speech segments into windows up to 30 s (silence dropped from inference input), and inserts `\n\n` between windows separated by ≥ 2 s — implements the heuristic from `docs/specs/meeting-transcription.md:184`. Falls back to fixed 30 s + 5 s overlap when VAD is unavailable.
+
+### Changed
+- **Live silence gate is now Silero-driven, not peak-RMS.** When the VAD model is on disk, `AudioService.stopRecording` consults `VadService.endOfStream()` instead of the -65 dB peak floor. Quiet-speech misfires from voice-processing AGC artefacts go away. Legacy peak-RMS gate retained as fallback for cold-start before the model is downloaded.
+
+### Notes
+- The VAD model auto-attaches at app boot when `~/Library/Application Support/Murmur/Models-SileroVAD/onnx/model.onnx` exists. A Settings toggle to trigger the download is a follow-up.
+- `Murmur/Services/ONNXTranscriptionBackend.swift` gained an inline pointer to `Scripts/patch-ort-float16.sh` so future readers know where the `.float16` enum case originates (the patch is run by `release.yml` after `swift package resolve`).
+
 ## [0.3.5] — 2026-04-26
 
 ### Fixed

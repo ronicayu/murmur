@@ -310,6 +310,12 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     // MARK: - Session state
 
     private var accumulator: AudioBufferAccumulator?
+    /// On-disk path to the Silero VAD ONNX, set via `setVadModelURL(_:)`.
+    /// When non-nil, each `beginSession` builds a fresh `VadService`
+    /// against this file and hands it to the accumulator. A fresh
+    /// instance per session keeps state clean — Silero's reset semantics
+    /// are good but cross-session reuse is unnecessary risk.
+    private var vadModelURL: URL?
     private var rangeTracker: InjectedRangeTracker?
     private var streamingChunks: [String] = []
     private var focusGuard: FocusGuard?
@@ -361,6 +367,13 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
 
     // MARK: - Public API
 
+    /// Set (or clear) the Silero VAD model used by future streaming
+    /// sessions. Called from `AppCoordinator.setVadService(_:)` so live
+    /// PTT and streaming share the same model file.
+    func setVadModelURL(_ url: URL?) {
+        self.vadModelURL = url
+    }
+
     /// Begin a streaming session.
     ///
     /// - Parameters:
@@ -394,9 +407,28 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         self.cancellationReason = nil
         self.fullPassReplacedText = nil
 
+        // Build a fresh per-session VAD if a model is configured.
+        // maxSpeechDurationSeconds: 8 — give the ASR enough context per
+        // chunk; Silero will force-close past this even if speech
+        // continues, so a long monologue still produces deliverable
+        // chunks at a usable cadence.
+        let sessionVad: VadService?
+        if let vadURL = self.vadModelURL {
+            sessionVad = try? VadService(
+                modelURL: vadURL,
+                maxSpeechDurationSeconds: 8.0
+            )
+            if sessionVad == nil {
+                logger.warning("StreamingCoordinator: VAD construction failed — falling back to fixed-size chunking")
+            }
+        } else {
+            sessionVad = nil
+        }
+
         let acc = AudioBufferAccumulator(
             samplesPerChunk: Self.samplesPerChunk,
-            sampleRate: Self.chunkSampleRate
+            sampleRate: Self.chunkSampleRate,
+            vad: sessionVad
         )
         acc.onChunkReady = { [weak self] buffer in
             guard let self else { return }

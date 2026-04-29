@@ -119,12 +119,20 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
     /// instant, and never paraphrases.
     case punctuationCT
 
+    /// Silero VAD v5 (ONNX). Used by `VadService` to drive endpointing
+    /// across live PTT, hands-free, V3 streaming, and long-audio chunking.
+    /// Pulled from the `onnx-community/silero-vad` mirror — same Silero v5
+    /// graph that sherpa-onnx uses internally, hosted on HuggingFace so the
+    /// existing snapshot_download path works unchanged.
+    case sileroVad
+
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
         case .lidWhisperTiny: return "Language Detection Model"
         case .punctuationCT: return "Punctuation Model"
+        case .sileroVad: return "Voice Activity Detection Model"
         }
     }
 
@@ -132,6 +140,7 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .lidWhisperTiny: return "onnx-community/whisper-tiny"
         case .punctuationCT: return "csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12"
+        case .sileroVad: return "onnx-community/silero-vad"
         }
     }
 
@@ -139,6 +148,7 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .lidWhisperTiny: return "Murmur/Models-LID"
         case .punctuationCT: return "Murmur/Models-PuncCT"
+        case .sileroVad: return "Murmur/Models-SileroVAD"
         }
     }
 
@@ -147,6 +157,7 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .lidWhisperTiny: return 100_000_000
         case .punctuationCT: return 320_000_000   // 280 MB ONNX + 4 MB tokens.json + headroom
+        case .sileroVad: return 10_000_000        // ~2.2 MB ONNX + headroom
         }
     }
 
@@ -154,6 +165,7 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .lidWhisperTiny: return "~40 MB"
         case .punctuationCT: return "~280 MB"
+        case .sileroVad: return "~2 MB"
         }
     }
 
@@ -168,6 +180,9 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
         case .punctuationCT:
             // Skip the upstream test.py / show-model-input-output.py / add-model-metadata.py.
             return ["model.onnx", "tokens.json", "*.yaml"]
+        case .sileroVad:
+            // Just the unquantised ONNX — sherpa-onnx loads the Silero v5 graph directly.
+            return ["onnx/model.onnx"]
         }
     }
 
@@ -181,6 +196,8 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
             ]
         case .punctuationCT:
             return ["model.onnx", "tokens.json"]
+        case .sileroVad:
+            return ["onnx/model.onnx"]
         }
     }
 }

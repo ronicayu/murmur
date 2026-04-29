@@ -221,6 +221,34 @@ final class AppCoordinator: ObservableObject {
         self.hasLoggedASRPuncFailureThisSession = false
     }
 
+    /// Wire up (or tear down) the Silero VAD service. AudioService uses
+    /// it to decide silence at stop time and to drive endpointing in
+    /// later phases. Pass nil to revert to the legacy RMS gate.
+    func setVadService(_ service: VadService?) {
+        audio.setVad(service)
+    }
+
+    /// Default trailing silence for hands-free mode when the user hasn't
+    /// adjusted the slider. 1.5 s comfortably exceeds normal speech
+    /// pauses (commas land around 0.2-0.4 s, sentence ends 0.5-0.8 s)
+    /// while still feeling responsive.
+    static let defaultHandsFreeTrailingSilenceSeconds: Double = 1.5
+
+    /// Apply a recording mode end-to-end: route hotkey events and
+    /// configure audio's auto-stop behaviour. Call this from settings
+    /// changes and at startup; it replaces direct `hotkey.setMode(_:)`.
+    func applyRecordingMode(_ mode: RecordingMode) {
+        hotkey.setMode(mode)
+        switch mode {
+        case .toggle, .hold:
+            audio.setHandsFreeAutoStop(trailingSilenceSeconds: nil)
+        case .handsFree:
+            let stored = UserDefaults.standard.object(forKey: "handsFreeTrailingSilenceSeconds") as? Double
+            let seconds = stored ?? Self.defaultHandsFreeTrailingSilenceSeconds
+            audio.setHandsFreeAutoStop(trailingSilenceSeconds: seconds)
+        }
+    }
+
     /// Preload the model so the first transcription is instant.
     /// Cancels any in-flight preload to avoid concurrent `send()` calls
     /// that would corrupt the JSON protocol.
@@ -282,10 +310,9 @@ final class AppCoordinator: ObservableObject {
 
     private func start() {
         // Load saved recording mode
-        if let modeStr = UserDefaults.standard.string(forKey: "recordingMode"),
-           let mode = RecordingMode(rawValue: modeStr) {
-            hotkey.setMode(mode)
-        }
+        let savedMode: RecordingMode = UserDefaults.standard.string(forKey: "recordingMode")
+            .flatMap(RecordingMode.init(rawValue:)) ?? .toggle
+        applyRecordingMode(savedMode)
 
         // Load saved hotkey or use default (right command)
         if let keyCode = UserDefaults.standard.object(forKey: "hotkeyKeyCode") as? Int,

@@ -12,6 +12,21 @@ actor NativeTranscriptionService: TranscriptionServiceProtocol {
     private var tokenizer: BPETokenizerDecoder?
     private var _isModelLoaded = false
 
+    /// Path to the Silero VAD ONNX, when configured. Set by
+    /// `MurmurApp` once the model is on disk; nil reverts `transcribeLong`
+    /// to fixed 30 s + 5 s overlap chunking.
+    private var vadModelURL: URL?
+
+    /// Long-audio chunking constants (Phase 5).
+    /// - `vadMaxWindowSeconds`: cap on a merged-segment window so the ASR
+    ///   gets at most this much audio per inference. Matches the model's
+    ///   30 s training context.
+    /// - `paragraphBreakGapSeconds`: gap between speech windows that
+    ///   triggers a paragraph break in the assembled transcript. Matches
+    ///   the heuristic in `docs/specs/meeting-transcription.md:184`.
+    private static let vadMaxWindowSeconds: Double = 30
+    private static let paragraphBreakGapSeconds: Double = 2.0
+
     // Conservative: always attempt preload check inside actor.
     nonisolated var isModelLoaded: Bool { false }
 
@@ -30,6 +45,12 @@ actor NativeTranscriptionService: TranscriptionServiceProtocol {
             tokenizer = nil
             _isModelLoaded = false
         }
+    }
+
+    /// Configure (or clear) the Silero VAD model used by `transcribeLong`.
+    /// Pass nil to revert to fixed-size chunking.
+    func setVadModelURL(_ url: URL?) {
+        self.vadModelURL = url
     }
 
     // MARK: - Protocol
@@ -111,27 +132,50 @@ actor NativeTranscriptionService: TranscriptionServiceProtocol {
 
         let start = CFAbsoluteTimeGetCurrent()
         let allSamples = try loadAudio(url: audioURL)
-        let sampleRate = 16000
+        let sampleRate = 16_000
 
-        let chunkLen = 30 * sampleRate
-        let overlapLen = 5 * sampleRate
-        let stepLen = chunkLen - overlapLen
+        // VAD-driven chunking when a Silero model is configured.
+        // Falls through to the fixed-size path if VAD construction fails.
+        var windows: [VadWindow] = []
+        var usedVad = false
+        if let vadURL = vadModelURL {
+            do {
+                windows = try Self.computeVadWindows(
+                    samples: allSamples,
+                    sampleRate: sampleRate,
+                    modelURL: vadURL
+                )
+                usedVad = true
+                logger.info("VAD: \(windows.count) window(s) from \(allSamples.count) samples")
+            } catch {
+                logger.warning("VAD chunking failed (\(String(describing: error), privacy: .public)) — falling back to fixed chunks")
+            }
+        }
 
-        var chunks: [(start: Int, end: Int)] = []
-        var offset = 0
-        while offset < allSamples.count {
-            let end = min(offset + chunkLen, allSamples.count)
-            chunks.append((start: offset, end: end))
-            offset += stepLen
-            if end == allSamples.count { break }
+        if !usedVad {
+            // Legacy fixed 30 s + 5 s overlap. Preserved for the
+            // model-missing case and any environment where the VAD pass
+            // can't run.
+            let chunkLen = 30 * sampleRate
+            let overlapLen = 5 * sampleRate
+            let stepLen = chunkLen - overlapLen
+
+            var offset = 0
+            while offset < allSamples.count {
+                let end = min(offset + chunkLen, allSamples.count)
+                windows.append(VadWindow(startSample: offset, endSample: end, samples: Array(allSamples[offset..<end])))
+                offset += stepLen
+                if end == allSamples.count { break }
+            }
         }
 
         var fullText = ""
-        for (idx, chunk) in chunks.enumerated() {
+        var lastWindowEndSample: Int? = nil
+        let paragraphGapSamples = Int(Self.paragraphBreakGapSeconds * Double(sampleRate))
+        for (idx, window) in windows.enumerated() {
             try Task.checkCancellation()
 
-            let chunkSamples = Array(allSamples[chunk.start..<chunk.end])
-            let (melFeatures, _) = try b.extractMelFeatures(samples: chunkSamples)
+            let (melFeatures, _) = try b.extractMelFeatures(samples: window.samples)
             let encoderHidden = try b.encodeFromMel(melFeatures)
             let prompt = ONNXTranscriptionBackend.decoderPrompt(for: language)
             let tokenIds = try b.decode(
@@ -142,15 +186,102 @@ actor NativeTranscriptionService: TranscriptionServiceProtocol {
             let outputTokens = Array(tokenIds.dropFirst(prompt.count))
             let text = t.decode(outputTokens, skipSpecialTokens: true)
 
-            if !fullText.isEmpty && !text.isEmpty { fullText += " " }
+            if !fullText.isEmpty && !text.isEmpty {
+                let separator: String
+                if usedVad,
+                   let lastEnd = lastWindowEndSample,
+                   window.startSample - lastEnd >= paragraphGapSamples {
+                    separator = "\n\n"
+                } else {
+                    separator = " "
+                }
+                fullText += separator
+            }
             fullText += text
+            lastWindowEndSample = window.endSample
 
             onProgress(TranscriptionProgress(
-                currentChunk: idx + 1, totalChunks: chunks.count, partialText: fullText))
+                currentChunk: idx + 1, totalChunks: windows.count, partialText: fullText))
         }
 
         let elapsedMs = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
         return TranscriptionResult(text: fullText, language: detectLanguage(fullText), durationMs: elapsedMs)
+    }
+
+    /// One transcription unit produced by either the VAD pass (merged
+    /// speech segments, silence dropped) or the fixed-size fallback.
+    /// `startSample` / `endSample` are absolute offsets into the loaded
+    /// audio — used for paragraph-break decisions, not for re-decoding.
+    private struct VadWindow {
+        let startSample: Int
+        let endSample: Int
+        let samples: [Float]
+    }
+
+    /// Run a one-shot VAD pass over the whole loaded audio and merge
+    /// consecutive speech segments into windows up to
+    /// `vadMaxWindowSeconds` long. Silence between segments (within and
+    /// across windows) is dropped from the audio fed to the ASR; gap
+    /// length between windows is preserved via `startSample` /
+    /// `endSample` so paragraph-break detection still works.
+    nonisolated private static func computeVadWindows(
+        samples: [Float],
+        sampleRate: Int,
+        modelURL: URL
+    ) throws -> [VadWindow] {
+        let vad = try VadService(
+            modelURL: modelURL,
+            sampleRate: sampleRate,
+            // Long-audio passes can produce tens of MB of audio; bump
+            // the ring buffer headroom so a single segment never gets
+            // truncated by the buffer wrapping.
+            bufferSeconds: Float(vadMaxWindowSeconds * 2),
+            // Allow speakers' natural sentence-end pauses (~0.4-0.6 s)
+            // without splitting a sentence. Phase 4 streaming uses the
+            // 0.25 s default; long-audio is more tolerant.
+            minSilenceDurationSeconds: 0.5,
+            maxSpeechDurationSeconds: Float(vadMaxWindowSeconds)
+        )
+
+        // Feed in 1-second blocks. Smaller is fine but adds overhead;
+        // larger risks the C buffer growing if popSegments isn't drained
+        // promptly.
+        let block = sampleRate
+        var offset = 0
+        while offset < samples.count {
+            let end = min(offset + block, samples.count)
+            vad.feed(Array(samples[offset..<end]))
+            offset = end
+        }
+        let segments = vad.endOfStream()
+
+        let maxWindowSamples = Int(vadMaxWindowSeconds * Double(sampleRate))
+        var windows: [VadWindow] = []
+        var current: VadWindow?
+        for seg in segments {
+            if let c = current,
+               (seg.endSample - c.startSample) <= maxWindowSamples {
+                // Concatenate speech samples; silence between segments
+                // is dropped. The window's `endSample` tracks the
+                // original timeline, not the dropped-silence timeline.
+                var merged = c.samples
+                merged.append(contentsOf: seg.samples)
+                current = VadWindow(
+                    startSample: c.startSample,
+                    endSample: seg.endSample,
+                    samples: merged
+                )
+            } else {
+                if let c = current { windows.append(c) }
+                current = VadWindow(
+                    startSample: seg.startSample,
+                    endSample: seg.endSample,
+                    samples: seg.samples
+                )
+            }
+        }
+        if let c = current { windows.append(c) }
+        return windows
     }
 
     // MARK: - Helpers
