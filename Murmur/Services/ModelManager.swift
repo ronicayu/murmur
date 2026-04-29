@@ -289,6 +289,17 @@ final class ModelManager: ObservableObject {
     /// Emits when `setUseASRPunctuation(_:)` actually commits a change.
     let committedUseASRPunctuationChange = PassthroughSubject<Bool, Never>()
 
+    /// Whether the Silero VAD model should be wired into the audio
+    /// pipelines (live PTT silence gate, hands-free auto-stop, V3
+    /// streaming chunk boundaries, long-audio chunking + paragraph
+    /// breaks). OFF by default; flipping ON downloads the ~2 MB model if
+    /// it isn't already on disk. Callers MUST go through `setUseVAD(_:)`
+    /// — same gating pattern as `useASRPunctuation`.
+    @Published private(set) var useVAD: Bool
+
+    /// Emits when `setUseVAD(_:)` actually commits a change.
+    let committedUseVADChange = PassthroughSubject<Bool, Never>()
+
     /// Attempt to switch the active backend.
     ///
     /// - Returns: `true` if the switch was accepted and persisted; `false` if a
@@ -369,6 +380,37 @@ final class ModelManager: ObservableObject {
         useASRPunctuation = newValue
         UserDefaults.standard.set(newValue, forKey: "useASRPunctuation")
         committedUseASRPunctuationChange.send(newValue)
+        return true
+    }
+
+    /// Attempt to set the Silero VAD toggle.
+    ///
+    /// - Parameter newValue: desired toggle state.
+    /// - Returns: `true` if accepted; `false` if a primary download is in
+    ///   progress (newValue=true rejected) or the VAD model isn't on disk
+    ///   yet (caller must trigger `downloadAuxiliary(.sileroVad)` first).
+    @discardableResult
+    func setUseVAD(_ newValue: Bool) -> Bool {
+        guard newValue != useVAD else { return true }
+
+        if newValue == true {
+            guard !isDownloadActive else {
+                logger.warning("Refused VAD toggle ON — primary download in progress")
+                return false
+            }
+            let dir = auxiliaryModelDirectory(.sileroVad)
+            let allPresent = AuxiliaryModel.sileroVad.requiredFiles.allSatisfy {
+                FileManager.default.fileExists(atPath: dir.appendingPathComponent($0).path)
+            }
+            guard allPresent else {
+                logger.warning("Refused VAD toggle ON — model not downloaded")
+                return false
+            }
+        }
+
+        useVAD = newValue
+        UserDefaults.standard.set(newValue, forKey: "useVAD")
+        committedUseVADChange.send(newValue)
         return true
     }
 
@@ -626,6 +668,20 @@ final class ModelManager: ObservableObject {
             UserDefaults.standard.set(false, forKey: "useASRPunctuation")
         }
         self.useASRPunctuation = effectivePunc
+
+        // Same downgrade-on-missing-model logic for the VAD toggle.
+        let persistedVAD = UserDefaults.standard.bool(forKey: "useVAD")
+        let vadDir = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(AuxiliaryModel.sileroVad.modelSubdirectory)
+        let vadFilesPresent = AuxiliaryModel.sileroVad.requiredFiles.allSatisfy {
+            FileManager.default.fileExists(atPath: vadDir.appendingPathComponent($0).path)
+        }
+        let effectiveVAD = persistedVAD && vadFilesPresent
+        if persistedVAD && !effectiveVAD {
+            UserDefaults.standard.set(false, forKey: "useVAD")
+        }
+        self.useVAD = effectiveVAD
 
         // One-time migration: move the old shared "modelConfigHash" key to the
         // per-backend key so that existing hash verifications keep working.

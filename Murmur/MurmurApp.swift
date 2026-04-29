@@ -53,34 +53,23 @@ struct MurmurApp: App {
             }
         }
 
-        // Build Silero VAD service if the model is on disk. Phase 2 is
-        // opportunistic — if a previous build downloaded the model (or a
-        // future Settings toggle does), AudioService swaps its peak-RMS
-        // gate for VAD. Without the file we silently fall back to RMS,
-        // so this is purely additive. Check the file directly rather
-        // than via `auxiliaryModelPath` so manifest gaps from manual
-        // installs don't disable VAD.
+        // Wire Silero VAD into all four consumers — gated by both the
+        // user toggle (`useVAD`) and on-disk presence of the model file.
+        // The toggle is the source of truth; `init`'s downgrade-on-
+        // missing-model logic in ModelManager keeps the flag honest at
+        // launch.
         //
-        // Two consumers:
+        // Consumers:
         //   • AudioService — one shared `VadService` for the post-record
         //     silence gate and hands-free auto-stop.
         //   • StreamingCoordinator — gets only the model URL and builds
         //     a fresh `VadService` per session so streaming chunking has
         //     its own detector state.
-        let vadFile = mm.auxiliaryModelDirectory(.sileroVad)
-            .appendingPathComponent("onnx/model.onnx")
-        if FileManager.default.fileExists(atPath: vadFile.path) {
-            if let svc = try? VadService(modelURL: vadFile) {
-                coord.setVadService(svc)
-            }
-            coord.streamingCoordinator?.setVadModelURL(vadFile)
-            // Phase 5: long-audio chunking + paragraph breaks. Only the
-            // native ONNX backend has a Swift transcription pipeline we
-            // can VAD-pre-process in-process; the Python subprocess
-            // backends keep the legacy 30 s + 5 s overlap path.
-            if let native = ts as? NativeTranscriptionService {
-                Task { await native.setVadModelURL(vadFile) }
-            }
+        //   • NativeTranscriptionService — long-audio chunking +
+        //     paragraph breaks. Python-subprocess backends keep the
+        //     legacy 30 s + 5 s overlap path.
+        if mm.useVAD {
+            Self.attachVAD(modelManager: mm, coord: coord, ts: ts)
         }
 
         // Whisper-tiny LID was removed in favour of Cohere-echo retry — see
@@ -142,15 +131,17 @@ struct MurmurApp: App {
                         : TranscriptionService(modelPath: newPath)
                     coordinator.replaceTranscriptionService(newService)
 
-                    // Re-attach VAD model URL to the freshly-built native
-                    // service so file/long-audio chunking keeps Phase 5
-                    // behaviour across backend switches.
-                    if let native = newService as? NativeTranscriptionService {
-                        let vadFile = modelManager.auxiliaryModelDirectory(.sileroVad)
-                            .appendingPathComponent("onnx/model.onnx")
-                        if FileManager.default.fileExists(atPath: vadFile.path) {
-                            Task { await native.setVadModelURL(vadFile) }
-                        }
+                    // Re-attach VAD across consumers (gated on the toggle)
+                    // so file/long-audio chunking keeps Phase 5 behaviour
+                    // across backend switches. The freshly-built service
+                    // doesn't share state with the prior one, so we have
+                    // to push the URL again.
+                    if modelManager.useVAD {
+                        Self.attachVAD(
+                            modelManager: modelManager,
+                            coord: coordinator,
+                            ts: newService
+                        )
                     }
 
                     if Self.shouldHaveFireRed(modelManager: modelManager) {
@@ -176,6 +167,20 @@ struct MurmurApp: App {
                         }
                     } else {
                         coordinator.setFireRedService(nil, modelDirectory: nil)
+                    }
+                }
+                .onReceive(modelManager.committedUseVADChange) { isOn in
+                    if isOn {
+                        Self.attachVAD(
+                            modelManager: modelManager,
+                            coord: coordinator,
+                            ts: coordinator.transcription
+                        )
+                    } else {
+                        Self.detachVAD(
+                            coord: coordinator,
+                            ts: coordinator.transcription
+                        )
                     }
                 }
                 .onReceive(modelManager.committedUseASRPunctuationChange) { isOn in
@@ -205,6 +210,40 @@ struct MurmurApp: App {
 
     private func showTranscriptionWindow() {
         transcriptionWindowController?.openOrFocus()
+    }
+
+    /// Wire the Silero VAD service into all four consumers. Caller is
+    /// responsible for gating on `mm.useVAD`. Safe to call repeatedly.
+    /// If the model file is missing the call no-ops (the toggle should
+    /// already be OFF in that case via the init downgrade logic).
+    static func attachVAD(
+        modelManager mm: ModelManager,
+        coord: AppCoordinator,
+        ts: any TranscriptionServiceProtocol
+    ) {
+        let vadFile = mm.auxiliaryModelDirectory(.sileroVad)
+            .appendingPathComponent("onnx/model.onnx")
+        guard FileManager.default.fileExists(atPath: vadFile.path) else { return }
+        if let svc = try? VadService(modelURL: vadFile) {
+            coord.setVadService(svc)
+        }
+        coord.streamingCoordinator?.setVadModelURL(vadFile)
+        if let native = ts as? NativeTranscriptionService {
+            Task { await native.setVadModelURL(vadFile) }
+        }
+    }
+
+    /// Tear down VAD wiring across all four consumers, returning each to
+    /// its pre-VAD behaviour. Used when the user toggles VAD off.
+    static func detachVAD(
+        coord: AppCoordinator,
+        ts: any TranscriptionServiceProtocol
+    ) {
+        coord.setVadService(nil)
+        coord.streamingCoordinator?.setVadModelURL(nil)
+        if let native = ts as? NativeTranscriptionService {
+            Task { await native.setVadModelURL(nil) }
+        }
     }
 
     private var menuBarIconName: String {

@@ -293,6 +293,10 @@ struct SettingsView: View {
                 asrPunctuationToggleRow
             }
 
+            Section("Voice Activity Detection") {
+                vadToggleRow
+            }
+
             Section("Model — \(modelManager.activeBackend.shortName)") {
                 LabeledContent("Status") {
                     modelStatusBadge
@@ -778,6 +782,64 @@ struct SettingsView: View {
         do {
             try await modelManager.downloadAuxiliary(.punctuationCT)
             _ = modelManager.setUseASRPunctuation(true)
+        } catch {
+            // Error surfaces via auxiliary state; toggle simply stays OFF.
+        }
+    }
+
+    /// Toggle row for the Silero VAD aux model. When ON, drives the live
+    /// silence gate, hands-free auto-stop, V3 streaming chunk
+    /// boundaries, and long-audio chunking + paragraph breaks.
+    @ViewBuilder
+    private var vadToggleRow: some View {
+        let isOn = modelManager.useVAD
+        let auxState = modelManager.auxiliaryState(for: .sileroVad)
+        let isReady: Bool = {
+            if case .ready = auxState { return true }
+            return false
+        }()
+        let isDownloading: Bool = {
+            if case .downloading = auxState { return true }
+            return false
+        }()
+
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: Binding(
+                get: { isOn },
+                set: { newValue in
+                    if newValue && !isReady {
+                        Task { await downloadVadFromToggle() }
+                    } else {
+                        _ = modelManager.setUseVAD(newValue)
+                    }
+                }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Use Silero voice activity detection")
+                        .font(.body)
+                    Text("\(AuxiliaryModel.sileroVad.sizeDescription) additional · "
+                         + "Replaces the peak-RMS silence gate, drives hands-free "
+                         + "auto-stop and streaming chunk boundaries, and inserts "
+                         + "paragraph breaks in long-audio transcripts.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(isDownloading)
+
+            if isDownloading,
+               let progress = modelManager.auxiliaryProgress[.sileroVad] {
+                ProgressView(value: progress).controlSize(.small)
+            }
+        }
+    }
+
+    /// Download the Silero VAD aux model on behalf of a user enabling
+    /// the toggle. On success, commit the toggle ON; on failure, leave OFF.
+    private func downloadVadFromToggle() async {
+        do {
+            try await modelManager.downloadAuxiliary(.sileroVad)
+            _ = modelManager.setUseVAD(true)
         } catch {
             // Error surfaces via auxiliary state; toggle simply stays OFF.
         }

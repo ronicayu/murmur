@@ -6,6 +6,11 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.4.1] — 2026-04-29
+
+### Added
+- **Settings → Voice Activity Detection toggle.** Flipping ON downloads the Silero VAD model (~2 MB) if missing and wires it into all four consumers — live PTT silence gate, hands-free auto-stop, V3 streaming chunk boundaries, and long-audio chunking + paragraph breaks. OFF cleanly tears down the wiring and reverts to the legacy paths. Mirrors the ASR-punctuation toggle pattern: persisted in `UserDefaults` under `useVAD`, downgraded to OFF on launch if the model isn't on disk.
+
 ## [0.4.0] — 2026-04-29
 
 ### Added
