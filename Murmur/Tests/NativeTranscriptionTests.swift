@@ -6,7 +6,16 @@ import OnnxRuntimeBindings
 /// Comprehensive tests for the native ONNX transcription pipeline.
 /// Covers: BPETokenizerDecoder, ONNXTranscriptionBackend,
 /// language routing, and full pipeline for EN/ZH/mixed.
+///
+/// Heavy: every test in this class loads a real ONNX session
+/// (~hundreds of MB RAM) when the model directory is present.
+/// Gated behind `MURMUR_RUN_HEAVY_TESTS=1` — see `TestHeavyGate`.
 final class NativeTranscriptionTests: XCTestCase {
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        try TestHeavyGate.requireOptIn()
+    }
 
     // MARK: - Fixtures
 
