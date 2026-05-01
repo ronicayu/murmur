@@ -6,6 +6,11 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.4.3] — 2026-05-01
+
+### Fixed
+- **Hands-free auto-stop still failed in genuinely noisy environments.** v0.4.2 used a fixed -50 dB silence floor — that breaks in cafés, open offices, anywhere the ambient level itself sits above the floor, since neither VAD nor RMS ever crosses the threshold. `AudioService.runHandsFreeAutoStop` now keeps a rolling 30 s window of RMS samples, estimates the noise floor as the 10th percentile, and treats speech as ≥ 8 dB above the floor / silence as within 4 dB of it. Adapts to quiet rooms and loud rooms without tuning.
+
 ## [0.4.2] — 2026-05-01
 
 ### Fixed
