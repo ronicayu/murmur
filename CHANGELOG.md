@@ -6,6 +6,11 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.4.8] — 2026-05-01
+
+### Changed
+- **Streaming chunks no longer break mid-sentence.** The streaming VAD's `minSilenceDurationSeconds` was using Silero's 0.25 s default, which closes a segment on a mid-sentence breath — so a single utterance was getting transcribed in halves. Bumped to 0.8 s; now spans typical commas / breath pauses so a chunk only delivers on a real sentence-end pause. `maxSpeechDurationSeconds=8` still caps long monologues. Affects only `StreamingTranscriptionCoordinator`'s VAD; the live PTT and hands-free auto-stop VAD instances are unchanged.
+
 ## [0.4.7] — 2026-05-01
 
 ### Fixed

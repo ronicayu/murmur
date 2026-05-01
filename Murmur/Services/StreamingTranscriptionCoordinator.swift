@@ -408,6 +408,11 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         self.fullPassReplacedText = nil
 
         // Build a fresh per-session VAD if a model is configured.
+        // minSilenceDurationSeconds: 0.8 — Silero's 0.25 s default closes
+        // a segment on a mid-sentence breath, which makes streaming emit
+        // half-finished phrases. 0.8 s spans typical mid-sentence pauses
+        // (commas, breaths) so a chunk only delivers on a real
+        // sentence-end pause.
         // maxSpeechDurationSeconds: 8 — give the ASR enough context per
         // chunk; Silero will force-close past this even if speech
         // continues, so a long monologue still produces deliverable
@@ -416,6 +421,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         if let vadURL = self.vadModelURL {
             sessionVad = try? VadService(
                 modelURL: vadURL,
+                minSilenceDurationSeconds: 0.8,
                 maxSpeechDurationSeconds: 8.0
             )
             if sessionVad == nil {
