@@ -6,6 +6,11 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.4.5] — 2026-05-01
+
+### Fixed
+- **Hands-free required two hotkey presses to start the next recording.** When auto-stop fired, only `AppCoordinator.state` and `AudioService` knew the recording had ended — `HotkeyService.isRecording` stayed `true`. The next hotkey press toggled it back to `false` and emitted `.stopRecording` (a no-op at the coordinator since state was already `.idle`); only the press *after that* emitted `.startRecording`. Added `HotkeyService.notifyRecordingStopped()` and called it from both auto-stop callbacks (V1 and streaming) so the hotkey's internal state stays in sync with the coordinator.
+
 ## [0.4.4] — 2026-05-01
 
 ### Fixed

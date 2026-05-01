@@ -57,6 +57,19 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
         )
     }
 
+    /// Sync the hotkey's internal `isRecording` flag back to false when a
+    /// recording ends through a non-hotkey path (hands-free auto-stop or
+    /// max-duration timeout). Without this, the next hotkey press toggles
+    /// `isRecording` from true → false and emits `.stopRecording` (a
+    /// no-op at the coordinator), so the user has to press the hotkey
+    /// twice to start the next recording.
+    func notifyRecordingStopped() {
+        lock.lock()
+        isRecording = false
+        lock.unlock()
+        unregisterCancelHotKey()
+    }
+
     /// Programmatically emit an event (e.g., from onboarding record button, pill cancel button).
     func emit(_ event: HotkeyEvent) {
         switch event {

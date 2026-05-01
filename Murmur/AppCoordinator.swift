@@ -552,6 +552,11 @@ final class AppCoordinator: ObservableObject {
                     guard let self else { return }
                     guard self.state == .recording else { return }
                     Self.log.info("Auto-stop fired (V1)")
+                    // Sync HotkeyService.isRecording so the next hotkey
+                    // press starts a new recording — without this, the
+                    // hotkey thinks we're still recording and the next
+                    // press emits .stopRecording (a no-op).
+                    self.hotkey.notifyRecordingStopped()
                     await self.stopAndTranscribe()
                 }
             }
@@ -600,6 +605,7 @@ final class AppCoordinator: ObservableObject {
                     guard let self else { return }
                     guard self.state == .recording else { return }
                     Self.log.info("Auto-stop fired (streaming)")
+                    self.hotkey.notifyRecordingStopped()
                     await self.stopAndTranscribeStreaming()
                 }
             }
