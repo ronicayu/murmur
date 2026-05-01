@@ -404,6 +404,19 @@ final class AudioService: AudioServiceProtocol {
             // empty endOfStream doesn't mean nothing was said. The flag
             // covers that case.
             if segments.isEmpty && !priorSegmentSeen {
+                // Short-utterance backstop: Silero requires 0.25 s of
+                // sustained ≥ 0.5 prob frames to *open* a segment, so a
+                // quick "yes" / "好" / "ok" can fly under the radar even
+                // though there's clearly a word in there. If the
+                // recording is short (≤ 2 s) and peak RMS is at or above
+                // whisper level, transcribe anyway and let Cohere decide.
+                // Long recordings with no VAD segment really are empty.
+                let shortUtteranceMaxDuration: TimeInterval = 2.0
+                let speechFloorDB: Float = -50
+                if duration <= shortUtteranceMaxDuration && dbPeak > speechFloorDB {
+                    logger.info("VAD empty but short+loud — transcribing anyway (duration \(duration, format: .fixed(precision: 1))s, peak \(dbPeak, format: .fixed(precision: 1)) dB)")
+                    return url
+                }
                 logger.info("Silence detected (VAD: no speech segments; peak \(dbPeak, format: .fixed(precision: 1)) dB)")
                 try? FileManager.default.removeItem(at: url)
                 throw MurmurError.silenceDetected

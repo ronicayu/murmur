@@ -6,6 +6,11 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.4.10] — 2026-05-01
+
+### Fixed
+- **Fast 1-word utterances ("yes", "好", "ok") were silently dropped.** Silero requires 0.25 s of sustained ≥ 0.5 prob frames to *open* a speech segment, so a 150–200 ms word never registered — `endOfStream()` returned empty, the silence gate fired, the WAV was deleted with no transcription. Added a short-utterance backstop in `AudioService.stopRecording`: if VAD found nothing but the recording is ≤ 2 s and peak RMS is ≥ −50 dB (whisper level), the audio still goes to Cohere. Long recordings with no VAD segment continue to short-circuit as silence — the backstop only kicks in for short clips where Silero's open-threshold can plausibly miss a real word.
+
 ## [0.4.9] — 2026-05-01
 
 ### Removed
