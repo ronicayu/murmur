@@ -272,7 +272,6 @@ final class AppCoordinator: ObservableObject {
     private var undoTimer: Task<Void, Never>?
     private var hotkeyTask: Task<Void, Never>?
     private var audioLevelTask: Task<Void, Never>?
-    private var maxDurationTask: Task<Void, Never>?
     private var undoMonitor: Any?
     // Exposed as internal(set) so tests can assert the badge value without
     // needing to spy on the full stopAndTranscribeV1 call path (which requires
@@ -503,6 +502,7 @@ final class AppCoordinator: ObservableObject {
 
         case .cancelRecording:
             guard state == .recording else { return }
+            audio.onAutoStop = nil
             audio.detachStreamingAccumulator()
             streamingCoordinator?.cancelSession()
             streamingCoordinator?.resetToIdle()
@@ -544,24 +544,24 @@ final class AppCoordinator: ObservableObject {
                 }
             }
 
+            // Wire the auto-stop callback BEFORE startRecording so a
+            // very-fast hands-free / max-duration trigger still has a
+            // consumer. Set on every flow start; cleared on stop/cancel.
+            audio.onAutoStop = { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard self.state == .recording else { return }
+                    Self.log.info("Auto-stop fired (V1)")
+                    await self.stopAndTranscribe()
+                }
+            }
+
             try await withTimeout(seconds: 5, operation: "start recording") {
                 try await self.audio.startRecording()
             }
-
-            // M3: Monitor max recording duration
-            maxDurationTask?.cancel()
-            maxDurationTask = Task { @MainActor [weak self] in
-                guard let self else { return }
-                for await _ in self.audio.maxDurationReached {
-                    guard self.state == .recording else { continue }
-                    Self.log.info("Max recording duration reached, auto-stopping")
-                    await self.stopAndTranscribe()
-                    break
-                }
-            }
         } catch {
             audioLevelTask?.cancel()
-            maxDurationTask?.cancel()
+            audio.onAutoStop = nil
             audioFeedback.playError()
             transition(to: .error(mapError(error)))
         }
@@ -595,6 +595,15 @@ final class AppCoordinator: ObservableObject {
                 }
             }
 
+            audio.onAutoStop = { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard self.state == .recording else { return }
+                    Self.log.info("Auto-stop fired (streaming)")
+                    await self.stopAndTranscribeStreaming()
+                }
+            }
+
             try await withTimeout(seconds: 5, operation: "start recording") {
                 try await self.audio.startRecording()
             }
@@ -615,20 +624,9 @@ final class AppCoordinator: ObservableObject {
 
             // Attach accumulator to audio tap via AudioService dual-output extension
             audio.attachStreamingAccumulator(acc)
-
-            maxDurationTask?.cancel()
-            maxDurationTask = Task { @MainActor [weak self] in
-                guard let self else { return }
-                for await _ in self.audio.maxDurationReached {
-                    guard self.state == .recording else { continue }
-                    Self.log.info("Max recording duration reached, auto-stopping (streaming)")
-                    await self.stopAndTranscribeStreaming()
-                    break
-                }
-            }
         } catch {
             audioLevelTask?.cancel()
-            maxDurationTask?.cancel()
+            audio.onAutoStop = nil
             streamingCoordinator?.cancelSession()
             audioFeedback.playError()
             transition(to: .error(mapError(error)))
@@ -637,7 +635,7 @@ final class AppCoordinator: ObservableObject {
 
     private func stopAndTranscribeStreaming() async {
         audioLevelTask?.cancel()
-        maxDurationTask?.cancel()
+        audio.onAutoStop = nil
         // No stop sound: release is user-initiated, already known to the user.
         // Pill transitions ("Listening..." → "Transcribing...") provide visual
         // confirmation; V1 success chime still confirms the system event of
@@ -797,7 +795,7 @@ final class AppCoordinator: ObservableObject {
 
     private func stopAndTranscribeV1() async {
         audioLevelTask?.cancel()
-        maxDurationTask?.cancel()
+        audio.onAutoStop = nil
         // No stop sound: release is user-initiated. Success chime on inject
         // confirms the system event once transcription finishes.
 

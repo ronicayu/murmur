@@ -6,6 +6,11 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.4.4] — 2026-05-01
+
+### Fixed
+- **Hands-free auto-stop fired internally but never reached the coordinator.** Diagnosed from a noisy-environment session where Console showed `Hands-free auto-stop: 2.00s silence (rms -17.7 dB, floor -23.1 dB)` followed by 18 seconds of nothing — recording only stopped when the user manually pressed the hotkey. The signal path used an `AsyncStream<Void>` shared across recordings; back-to-back stop/start cycles race on the iterator lifecycle (the cancelled task's iterator can grab the next yield before the new task's iterator becomes active, silently dropping the event). Replaced with a plain callback `AudioService.onAutoStop` set per recording and cleared on stop/cancel. No iterator, no race.
+
 ## [0.4.3] — 2026-05-01
 
 ### Fixed

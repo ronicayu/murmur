@@ -46,10 +46,10 @@ final class AudioService: AudioServiceProtocol {
 
     /// Trailing silence window for hands-free auto-stop, or nil if
     /// hands-free is off. When set AND a vad is attached, `startRecording`
-    /// spawns a polling task that fires `maxDurationContinuation` after
-    /// this many seconds of consecutive non-speech (gated on at least one
-    /// speech segment having been seen, so a silent start doesn't
-    /// auto-fire instantly).
+    /// spawns a polling task that invokes `onAutoStop` after this many
+    /// seconds of consecutive non-speech (gated on at least one speech
+    /// segment having been seen, so a silent start doesn't auto-fire
+    /// instantly).
     private var handsFreeTrailingSilence: TimeInterval?
     private var handsFreeTask: Task<Void, Never>?
 
@@ -68,9 +68,16 @@ final class AudioService: AudioServiceProtocol {
 
     let audioLevel: AsyncStream<Float>
     private let levelContinuation: AsyncStream<Float>.Continuation
-    /// Continuation yielded when max duration is reached.
-    private let maxDurationContinuation: AsyncStream<Void>.Continuation
-    let maxDurationReached: AsyncStream<Void>
+    /// Invoked when either the 120 s max-duration timer or the hands-free
+    /// trailing-silence threshold fires. Replaces the previous AsyncStream-
+    /// based signal — back-to-back recordings race on the iterator
+    /// lifecycle (cancelled task's iterator can grab the next yield before
+    /// the new task's iterator is active, so the event silently disappears).
+    /// A plain callback removes the iterator entirely.
+    /// Set by the coordinator on every `startRecording*Flow`; cleared on
+    /// stop/cancel. Always invoked from a non-MainActor context — caller
+    /// is responsible for hopping to the actor it needs.
+    var onAutoStop: (@Sendable () -> Void)?
 
     /// Set by route-change / wake observers; consumed on next startRecording.
     /// Protected by `lock`.
@@ -81,10 +88,6 @@ final class AudioService: AudioServiceProtocol {
     init() {
         (audioLevel, levelContinuation) = AsyncStream.makeStream(
             of: Float.self,
-            bufferingPolicy: .bufferingNewest(1)
-        )
-        (maxDurationReached, maxDurationContinuation) = AsyncStream.makeStream(
-            of: Void.self,
             bufferingPolicy: .bufferingNewest(1)
         )
 
@@ -269,7 +272,7 @@ final class AudioService: AudioServiceProtocol {
             try? await Task.sleep(for: .seconds(maxDuration))
             guard !Task.isCancelled else { return }
             self?.logger.info("Max recording duration reached")
-            self?.maxDurationContinuation.yield()
+            self?.onAutoStop?()
         }
 
         // Hands-free auto-stop. Only meaningful with a VAD attached; if
@@ -290,9 +293,9 @@ final class AudioService: AudioServiceProtocol {
 
     /// Poll the VAD's live speech state at 10 Hz. Once we see speech at
     /// least once, start a stopwatch on every transition into silence;
-    /// fire `maxDurationContinuation` if silence persists for
-    /// `trailingSilence`. Resets the stopwatch on any speech frame.
-    /// Cancellation propagates from `stopRecording` / `cancelRecording`.
+    /// invoke `onAutoStop` if silence persists for `trailingSilence`.
+    /// Resets the stopwatch on any speech frame. Cancellation propagates
+    /// from `stopRecording` / `cancelRecording`.
     ///
     /// Combines VAD's live flag with an *adaptive* RMS noise-floor
     /// estimate. A fixed dB floor (the v0.4.2 approach) fails in noisy
@@ -355,7 +358,7 @@ final class AudioService: AudioServiceProtocol {
             if let start = silenceStart {
                 if now.timeIntervalSince(start) >= trailingSilence {
                     logger.info("Hands-free auto-stop: \(trailingSilence, format: .fixed(precision: 2))s silence (rms \(rmsDB, format: .fixed(precision: 1)) dB, floor \(noiseFloorDB, format: .fixed(precision: 1)) dB)")
-                    maxDurationContinuation.yield()
+                    onAutoStop?()
                     return
                 }
             } else {
@@ -494,6 +497,5 @@ final class AudioService: AudioServiceProtocol {
             NSWorkspace.shared.notificationCenter.removeObserver(token)
         }
         levelContinuation.finish()
-        maxDurationContinuation.finish()
     }
 }
