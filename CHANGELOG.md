@@ -6,6 +6,12 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.4.9] — 2026-05-01
+
+### Removed
+- **Settings → Model → Transcription Cleanup section.** Rule-based punctuation/casing toggle was rarely useful and added noise to the Model tab. The underlying `PunctuationCleanupService` is unchanged; only the UI control is gone. The `cleanupTranscription` UserDefaults key is no longer read.
+- **Settings → General → Network (Advanced) section.** Custom CA bundle picker was a niche WARP/Zero-Trust escape hatch that almost no user touched. The auto-generated keychain bundle (introduced in 0.3.5) handles the same case automatically, plus `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` env vars still work for manual override. The `customCABundlePath` UserDefaults key is no longer read.
+
 ## [0.4.8] — 2026-05-01
 
 ### Changed

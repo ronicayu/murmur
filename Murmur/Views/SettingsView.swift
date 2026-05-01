@@ -2,7 +2,6 @@ import SwiftUI
 import ServiceManagement
 import HotKey
 import AppKit
-import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @ObservedObject var coordinator: AppCoordinator
@@ -17,7 +16,6 @@ struct SettingsView: View {
     @AppStorage("streamingDiscoveryBadgeDismissed") private var discoveryBadgeDismissed: Bool = false
     @AppStorage("streamingFocusAbandonSeconds") private var focusAbandonSeconds: Double = 10.0
     @AppStorage("undoAfterTranscription") private var undoAfterTranscription: Bool = false
-    @AppStorage("cleanupTranscription") private var cleanupTranscription: Bool = false
     @AppStorage("correctTranscription") private var correctTranscription: Bool = false
     @AppStorage("correctionEngine") private var correctionEngine: String = "apple"
     @AppStorage("localLLMBaseURL") private var localLLMBaseURL: String = "http://localhost:11434/v1"
@@ -25,7 +23,6 @@ struct SettingsView: View {
     @AppStorage("localLLMAPIKey") private var localLLMAPIKey: String = ""
     @AppStorage(CorrectionPrompts.glossaryKey) private var correctionGlossary: String = ""
     @AppStorage(CorrectionPrompts.systemPromptKey) private var correctionSystemPrompt: String = ""
-    @AppStorage("customCABundlePath") private var customCABundlePath: String = ""
 
     @State private var useRightCommand: Bool = true
     @State private var showDeleteConfirmation = false
@@ -232,24 +229,6 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Network (Advanced)") {
-                LabeledContent("Custom CA bundle") {
-                    HStack(spacing: 6) {
-                        Text(customCABundlePath.isEmpty ? "macOS keychain (default)" : (customCABundlePath as NSString).lastPathComponent)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Button("Choose…") { pickCustomCABundle() }
-                        if !customCABundlePath.isEmpty {
-                            Button("Reset") { customCABundlePath = "" }
-                        }
-                    }
-                }
-                Text("Used when downloading speech models. If your network uses TLS interception (e.g. Cloudflare WARP / Zero Trust), point this at a `.pem` file containing the intercepting root. Leave at default to use the macOS System keychain.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
             Section {
                 LabeledContent("Version") {
                     Text(Self.appVersionString)
@@ -260,21 +239,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-    }
-
-    private func pickCustomCABundle() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [
-            UTType(filenameExtension: "pem") ?? .data,
-            UTType(filenameExtension: "crt") ?? .data,
-            UTType(filenameExtension: "cer") ?? .data,
-        ]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.message = "Select a PEM file containing the root certificate(s) to trust for model downloads."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        customCABundlePath = url.path
     }
 
     /// Reads `CFBundleShortVersionString` (set by Info.plist; CI overrides from
@@ -397,10 +361,6 @@ struct SettingsView: View {
 
             Section("Transcription Correction") {
                 transcriptionCorrectionRow
-            }
-
-            Section("Transcription Cleanup") {
-                transcriptionCleanupRow
             }
 
             Section {
@@ -579,24 +539,6 @@ struct SettingsView: View {
             }
         }
         .padding(.leading, 4)
-    }
-
-    @ViewBuilder
-    private var transcriptionCleanupRow: some View {
-        LabeledContent {
-            Toggle("", isOn: $cleanupTranscription)
-                .labelsHidden()
-                .toggleStyle(.switch)
-            // v0.3.0: always enabled — rule-based, no model download required.
-            // v0.3.1 will gate this on AuxiliaryModel.punctuationCleanup being downloaded.
-        } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Clean up punctuation and casing")
-                Text("English: capitalises sentences and adds terminal periods. Chinese: appends 。 and converts ASCII terminals to full-width. Japanese, Korean, and other languages pass through unchanged.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
     }
 
     @ViewBuilder
