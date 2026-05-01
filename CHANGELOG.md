@@ -6,6 +6,12 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.4.7] — 2026-05-01
+
+### Fixed
+- **Hands-free auto-stop fired mid-utterance and / or never fired in noisy rooms.** Two failure modes from the same root cause: the polling logic gated the silence timer on instantaneous RMS thresholds (relative to a rolling noise floor) and `vad.isCurrentlySpeech`. Both signals are jittery — between-word pauses look like silence, ambient bumps look like speech — so the timer either reset mid-phrase or stayed stuck in a "neither speech nor silent" limbo and never fired. Replaced with a segment-close-event approach: poll `vad.popSegments` at 10 Hz, anchor the trailing-silence timer to the timestamp of the most recent segment that *Silero itself* declared closed (which already requires `minSilenceDuration` of low-probability frames), and gate fire on `!vad.isCurrentlySpeech`. Robust to between-word pauses (segment is still open during them) and to noisy environments (Silero waits for a real silence interval before closing). RMS-based logic dropped entirely from the auto-stop path.
+- **Post-recording silence gate could falsely flag empty when hands-free was on.** The new polling drains segments out of Silero's queue, so by stop time `endOfStream()` only sees the residual in-progress segment. Added `AudioService.hadAnySpeechSegment` (set whenever the polling task pops anything) and OR'd it into the gate's emptiness check.
+
 ## [0.4.6] — 2026-05-01
 
 ### Changed

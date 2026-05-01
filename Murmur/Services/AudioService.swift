@@ -53,12 +53,14 @@ final class AudioService: AudioServiceProtocol {
     private var handsFreeTrailingSilence: TimeInterval?
     private var handsFreeTask: Task<Void, Never>?
 
-    /// Most recent RMS computed in the audio tap, in linear amplitude.
-    /// The hands-free polling task reads this as a backup silence signal
-    /// — VAD's `isCurrentlySpeech` can stick on for noisy mics where
-    /// background levels stay above Silero's 0.5 threshold, which would
-    /// otherwise prevent the trailing-silence timer from ever starting.
-    private var lastRMS: Float = 0
+    /// True if VAD emitted any closed speech segment during the current
+    /// recording. The hands-free polling task pops segments to drive its
+    /// silence timer — that drains them out of Silero's queue, so by
+    /// stop time `endOfStream()` only sees the residual in-progress
+    /// segment (or nothing). The post-recording silence gate consults
+    /// this flag in addition to `endOfStream()` to decide whether the
+    /// recording was empty. Reset on `startRecording`.
+    private var hadAnySpeechSegment = false
 
     /// URL of the WAV file currently being written (nil when not recording).
     private(set) var currentRecordingURL: URL?
@@ -199,6 +201,7 @@ final class AudioService: AudioServiceProtocol {
         // feed it inside the tap; if not, we fall back to RMS at stop.
         vad?.reset()
         vadActive = (vad != nil)
+        hadAnySpeechSegment = false
         lock.unlock()
 
         // Read the hardware format live at start-time and pass it explicitly
@@ -247,7 +250,6 @@ final class AudioService: AudioServiceProtocol {
                 try? self.outputFile?.write(from: convertedBuffer)
                 let rms = self.computeRMS(convertedBuffer)
                 self.rmsAccumulator.append(rms)
-                self.lastRMS = rms
                 // V3 dual-output: feed streaming accumulator (if attached)
                 let acc = self.streamingAccumulator
                 let vad = self.vad
@@ -297,72 +299,58 @@ final class AudioService: AudioServiceProtocol {
     /// Resets the stopwatch on any speech frame. Cancellation propagates
     /// from `stopRecording` / `cancelRecording`.
     ///
-    /// Combines VAD's live flag with an *adaptive* RMS noise-floor
-    /// estimate. A fixed dB floor (the v0.4.2 approach) fails in noisy
-    /// environments where background level itself sits above the floor —
-    /// neither VAD nor RMS ever indicate silence and the timer never
-    /// starts. Instead we maintain a rolling 30 s window of RMS samples,
-    /// estimate the noise floor as the 10th percentile, and define
-    /// "speech" / "silence" relative to that floor. Adapts to quiet
-    /// rooms (floor near -65 dB) and loud cafés (floor near -40 dB)
-    /// without tuning.
+    /// Drive the trailing-silence timer off Silero's *segment-close*
+    /// events, not RMS or `isCurrentlySpeech` polls.
     ///
-    /// Decision rules:
-    /// - Speech (resets the silence timer): VAD says speech AND current
-    ///   RMS is at least `speechMarginDB` above noise floor. The AND
-    ///   stops Silero false-positives (background noise crossing 0.5
-    ///   prob) from holding the timer down.
-    /// - Silence (runs the silence timer): current RMS within
-    ///   `silenceMarginDB` of noise floor. Ignores VAD — Silero's live
-    ///   flag is unreliable on noisy mics.
-    /// - Mixed: timer keeps running but doesn't reset.
+    /// Why: prior versions polled `isCurrentlySpeech` and/or compared
+    /// instantaneous RMS to an adaptive noise floor. Both signals are
+    /// jittery — `isCurrentlySpeech` flickers within a single phrase,
+    /// RMS in a between-word pause looks like silence even though the
+    /// user isn't done. So the timer either fired mid-utterance or never
+    /// fired at all, depending on how chatty the noise floor was.
+    ///
+    /// Silero already does the right inference: it groups consecutive
+    /// frames into a segment and only closes the segment after
+    /// `minSilenceDuration` of low-probability frames. That's *the*
+    /// "user just finished a thought" signal we want.
+    ///
+    /// Algorithm: poll `popSegments` at 10 Hz. Update
+    /// `lastSegmentEndTime` whenever segments come out. Fire when (a)
+    /// at least one segment has closed, (b) Silero is not currently in
+    /// a segment, and (c) `trailingSilence` seconds have elapsed since
+    /// the last segment close. Going back into speech (Silero opens a
+    /// new segment) implicitly defers the timer because the segment
+    /// hasn't closed yet — `lastSegmentEndTime` doesn't advance until
+    /// it does.
     private func runHandsFreeAutoStop(vad: VadService, trailingSilence: TimeInterval) async {
         let pollInterval: Duration = .milliseconds(100)
-        let windowMaxSamples = 300 // 30 s at 100 ms cadence
-        let warmupSamples = 5      // need ~0.5 s of data before the floor estimate is meaningful
-        let speechMarginDB: Float = 8
-        let silenceMarginDB: Float = 4
-        var rmsWindow: [Float] = []
-        var sawSpeech = false
-        var silenceStart: Date?
+        var lastSegmentEndTime: Date?
+        var sawAnySegment = false
         while !Task.isCancelled {
             try? await Task.sleep(for: pollInterval)
             if Task.isCancelled { return }
-            lock.lock()
-            let rms = lastRMS
-            lock.unlock()
-            let rmsDB = 20 * Foundation.log10(max(rms, 1e-10))
-            rmsWindow.append(rmsDB)
-            if rmsWindow.count > windowMaxSamples {
-                rmsWindow.removeFirst(rmsWindow.count - windowMaxSamples)
-            }
-            guard rmsWindow.count >= warmupSamples else { continue }
-            let sorted = rmsWindow.sorted()
-            let p10Index = max(0, sorted.count / 10)
-            let noiseFloorDB = sorted[p10Index]
-            let speechThresholdDB = noiseFloorDB + speechMarginDB
-            let silenceThresholdDB = noiseFloorDB + silenceMarginDB
-            let vadSpeech = vad.isCurrentlySpeech
-            let rmsLoud = rmsDB > speechThresholdDB
-            let rmsQuiet = rmsDB < silenceThresholdDB
-            let isSpeech = vadSpeech && rmsLoud
-            let isSilent = rmsQuiet
-            if isSpeech {
-                sawSpeech = true
-                silenceStart = nil
+            let segments = vad.popSegments()
+            if !segments.isEmpty {
+                sawAnySegment = true
+                lastSegmentEndTime = Date()
+                lock.lock()
+                hadAnySpeechSegment = true
+                lock.unlock()
                 continue
             }
-            guard sawSpeech else { continue }
-            if !isSilent && silenceStart == nil { continue }
-            let now = Date()
-            if let start = silenceStart {
-                if now.timeIntervalSince(start) >= trailingSilence {
-                    logger.info("Hands-free auto-stop: \(trailingSilence, format: .fixed(precision: 2))s silence (rms \(rmsDB, format: .fixed(precision: 1)) dB, floor \(noiseFloorDB, format: .fixed(precision: 1)) dB)")
-                    onAutoStop?()
-                    return
-                }
-            } else {
-                silenceStart = now
+            guard sawAnySegment, let lastEnd = lastSegmentEndTime else { continue }
+            // Don't fire while a new segment is currently being collected
+            // — the user is talking again and the timer should defer
+            // until that segment closes.
+            if vad.isCurrentlySpeech {
+                lastSegmentEndTime = nil
+                continue
+            }
+            let elapsed = Date().timeIntervalSince(lastEnd)
+            if elapsed >= trailingSilence {
+                logger.info("Hands-free auto-stop: \(trailingSilence, format: .fixed(precision: 2))s since last segment close")
+                onAutoStop?()
+                return
             }
         }
     }
@@ -385,6 +373,7 @@ final class AudioService: AudioServiceProtocol {
         let accum = rmsAccumulator
         let activeVad = vad
         let vadWasActive = vadActive
+        let priorSegmentSeen = hadAnySpeechSegment
         outputFile = nil
         streamingAccumulator = nil
         vadActive = false
@@ -411,7 +400,10 @@ final class AudioService: AudioServiceProtocol {
         // covers cold-start before the Silero model has been downloaded.
         if vadWasActive, let activeVad {
             let segments = activeVad.endOfStream()
-            if segments.isEmpty {
+            // hands-free polling drains segments during recording, so an
+            // empty endOfStream doesn't mean nothing was said. The flag
+            // covers that case.
+            if segments.isEmpty && !priorSegmentSeen {
                 logger.info("Silence detected (VAD: no speech segments; peak \(dbPeak, format: .fixed(precision: 1)) dB)")
                 try? FileManager.default.removeItem(at: url)
                 throw MurmurError.silenceDetected
