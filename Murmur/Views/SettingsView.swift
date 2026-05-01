@@ -101,6 +101,9 @@ struct SettingsView: View {
                     .onChange(of: recordingMode) { _, newValue in
                         if let mode = RecordingMode(rawValue: newValue) {
                             coordinator.applyRecordingMode(mode)
+                            if mode == .handsFree && !modelManager.useVAD {
+                                _ = modelManager.setUseVAD(true)
+                            }
                         }
                     }
                 }
@@ -120,6 +123,11 @@ struct SettingsView: View {
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
                         }
+                    }
+                    if !modelManager.useVAD {
+                        Text("Hands-free needs Silero VAD. Enable it in the Model tab — otherwise recording won't auto-stop.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
                     }
                 }
                 LabeledContent(autoDetectLanguage ? "Fallback language" : "Language") {

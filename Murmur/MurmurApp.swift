@@ -101,7 +101,7 @@ struct MurmurApp: App {
             )
         } label: {
             Label("Murmur", systemImage: menuBarIconName)
-                .labelStyle(.titleAndIcon)
+                .labelStyle(.iconOnly)
                 .onAppear {
                     guard !launched else { return }
                     launched = true

@@ -53,6 +53,13 @@ final class AudioService: AudioServiceProtocol {
     private var handsFreeTrailingSilence: TimeInterval?
     private var handsFreeTask: Task<Void, Never>?
 
+    /// Most recent RMS computed in the audio tap, in linear amplitude.
+    /// The hands-free polling task reads this as a backup silence signal
+    /// — VAD's `isCurrentlySpeech` can stick on for noisy mics where
+    /// background levels stay above Silero's 0.5 threshold, which would
+    /// otherwise prevent the trailing-silence timer from ever starting.
+    private var lastRMS: Float = 0
+
     /// URL of the WAV file currently being written (nil when not recording).
     private(set) var currentRecordingURL: URL?
 
@@ -237,6 +244,7 @@ final class AudioService: AudioServiceProtocol {
                 try? self.outputFile?.write(from: convertedBuffer)
                 let rms = self.computeRMS(convertedBuffer)
                 self.rmsAccumulator.append(rms)
+                self.lastRMS = rms
                 // V3 dual-output: feed streaming accumulator (if attached)
                 let acc = self.streamingAccumulator
                 let vad = self.vad
@@ -285,24 +293,48 @@ final class AudioService: AudioServiceProtocol {
     /// fire `maxDurationContinuation` if silence persists for
     /// `trailingSilence`. Resets the stopwatch on any speech frame.
     /// Cancellation propagates from `stopRecording` / `cancelRecording`.
+    ///
+    /// Combines VAD's live flag with instantaneous RMS. Silero's 0.5
+    /// threshold can stick on for noisy mics (HVAC, fan noise, room
+    /// tone), so a VAD-only signal can prevent the silence timer from
+    /// ever starting. RMS gives a physics-based backup. Either signal
+    /// indicating silence is enough to start (and run) the trailing-
+    /// silence timer; both must indicate speech to reset it. `sawSpeech`
+    /// uses the AND so a noisy room doesn't trip a premature stop before
+    /// the user has spoken at all.
     private func runHandsFreeAutoStop(vad: VadService, trailingSilence: TimeInterval) async {
+        // -50 dB peak: matches the existing post-recording RMS gate's
+        // calibration. Whisper-tier whispering still peaks above this.
+        // Below -50 dB is "user has stopped speaking, only room tone."
+        let silenceThresholdDB: Float = -50
         var sawSpeech = false
         var silenceStart: Date?
         let pollInterval: Duration = .milliseconds(100)
         while !Task.isCancelled {
             try? await Task.sleep(for: pollInterval)
             if Task.isCancelled { return }
-            let speechNow = vad.isCurrentlySpeech
-            if speechNow {
+            lock.lock()
+            let rms = lastRMS
+            lock.unlock()
+            let rmsDB = 20 * Foundation.log10(max(rms, 1e-10))
+            let vadSpeech = vad.isCurrentlySpeech
+            let rmsSpeech = rmsDB > silenceThresholdDB
+            let bothSpeech = vadSpeech && rmsSpeech
+            let bothSilent = !vadSpeech && !rmsSpeech
+            if bothSpeech {
                 sawSpeech = true
                 silenceStart = nil
                 continue
             }
             guard sawSpeech else { continue }
+            // Silence timer runs whenever at least one signal indicates
+            // silence. A flickering signal (noise spike on VAD or RMS)
+            // stretches the trailing window without resetting it.
+            if !bothSilent && silenceStart == nil { continue }
             let now = Date()
             if let start = silenceStart {
                 if now.timeIntervalSince(start) >= trailingSilence {
-                    logger.info("Hands-free auto-stop: \(trailingSilence, format: .fixed(precision: 2))s trailing silence")
+                    logger.info("Hands-free auto-stop: \(trailingSilence, format: .fixed(precision: 2))s trailing silence (rms \(rmsDB, format: .fixed(precision: 1)) dB)")
                     maxDurationContinuation.yield()
                     return
                 }

@@ -6,6 +6,15 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.4.2] — 2026-05-01
+
+### Fixed
+- **Hands-free auto-stop never fired on noisy mics.** The trailing-silence timer polled `VadService.isCurrentlySpeech` only — Silero's 0.5 probability threshold can stick on for environments with persistent background noise (HVAC, fan, room tone), preventing the timer from ever starting. `AudioService.runHandsFreeAutoStop` now combines VAD's live flag with instantaneous RMS (calibrated against the same -50 dB floor as the post-recording silence gate). `sawSpeech` requires both signals to agree it's speech, so a noisy room can't trigger an instant premature stop; the trailing-silence timer runs whenever either signal indicates silence, so a stuck-on VAD no longer blocks the auto-stop.
+
+### Changed
+- **Settings warns when hands-free is enabled without VAD.** Picking the hands-free recording mode now auto-attempts `setUseVAD(true)` (no-op if the Silero model isn't downloaded). When VAD remains off, an inline orange caption under the auto-stop slider tells the user to enable VAD in the Model tab — previously the mode silently no-opped at recording time and the pill stayed in `recording` forever.
+- **Menu bar label is icon-only.** `MenuBarExtra` label switched from `.titleAndIcon` to `.iconOnly`. The "Murmur" string is kept on the underlying `Label` for accessibility but no longer takes menu bar real estate.
+
 ## [0.4.1] — 2026-04-29
 
 ### Added
