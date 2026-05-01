@@ -112,7 +112,7 @@ struct SettingsView: View {
                         HStack(spacing: 8) {
                             Slider(
                                 value: $handsFreeTrailingSilenceSeconds,
-                                in: 1.0...3.0,
+                                in: 1.0...10.0,
                                 step: 0.5
                             )
                             .frame(width: 160)

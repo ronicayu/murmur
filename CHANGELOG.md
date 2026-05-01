@@ -6,6 +6,11 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.4.6] — 2026-05-01
+
+### Changed
+- **Hands-free trailing-silence slider raised to 1.0 – 10.0 s** (was 1.0 – 3.0 s). Three seconds is too short for thinking between sentences in a slow dictation flow — feedback from real use was that the auto-stop fired before the user was ready for the next utterance. Detection thresholds (RMS noise floor, speech / silence margins) are unchanged; only the configurable upper bound moved.
+
 ## [0.4.5] — 2026-05-01
 
 ### Fixed
