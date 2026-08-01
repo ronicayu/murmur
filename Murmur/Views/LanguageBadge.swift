@@ -42,3 +42,23 @@ struct LanguageBadgeView: View {
             .foregroundStyle(.secondary)
     }
 }
+
+// MARK: - NoticeBadgeView
+
+/// A small pill-shaped label explaining a mode change the user did not ask for
+/// (e.g. streaming stopped because CPU load spiked). Deliberately styled as
+/// information, not an error — the transcription still succeeded; only the
+/// delivery mode changed.
+struct NoticeBadgeView: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10, weight: .medium, design: .rounded))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Color.primary.opacity(0.08), in: Capsule())
+            .accessibilityLabel("Notice: \(text)")
+    }
+}

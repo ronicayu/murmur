@@ -6,16 +6,77 @@ import SwiftUI
 /// text. Row click copies the (corrected) text to the pasteboard.
 struct RecentHistoryView: View {
     @ObservedObject var coordinator: AppCoordinator
+    @State private var searchQuery: String = ""
+
+    /// Entries matching the current query. Searches both the injected text and
+    /// the pre-correction raw text, so looking for what you *said* finds the
+    /// entry even when the corrector rewrote it.
+    private var filteredHistory: [(text: String, rawText: String?, language: DetectedLanguage, date: Date)] {
+        coordinator.transcriptionHistory.filter { entry in
+            TranscriptionHistoryFilter.matches(
+                query: searchQuery,
+                in: entry.text, entry.rawText
+            )
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             if coordinator.transcriptionHistory.isEmpty {
                 emptyState
             } else {
-                list
+                searchField
+                Divider()
+                let matches = filteredHistory
+                if matches.isEmpty {
+                    noResultsState
+                } else {
+                    list(matches)
+                }
             }
         }
         .frame(minWidth: 360, minHeight: 300)
+    }
+
+    // MARK: - Search
+
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            TextField("Search transcriptions", text: $searchQuery)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+            if !searchQuery.isEmpty {
+                Button {
+                    searchQuery = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear search")
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+
+    private var noResultsState: some View {
+        VStack(spacing: 8) {
+            Text("No matches")
+                .font(.system(.body, design: .rounded))
+                .foregroundStyle(.secondary)
+            Text("No transcription contains “\(searchQuery)”.")
+                .font(.system(.caption))
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
     }
 
     // MARK: - Empty state
@@ -40,10 +101,12 @@ struct RecentHistoryView: View {
 
     // MARK: - List
 
-    private var list: some View {
+    private func list(
+        _ entries: [(text: String, rawText: String?, language: DetectedLanguage, date: Date)]
+    ) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(coordinator.transcriptionHistory.enumerated()), id: \.offset) { _, entry in
+                ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
                     row(text: entry.text,
                         rawText: entry.rawText,
                         language: entry.language,

@@ -4,12 +4,24 @@ struct FloatingPillView: View {
     let state: AppState
     let audioLevel: Float
     let languageBadge: String?
+    /// Short, non-error explanation of a mode change the user did not ask for
+    /// — e.g. streaming stopped mid-session because CPU load spiked. Silent
+    /// mode-switches read as bugs, so we say what happened. Nil in the normal
+    /// case, which is the overwhelming majority.
+    let notice: String?
     let onCancel: (() -> Void)?
 
-    init(state: AppState, audioLevel: Float, languageBadge: String? = nil, onCancel: (() -> Void)? = nil) {
+    init(
+        state: AppState,
+        audioLevel: Float,
+        languageBadge: String? = nil,
+        notice: String? = nil,
+        onCancel: (() -> Void)? = nil
+    ) {
         self.state = state
         self.audioLevel = audioLevel
         self.languageBadge = languageBadge
+        self.notice = notice
         self.onCancel = onCancel
     }
 
@@ -18,6 +30,9 @@ struct FloatingPillView: View {
             stateIcon
             if let badge = languageBadge, isLanguageBadgeVisible {
                 LanguageBadgeView(text: badge)
+            }
+            if let notice {
+                NoticeBadgeView(text: notice)
             }
             stateText
             if isRecordingState, let onCancel {
@@ -146,16 +161,29 @@ struct FloatingPillView: View {
 /// Only `show` and `hide` are required; the concrete class adds window management.
 protocol PillControlling: AnyObject {
     /// Show the pill in a given state. All parameters except `state` are optional.
-    func show(state: AppState, audioLevel: Float, languageBadge: String?, onCancel: (() -> Void)?)
+    func show(
+        state: AppState,
+        audioLevel: Float,
+        languageBadge: String?,
+        notice: String?,
+        onCancel: (() -> Void)?
+    )
     func hide(after delay: TimeInterval)
 }
 
 extension PillControlling {
     func show(state: AppState) {
-        show(state: state, audioLevel: 0, languageBadge: nil, onCancel: nil)
+        show(state: state, audioLevel: 0, languageBadge: nil, notice: nil, onCancel: nil)
     }
     func show(state: AppState, languageBadge: String?) {
-        show(state: state, audioLevel: 0, languageBadge: languageBadge, onCancel: nil)
+        show(state: state, audioLevel: 0, languageBadge: languageBadge, notice: nil, onCancel: nil)
+    }
+    /// Show with an explanatory notice (e.g. "1-pass" when streaming fell back).
+    func show(state: AppState, notice: String?) {
+        show(state: state, audioLevel: 0, languageBadge: nil, notice: notice, onCancel: nil)
+    }
+    func show(state: AppState, audioLevel: Float, languageBadge: String?, onCancel: (() -> Void)?) {
+        show(state: state, audioLevel: audioLevel, languageBadge: languageBadge, notice: nil, onCancel: onCancel)
     }
     func hide() { hide(after: 0) }
 }
@@ -168,10 +196,22 @@ final class FloatingPillController: PillControlling {
     private var hostingView: NSHostingView<FloatingPillView>?
     private var hideTask: Task<Void, Never>?
 
-    func show(state: AppState, audioLevel: Float, languageBadge: String?, onCancel: (() -> Void)?) {
+    func show(
+        state: AppState,
+        audioLevel: Float,
+        languageBadge: String?,
+        notice: String?,
+        onCancel: (() -> Void)?
+    ) {
         hideTask?.cancel()
 
-        let pillView = FloatingPillView(state: state, audioLevel: audioLevel, languageBadge: languageBadge, onCancel: onCancel)
+        let pillView = FloatingPillView(
+            state: state,
+            audioLevel: audioLevel,
+            languageBadge: languageBadge,
+            notice: notice,
+            onCancel: onCancel
+        )
 
         if let hostingView {
             hostingView.rootView = pillView

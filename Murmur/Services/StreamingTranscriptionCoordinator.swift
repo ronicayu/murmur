@@ -864,6 +864,12 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         rangeTracker?.invalidate()
     }
 
+    /// Force the CPU-fallback flag so end-of-session UX can be tested without
+    /// pegging a real CPU. For testing only.
+    func simulateCPUFallbackForTesting() {
+        cpuFallbackTriggered = true
+    }
+
     // MARK: - Helpers
 
     private func transition(to newState: StreamingSessionState) {

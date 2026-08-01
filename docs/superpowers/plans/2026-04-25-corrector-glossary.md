@@ -1,5 +1,15 @@
 # Corrector glossary + editable prompt — implementation plan
 
+> **STATUS: SHIPPED (2026-04-25).** This plan is complete — the unchecked
+> boxes below were never ticked, but the work landed in `c6e9f4d`
+> (glossary regression suite) and `8e20851` (code-review fixes). Verified
+> 2026-08-01: `CorrectionPrompts.defaultSystemPrompt` / `.current` /
+> `.currentGlossary()` exist, `OpenAICompatibleCorrector.makeRequest` takes
+> `glossary:` and emits the `Glossary:` line, `FoundationModelsCorrector`
+> builds the same user message, and Settings has the glossary field, prompt
+> editor, Reset button and char counter. `CorrectionPromptsTests` +
+> `CorrectorGlossaryTests` pass (17 tests). Kept for the design rationale.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a user-editable correction system prompt and a glossary of speaker-specific terms that the corrector treats as authoritative spellings.

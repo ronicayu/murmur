@@ -664,17 +664,22 @@ final class AppCoordinator: ObservableObject {
                     pill.hide(after: 0.5)
                 }
             } else if streamingCoordinator?.didTriggerCPUFallback == true {
-                // UT-P1: Inform user that streaming was paused due to high CPU.
-                // Full-pass still ran, so show result normally but with a note.
+                // UT-P1 (UAT 058): streaming stopped mid-session because CPU
+                // load spiked. The full pass still ran, so the text is correct
+                // and complete — but live text stopped appearing partway
+                // through, and a silent mode-switch reads as a bug. Show the
+                // result with a notice explaining what happened, and hold the
+                // pill slightly longer so the notice is readable.
                 // Success sound already fired on .finalizing transition (see waitForStreamingDone).
                 if let replacedText = streamingCoordinator?.fullPassReplacedText {
                     let undoableState = AppState.undoable(text: replacedText, method: .clipboard)
                     transition(to: undoableState)
-                    pill.show(state: undoableState)
-                    pill.hide(after: 3)
+                    pill.show(state: undoableState, notice: Self.cpuFallbackNotice)
+                    pill.hide(after: 4)
                 } else {
                     transition(to: .idle)
-                    pill.hide(after: 1)
+                    pill.show(state: .idle, notice: Self.cpuFallbackNotice)
+                    pill.hide(after: 3)
                 }
             } else if let replacedText = streamingCoordinator?.fullPassReplacedText {
                 let undoableState = AppState.undoable(text: replacedText, method: .clipboard)
@@ -902,6 +907,11 @@ final class AppCoordinator: ObservableObject {
     /// Models first-token + generation on M-series; shorter would cause a
     /// fallback on nearly every invocation when the session is cold.
     private static let correctionTimeoutSeconds: TimeInterval = 2.5
+
+    /// Shown on the pill when the CPU monitor stopped streaming inference
+    /// mid-session. Phrased as what the user observed ("live text stopped"),
+    /// not as an internal mechanism ("CPU monitor tripped").
+    static let cpuFallbackNotice = "1-pass"
 
 #if DEBUG
     /// Testable entry-point that bypasses audio I/O. Exercises the transcribe →
