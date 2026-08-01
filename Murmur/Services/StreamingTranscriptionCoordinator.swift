@@ -328,6 +328,25 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     private var focusAbandonTask: Task<Void, Never>?
     /// DA-P1-5: Timestamp when full-pass finalizing phase started (for pill progress).
     private(set) var finalizingStartedAt: Date?
+
+    // MARK: - Session measurements (Phase 5)
+
+    /// When the streaming session began — the reference point for
+    /// time-to-first-word.
+    private(set) var sessionStartedAt: Date?
+    /// When the first stable delta reached the cursor. Nil if the session never
+    /// streamed anything (too short to confirm a prefix, or CPU fallback).
+    private(set) var firstDeltaAt: Date?
+    /// Levenshtein ratio between the streamed text and the full-pass text,
+    /// computed during the closing pass. Nil until that pass runs.
+    private(set) var lastEditDistanceRatio: Double?
+
+    /// Milliseconds from session start to the first visible streamed word.
+    /// The plan's "time to first word" target (< 1 s).
+    var timeToFirstWordMs: Int? {
+        guard let sessionStartedAt, let firstDeltaAt else { return nil }
+        return Int((firstDeltaAt.timeIntervalSince(sessionStartedAt) * 1000).rounded())
+    }
     /// UT-P0-2: If full-pass replaced streamed text, holds the replacement text for undoable UI.
     private(set) var fullPassReplacedText: String?
 
@@ -430,6 +449,9 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         self.transcriptionInFlight = false
         self.windowDirty = false
         self.pendingWindowSeparator = false
+        self.sessionStartedAt = Date()
+        self.firstDeltaAt = nil
+        self.lastEditDistanceRatio = nil
 
         // Build a fresh per-session VAD if a model is configured.
         // minSilenceDurationSeconds: 0.8 — Silero's 0.25 s default closes
@@ -641,6 +663,10 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         }
         pendingWindowSeparator = false
 
+        // First stable delta of the session — this is the moment the user sees
+        // a word appear, which is what "time to first word" measures.
+        if firstDeltaAt == nil { firstDeltaAt = Date() }
+
         streamingChunks.append(textToInject)
         chunkCount += 1
         if case .streaming = sessionState {
@@ -748,6 +774,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         // Deltas are verbatim slices that already carry their own spacing — join with "".
         let streamedText = streamingChunks.joined()
         let editDistance = computeEditDistanceRatio(a: streamedText, b: fullText)
+        lastEditDistanceRatio = editDistance
         logger.info("StreamingCoordinator: full-pass complete. edit_distance_ratio=\(editDistance, format: .fixed(precision: 3))")
 
         if editDistance > 0.01,

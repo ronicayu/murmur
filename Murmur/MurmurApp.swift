@@ -80,6 +80,11 @@ struct MurmurApp: App {
         // longer read by the app; users can delete it manually to reclaim
         // ~40 MB. We do not auto-delete to avoid surprising data loss.
 
+        // Local-only session metrics (Phase 5). Writes JSON lines to
+        // Application Support so latency/accuracy trends are visible while
+        // dogfooding. Nothing leaves the machine.
+        coord.metricsRecorder = SessionMetricsRecorder()
+
         // Wire the ASR-error correction engine chosen by Settings. Supports
         // swapping between Apple on-device and a local Ollama server — see
         // AppCoordinator.reconfigureCorrectionEngine for the decision logic.
