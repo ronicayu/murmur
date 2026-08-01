@@ -331,6 +331,21 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     /// UT-P0-2: If full-pass replaced streamed text, holds the replacement text for undoable UI.
     private(set) var fullPassReplacedText: String?
 
+    // MARK: - Stable-prefix streaming state (LocalAgreement-2 over a growing window)
+
+    /// Audio accumulated since the last window reset. Re-transcribed in full on every
+    /// pass so each hypothesis has sentence context — isolated single-segment chunks
+    /// are what let one-pass hallucinations reach the cursor.
+    private var windowSamples: [Float] = []
+    /// Emits only text two consecutive hypotheses agree on; withholds the unstable tail.
+    private var aggregator = StablePrefixAggregator()
+    /// At most one window transcription runs at a time (keeps hypotheses ordered).
+    private var transcriptionInFlight = false
+    /// Audio arrived while a pass was in flight — re-transcribe when it returns.
+    private var windowDirty = false
+    /// After a window force-reset, the next Latin-leading delta gets a separating space.
+    private var pendingWindowSeparator = false
+
     /// Why the session ended in `.cancelled` state, for UI messaging.
     enum CancellationReason: Sendable {
         case user
@@ -348,6 +363,10 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     }
     private static let samplesPerChunk: Int = Int(chunkSampleRate * chunkSeconds)
     private static let replaceWindowSeconds: TimeInterval = 0.5
+    /// Cap on the re-transcribed window. Past this, the window is flushed + reset so a
+    /// long monologue can't grow the per-pass transcription cost without bound.
+    private static let maxWindowSeconds: Double = 12.0
+    private static var maxWindowSamples: Int { Int(chunkSampleRate * maxWindowSeconds) }
 
     private let logger = Logger(subsystem: "com.murmur.app", category: "streaming-coordinator")
 
@@ -406,6 +425,11 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         self.cpuFallbackTriggered = false
         self.cancellationReason = nil
         self.fullPassReplacedText = nil
+        self.windowSamples = []
+        self.aggregator = StablePrefixAggregator()
+        self.transcriptionInFlight = false
+        self.windowDirty = false
+        self.pendingWindowSeparator = false
 
         // Build a fresh per-session VAD if a model is configured.
         // minSilenceDurationSeconds: 0.8 — Silero's 0.25 s default closes
@@ -471,6 +495,15 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         }
         accumulator = nil
 
+        // Emit whatever the aggregator has confirmed/withheld so the streamed preview is
+        // complete before the full-pass replaces it. This also covers the short
+        // single-utterance case: LocalAgreement-2 emits nothing until a second pass
+        // agrees, so without this flush a one-phrase dictation would have streamed
+        // nothing — and the full-pass only *replaces* existing streamed text, never
+        // inserts from empty.
+        let pendingTail = aggregator.flushAndReset()
+        if !pendingTail.isEmpty { injectDelta(pendingTail) }
+
         finalizingStartedAt = Date()
         transition(to: .finalizing)
         logger.info("StreamingCoordinator: session ending, starting full-pass")
@@ -509,7 +542,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         logger.info("StreamingCoordinator: session cancelled")
     }
 
-    // MARK: - Chunk handling
+    // MARK: - Chunk handling (LocalAgreement-2 over a growing window)
 
     private func handleChunkReady(_ buffer: AVAudioPCMBuffer) {
         guard case .streaming = sessionState else { return }
@@ -520,47 +553,99 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
             return
         }
 
-        processChunkBuffer(buffer)
+        appendToWindow(buffer)
+        transcribeWindowIfIdle()
     }
 
-    private func processChunkBuffer(_ buffer: AVAudioPCMBuffer) {
-        guard case .streaming = sessionState else { return }
+    /// Append a freshly-closed VAD segment's audio to the current window. The window
+    /// holds all audio since the last reset; the whole window is re-transcribed each
+    /// pass so every hypothesis carries sentence context.
+    private func appendToWindow(_ buffer: AVAudioPCMBuffer) {
+        guard let channelData = buffer.floatChannelData, buffer.frameLength > 0 else { return }
+        let frameCount = Int(buffer.frameLength)
+        windowSamples.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: frameCount))
+    }
 
-        // Write buffer to a temp WAV for transcription
-        guard let chunkURL = writeBufferToTempWAV(buffer) else {
-            logger.error("StreamingCoordinator: failed to write chunk to temp WAV")
+    /// Transcribe the current window unless a pass is already running. Serialising
+    /// passes keeps hypotheses ordered for the aggregator; audio that arrives mid-flight
+    /// is coalesced into the next pass, which also self-throttles when the model is
+    /// slower than speech.
+    private func transcribeWindowIfIdle() {
+        guard case .streaming = sessionState else { return }
+        guard !transcriptionInFlight else { windowDirty = true; return }
+        guard !windowSamples.isEmpty else { return }
+
+        guard let wavURL = writeSamplesToTempWAV(windowSamples) else {
+            logger.error("StreamingCoordinator: failed to write window to temp WAV")
             return
         }
 
+        transcriptionInFlight = true
+        windowDirty = false
         let lang = self.language
-        Task.detached { [weak self, chunkURL, lang] in
+        Task.detached { [weak self, wavURL, lang] in
             guard let self else {
-                try? FileManager.default.removeItem(at: chunkURL)
+                try? FileManager.default.removeItem(at: wavURL)
                 return
             }
+            var text: String?
             do {
-                let result = try await self.transcription.transcribe(audioURL: chunkURL, language: lang)
-                try? FileManager.default.removeItem(at: chunkURL)
-                await MainActor.run {
-                    self.handleChunkTranscription(result.text)
-                }
+                text = try await self.transcription.transcribe(audioURL: wavURL, language: lang).text
             } catch {
-                try? FileManager.default.removeItem(at: chunkURL)
+                text = nil
                 await MainActor.run {
-                    self.logger.warning("StreamingCoordinator: chunk transcription failed: \(error)")
+                    self.logger.warning("StreamingCoordinator: window transcription failed: \(error)")
                 }
+            }
+            try? FileManager.default.removeItem(at: wavURL)
+            let hypothesis = text
+            await MainActor.run {
+                self.handleWindowHypothesis(hypothesis)
             }
         }
     }
 
-    private func handleChunkTranscription(_ text: String) {
+    /// Fold a completed window hypothesis into the aggregator and inject only the
+    /// newly-stable text. Resets the window past the cap so per-pass cost stays bounded.
+    private func handleWindowHypothesis(_ text: String?) {
+        transcriptionInFlight = false
         guard case .streaming = sessionState else { return }
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
-        let textToInject = streamingChunks.isEmpty ? text : " " + text
-        streamingChunks.append(text)
+        if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let delta = aggregator.ingest(text)
+            if !delta.isEmpty { injectDelta(delta) }
+        }
+
+        if windowSamples.count >= Self.maxWindowSamples {
+            let tail = aggregator.flushAndReset()
+            if !tail.isEmpty { injectDelta(tail) }
+            windowSamples.removeAll(keepingCapacity: true)
+            pendingWindowSeparator = true
+            logger.info("StreamingCoordinator: window cap reached — flushed + reset")
+        }
+
+        if windowDirty { transcribeWindowIfIdle() }
+    }
+
+    /// Inject a confirmed delta verbatim and keep the AX range tracker in sync. Deltas
+    /// carry their own intra-window spacing; a separator space is added only at a window
+    /// boundary, and only when the next text begins a Latin word (CJK needs none).
+    private func injectDelta(_ delta: String) {
+        var textToInject = delta
+        if StreamingSeparator.needsLeadingSpace(
+            delta: delta,
+            atWindowBoundary: pendingWindowSeparator,
+            hasPriorText: !streamingChunks.isEmpty
+        ) {
+            textToInject = " " + delta
+        }
+        pendingWindowSeparator = false
+
+        streamingChunks.append(textToInject)
         chunkCount += 1
-        transition(to: .streaming(chunkCount: chunkCount))
+        if case .streaming = sessionState {
+            transition(to: .streaming(chunkCount: chunkCount))
+        }
 
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -592,7 +677,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
                     }
                 }
 
-                self.logger.info("StreamingCoordinator: chunk \(self.chunkCount) injected (\(textToInject.utf16.count) UTF-16 units)")
+                self.logger.info("StreamingCoordinator: delta \(self.chunkCount) injected (\(textToInject.utf16.count) UTF-16 units)")
             } catch {
                 self.logger.warning("StreamingCoordinator: append failed: \(error)")
             }
@@ -660,7 +745,8 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         }
 
         let fullText = result.text
-        let streamedText = streamingChunks.joined(separator: " ")
+        // Deltas are verbatim slices that already carry their own spacing — join with "".
+        let streamedText = streamingChunks.joined()
         let editDistance = computeEditDistanceRatio(a: streamedText, b: fullText)
         logger.info("StreamingCoordinator: full-pass complete. edit_distance_ratio=\(editDistance, format: .fixed(precision: 3))")
 
@@ -737,12 +823,13 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
             isFocusPaused = false
             logger.info("StreamingCoordinator: injection resumed — focus returned")
 
-            // Flush buffered chunks
+            // Flush buffered chunks into the window, then run a single pass.
             let buffered = pausedPendingChunks
             pausedPendingChunks.removeAll()
             for buffer in buffered {
-                processChunkBuffer(buffer)
+                appendToWindow(buffer)
             }
+            transcribeWindowIfIdle()
         }
     }
 
@@ -785,6 +872,24 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
 
     private func resolveCurrentCursorOffsetAX() -> Int? {
         resolveAXCursorOffset()
+    }
+
+    /// Write a window of Float32 mono samples to a temporary WAV file and return its URL.
+    private func writeSamplesToTempWAV(_ samples: [Float]) -> URL? {
+        guard !samples.isEmpty,
+              let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                         sampleRate: Self.chunkSampleRate,
+                                         channels: 1, interleaved: false),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                            frameCapacity: AVAudioFrameCount(samples.count))
+        else { return nil }
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        if let channelData = buffer.floatChannelData {
+            samples.withUnsafeBufferPointer { src in
+                channelData[0].update(from: src.baseAddress!, count: samples.count)
+            }
+        }
+        return writeBufferToTempWAV(buffer)
     }
 
     /// Write a PCM buffer to a temporary WAV file and return its URL.
