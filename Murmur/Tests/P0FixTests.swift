@@ -40,33 +40,6 @@ final class ModelConfigHashTests: XCTestCase {
     }
 }
 
-// MARK: - P0 Fix 3: TranscriptionService TOCTOU race
-
-final class TranscriptionServiceLockTests: XCTestCase {
-
-    func testConcurrentEnsureProcessAndKillDoesNotCrash() async {
-        // Actor isolation serializes access — verify no crashes under concurrent calls.
-        let service = TranscriptionService(
-            modelPath: URL(fileURLWithPath: "/nonexistent"),
-            pythonPath: URL(fileURLWithPath: "/nonexistent"),
-            scriptPath: URL(fileURLWithPath: "/nonexistent")
-        )
-
-        await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<100 {
-                group.addTask {
-                    await service.killProcess()
-                }
-                group.addTask {
-                    await service.setModelPath(URL(fileURLWithPath: "/tmp/test_\(Int.random(in: 0...100))"))
-                }
-            }
-        }
-
-        XCTAssertFalse(service.isModelLoaded)
-    }
-}
-
 // MARK: - P0 Fix 4: Auto language detection default
 
 final class AutoLanguageDefaultTests: XCTestCase {
@@ -92,24 +65,6 @@ final class AutoLanguageDefaultTests: XCTestCase {
         let lang = "auto"
         XCTAssertEqual(lang, "auto")
         XCTAssertNotEqual(lang, "en", "Default should not be English anymore")
-    }
-}
-
-// MARK: - Python script language parameter tests
-
-final class TranscribePyLanguageTests: XCTestCase {
-
-    func testAutoLanguageOmitsParameterInOnnx() throws {
-        // Read the transcribe.py and verify the auto-detect logic
-        let scriptURL = Bundle.module.url(forResource: "transcribe", withExtension: "py", subdirectory: "Resources")
-            ?? Bundle.main.url(forResource: "transcribe", withExtension: "py")
-
-        // If we can find the script, verify the auto-detect code exists
-        if let url = scriptURL {
-            let content = try String(contentsOf: url)
-            XCTAssert(content.contains("language != \"auto\""),
-                      "transcribe.py should check for 'auto' language to skip explicit language parameter")
-        }
     }
 }
 

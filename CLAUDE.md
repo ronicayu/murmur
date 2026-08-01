@@ -14,7 +14,7 @@ Key requirements:
 
 ## Status
 
-v0.2.0 released. Core features working: voice input (V1 + V3 streaming), audio transcription, native ONNX backend. See `CHANGELOG.md` for details.
+v0.4.10 released. Core features working: voice input (V1 full-pass + V3 streaming), audio transcription, in-process native ONNX backend (Cohere), opt-in FireRed zh-first backend, Silero VAD endpointing (live silence gate, hands-free auto-stop, streaming chunk boundaries), CT-Transformer ASR punctuation. Transcription is fully in-process — the Python transcription subprocess bridge was removed (Python remains only for the one-time model download). See `CHANGELOG.md` for details.
 
 ## Team
 

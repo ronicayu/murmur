@@ -49,7 +49,6 @@ jobs:
 
           # Resources
           cp Resources/AppIcon.icns "$APP/Contents/Resources/"
-          cp Resources/transcribe.py "$APP/Contents/Resources/"
           cp Resources/requirements.txt "$APP/Contents/Resources/"
 
           # SPM resource bundle

@@ -26,14 +26,16 @@ struct MurmurApp: App {
         }
 
         let mm = ModelManager()
-        let backend = mm.activeBackend
-        let modelPath = mm.modelDirectory(for: backend)
-        let ts: any TranscriptionServiceProtocol
-        if backend == .onnx {
-            ts = NativeTranscriptionService(modelPath: modelPath)
-        } else {
-            ts = TranscriptionService(modelPath: modelPath)
-        }
+        // The default transcription service is ALWAYS the in-process Cohere
+        // ONNX engine, regardless of the active backend. When FireRed is
+        // active, FireRed handles zh/en via its own service (wired below) and
+        // this Cohere service is the fallback for everything else — the
+        // `.cohereONNX` route in `routedTranscribeV1`. (Previously this was a
+        // Python subprocess pointed at the FireRed model directory, which
+        // could not load a sherpa model — a live bug for non-zh/en audio under
+        // the FireRed backend. The subprocess bridge is deleted.)
+        let ts: any TranscriptionServiceProtocol =
+            NativeTranscriptionService(modelPath: mm.modelDirectory(for: .onnx))
         let coord = AppCoordinator(transcription: ts)
         coord.modelManager = mm
 
@@ -78,9 +80,6 @@ struct MurmurApp: App {
         // longer read by the app; users can delete it manually to reclaim
         // ~40 MB. We do not auto-delete to avoid surprising data loss.
 
-        // v0.3.0: rule-based cleanup service — always available, no download gate.
-        coord.cleanup = PunctuationCleanupService()
-
         // Wire the ASR-error correction engine chosen by Settings. Supports
         // swapping between Apple on-device and a local Ollama server — see
         // AppCoordinator.reconfigureCorrectionEngine for the decision logic.
@@ -119,31 +118,17 @@ struct MurmurApp: App {
                         }
                     }
                 }
-                .onReceive(modelManager.committedBackendChange) { newBackend in
+                .onReceive(modelManager.committedBackendChange) { _ in
                     // committedBackendChange only fires when setActiveBackend(_:) accepts
                     // the switch — never during an active download. This prevents the
                     // previous pattern (subscribing to $activeBackend) from tearing down
                     // the transcription service mid-download when a refused switch
                     // published a transient @Published willSet value.
-                    let newPath = modelManager.modelDirectory(for: newBackend)
-                    let newService: any TranscriptionServiceProtocol = newBackend == .onnx
-                        ? NativeTranscriptionService(modelPath: newPath)
-                        : TranscriptionService(modelPath: newPath)
-                    coordinator.replaceTranscriptionService(newService)
-
-                    // Re-attach VAD across consumers (gated on the toggle)
-                    // so file/long-audio chunking keeps Phase 5 behaviour
-                    // across backend switches. The freshly-built service
-                    // doesn't share state with the prior one, so we have
-                    // to push the URL again.
-                    if modelManager.useVAD {
-                        Self.attachVAD(
-                            modelManager: modelManager,
-                            coord: coordinator,
-                            ts: newService
-                        )
-                    }
-
+                    //
+                    // The default Cohere ONNX transcription service is
+                    // backend-independent (see init), so a backend switch no longer
+                    // rebuilds or re-VADs it — only the FireRed service is
+                    // (de)activated to match the new backend.
                     if Self.shouldHaveFireRed(modelManager: modelManager) {
                         if let svc = try? FireRedTranscriptionService(
                             modelDirectory: modelManager.modelDirectory(for: .fireRed)

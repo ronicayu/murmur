@@ -60,7 +60,7 @@ final class M4AAutoDeleteTests: XCTestCase {
 
         // Act
         sut.beginTranscription(audioURL: fakeAudioURL)
-        await drainMainActorP0()
+        await sut.transcriptionTask?.value
 
         // Assert — transcription成功後m4a應被刪除
         XCTAssertFalse(
@@ -82,7 +82,7 @@ final class M4AAutoDeleteTests: XCTestCase {
 
         // Act
         sut.beginTranscription(audioURL: fakeAudioURL)
-        await drainMainActorP0()
+        await sut.transcriptionTask?.value
 
         // Assert
         let all = historyService.getAll()
@@ -133,11 +133,12 @@ final class CancelM4ACleanupTests: XCTestCase {
             transcriptionService: spy
         )
 
-        // Act — 開始後立即取消
+        // Act — 開始後立即取消。抓住 task 再取消（cancel 會把 transcriptionTask 設為 nil），
+        // 然後 await 完成，確保取消清理路徑跑完 — 不靠固定 sleep。
         sut.beginTranscription(audioURL: fakeAudioURL)
-        await drainMainActorP0()
+        let task = sut.transcriptionTask
         sut.cancelTranscription()
-        await drainMainActorP0()
+        await task?.value
 
         // Assert
         let all = historyService.getAll()
@@ -162,7 +163,7 @@ final class CancelM4ACleanupTests: XCTestCase {
 
         // Act
         sut.beginTranscription(audioURL: fakeAudioURL)
-        await drainMainActorP0()
+        await sut.transcriptionTask?.value
 
         // Assert — upload原始文件不應被刪除（用戶自己的文件）
         XCTAssertTrue(
@@ -215,7 +216,7 @@ final class PythonCrashHistoryFailedTests: XCTestCase {
 
         // Act
         sut.beginTranscription(audioURL: fakeAudioURL)
-        await drainMainActorP0()
+        await sut.transcriptionTask?.value
 
         // Assert — entry存在且狀態為.failed
         let all = historyService.getAll()
@@ -237,7 +238,7 @@ final class PythonCrashHistoryFailedTests: XCTestCase {
 
         // Act
         sut.beginTranscription(audioURL: fakeAudioURL)
-        await drainMainActorP0()
+        await sut.transcriptionTask?.value
 
         // Assert — 失敗時m4a應保留
         XCTAssertTrue(
@@ -259,7 +260,7 @@ final class PythonCrashHistoryFailedTests: XCTestCase {
 
         // Act
         sut.beginTranscription(audioURL: fakeAudioURL)
-        await drainMainActorP0()
+        await sut.transcriptionTask?.value
 
         // Assert
         if case .idle = sut.windowState {
@@ -435,9 +436,9 @@ final class M4APathLifecycleTests: XCTestCase {
             transcriptionService: spy
         )
 
-        // Act — 開始轉寫（不完成）
+        // Act — 開始轉寫（不完成）。beginTranscription 在 spawn task 前就同步寫入
+        // inProgress entry，所以斷言前不需等待。
         sut.beginTranscription(audioURL: audioURL)
-        await drainMainActorP0()
 
         // Assert — 轉寫進行中，entry應有m4aPath
         let all = historyService.getAll()
@@ -445,9 +446,10 @@ final class M4APathLifecycleTests: XCTestCase {
             XCTAssertNotNil(entry.m4aPath,
                             "inProgress entry must track m4aPath for orphan recovery")
         }
-        // 清理
+        // 清理 — 抓 task、取消、await 完成
+        let task = sut.transcriptionTask
         sut.cancelTranscription()
-        await drainMainActorP0()
+        await task?.value
     }
 
     /// completeEntry後m4aPath歸nil（已由TranscriptionHistoryServiceTests覆蓋，此處在ViewModel層確認）。
@@ -468,7 +470,7 @@ final class M4APathLifecycleTests: XCTestCase {
 
         // Act
         sut.beginTranscription(audioURL: audioURL)
-        await drainMainActorP0()
+        await sut.transcriptionTask?.value
 
         // Assert
         let all = historyService.getAll()
@@ -478,12 +480,3 @@ final class M4APathLifecycleTests: XCTestCase {
     }
 }
 
-// MARK: - Helpers
-
-/// MainActor drainHelper — identical to TranscriptionWindowModelTests version.
-@MainActor
-private func drainMainActorP0() async {
-    await Task.yield()
-    try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
-    await Task.yield()
-}

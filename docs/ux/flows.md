@@ -5,12 +5,12 @@
 ### State Machine
 
 ```
-                  Option+Space        transcription
+                  Right Command        transcription
      +---------+  (tap)    +-----------+  done   +----------+  inject  +--------+
      |  IDLE   |---------->| RECORDING |-------->|TRANSCRIBE|-------->| INJECT |
      +---------+           +-----------+         +----------+         +--------+
        ^  ^                  |       |                |                  |  |
-       |  |  Option+Space    |  Esc  |                | fail             |  | ok
+       |  |  Right Command    |  Esc  |                | fail             |  | ok
        |  |  (tap again)     |       |                v                  |  v
        |  |                  +-------+          +----------+         +--------+
        |  |                  cancel             |  ERROR   |         | UNDOABLE|
@@ -24,8 +24,8 @@
 
 ### Trigger Behavior
 
-- **Toggle mode (default)**: Tap Option+Space to start recording, tap again to stop and transcribe.
-- **Hold mode (setting)**: Hold Option+Space to record, release to stop. Available in Settings.
+- **Toggle mode (default)**: Tap Right Command to start recording, tap again to stop and transcribe.
+- **Hold mode (setting)**: Hold Right Command to record, release to stop. Available in Settings.
 
 ### Menu Bar Icon States
 
@@ -42,7 +42,7 @@ The floating pill appears anchored below the menu bar icon (not near the cursor)
 
 - **Recording**: Pill shows `Recording...` with a live waveform.
 - **Transcription complete**: Pill shows a checkmark, detected language tag (`EN` or `中`), and the first ~30 chars of text. Fades after 1.5s.
-- **Cancel**: Press Escape or tap Option+Space while in IDLE-after-start. Pill shows `Cancelled` for 0.5s.
+- **Cancel**: Press Escape or tap Right Command while in IDLE-after-start. Pill shows `Cancelled` for 0.5s.
 
 ### Audio Feedback
 
@@ -121,7 +121,7 @@ Each permission screen explains why it's needed, triggers the system dialog, and
 +------------------------------------------+
 ```
 
-- The user practices the real hotkey interaction (Option+Space toggle), not an in-app button.
+- The user practices the real hotkey interaction (Right Command toggle), not an in-app button.
 - The floating pill appears as it would in normal use.
 - If transcription fails: `Make sure you speak clearly and try again.`
 
@@ -155,7 +155,7 @@ Each permission screen explains why it's needed, triggers the system dialog, and
 +-------------------------------+
 |  Last: "send the report to..." |  <- click to copy full text
 +-------------------------------+
-|  Option+Space to record       |  <- hotkey reminder (dimmed)
+|  Right Command to record       |  <- hotkey reminder (dimmed)
 +-------------------------------+
 |  Settings...                  |
 +-------------------------------+

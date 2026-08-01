@@ -324,30 +324,25 @@ final class AudioService: AudioServiceProtocol {
     /// it does.
     private func runHandsFreeAutoStop(vad: VadService, trailingSilence: TimeInterval) async {
         let pollInterval: Duration = .milliseconds(100)
-        var lastSegmentEndTime: Date?
-        var sawAnySegment = false
+        // The "when do we stop" decision lives in a pure, unit-tested state
+        // machine; this loop only supplies it with poll data (closed segments,
+        // live speech flag, a timestamp) and performs the side effects.
+        var timer = HandsFreeAutoStopTimer(trailingSilence: trailingSilence)
         while !Task.isCancelled {
             try? await Task.sleep(for: pollInterval)
             if Task.isCancelled { return }
             let segments = vad.popSegments()
             if !segments.isEmpty {
-                sawAnySegment = true
-                lastSegmentEndTime = Date()
                 lock.lock()
                 hadAnySpeechSegment = true
                 lock.unlock()
-                continue
             }
-            guard sawAnySegment, let lastEnd = lastSegmentEndTime else { continue }
-            // Don't fire while a new segment is currently being collected
-            // — the user is talking again and the timer should defer
-            // until that segment closes.
-            if vad.isCurrentlySpeech {
-                lastSegmentEndTime = nil
-                continue
-            }
-            let elapsed = Date().timeIntervalSince(lastEnd)
-            if elapsed >= trailingSilence {
+            let tick = timer.step(
+                now: Date().timeIntervalSinceReferenceDate,
+                closedSegmentCount: segments.count,
+                isCurrentlySpeech: vad.isCurrentlySpeech
+            )
+            if tick == .fire {
                 logger.info("Hands-free auto-stop: \(trailingSilence, format: .fixed(precision: 2))s since last segment close")
                 onAutoStop?()
                 return
@@ -398,37 +393,40 @@ final class AudioService: AudioServiceProtocol {
         // Decide silence by VAD when it was active for this session;
         // otherwise fall back to the legacy peak-RMS gate. The fallback
         // covers cold-start before the Silero model has been downloaded.
+        // The decision itself is pure (`SilenceGate`); AudioService only
+        // gathers inputs and handles the side effects (delete + throw).
+        let gate = SilenceGate()
         if vadWasActive, let activeVad {
             let segments = activeVad.endOfStream()
             // hands-free polling drains segments during recording, so an
-            // empty endOfStream doesn't mean nothing was said. The flag
-            // covers that case.
-            if segments.isEmpty && !priorSegmentSeen {
-                // Short-utterance backstop: Silero requires 0.25 s of
-                // sustained ≥ 0.5 prob frames to *open* a segment, so a
-                // quick "yes" / "好" / "ok" can fly under the radar even
-                // though there's clearly a word in there. If the
-                // recording is short (≤ 2 s) and peak RMS is at or above
-                // whisper level, transcribe anyway and let Cohere decide.
-                // Long recordings with no VAD segment really are empty.
-                let shortUtteranceMaxDuration: TimeInterval = 2.0
-                let speechFloorDB: Float = -50
-                if duration <= shortUtteranceMaxDuration && dbPeak > speechFloorDB {
-                    logger.info("VAD empty but short+loud — transcribing anyway (duration \(duration, format: .fixed(precision: 1))s, peak \(dbPeak, format: .fixed(precision: 1)) dB)")
-                    return url
+            // empty endOfStream doesn't mean nothing was said — priorSegmentSeen
+            // (hadAnySpeechSegment) covers that case. The short-utterance
+            // backstop covers fast single words Silero never opened a segment for.
+            let decision = gate.decideVAD(
+                hasClosingSegments: !segments.isEmpty,
+                priorSegmentSeen: priorSegmentSeen,
+                duration: duration,
+                peakDB: dbPeak
+            )
+            switch decision {
+            case .transcribe:
+                if segments.isEmpty {
+                    logger.info("VAD empty but transcribing (priorSegment=\(priorSegmentSeen, privacy: .public), duration \(duration, format: .fixed(precision: 1))s, peak \(dbPeak, format: .fixed(precision: 1)) dB)")
+                } else {
+                    let totalSpeechSamples = segments.reduce(0) { $0 + $1.sampleCount }
+                    logger.info("VAD: \(segments.count) speech segment(s), \(totalSpeechSamples) samples")
                 }
+            case .silence:
                 logger.info("Silence detected (VAD: no speech segments; peak \(dbPeak, format: .fixed(precision: 1)) dB)")
                 try? FileManager.default.removeItem(at: url)
                 throw MurmurError.silenceDetected
             }
-            let totalSpeechSamples = segments.reduce(0) { $0 + $1.sampleCount }
-            logger.info("VAD: \(segments.count) speech segment(s), \(totalSpeechSamples) samples")
         } else {
             // Legacy peak-RMS gate (see commit history for rationale —
             // peak-only because voice-processing AGC ruins the average).
             // Whisper-tier whispering still peaks above -50 dB; -65 dB is
             // "mic muted / wrong device / accidental hotkey press."
-            if dbPeak < -65 {
+            if gate.decideRMS(peakDB: dbPeak) == .silence {
                 logger.info("Silence detected (peak \(dbPeak, format: .fixed(precision: 1)) dB, RMS fallback)")
                 try? FileManager.default.removeItem(at: url)
                 throw MurmurError.silenceDetected

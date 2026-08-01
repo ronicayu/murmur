@@ -71,7 +71,7 @@ final class TranscriptionWindowModelTests: XCTestCase {
 
         // Act
         sut.beginTranscription(audioURL: fakeAudioURL)
-        await drainMainActor()
+        await sut.transcriptionTask?.value
 
         // Assert
         if case .result(let entry) = sut.windowState {
@@ -92,7 +92,7 @@ final class TranscriptionWindowModelTests: XCTestCase {
 
         // Act
         sut.beginTranscription(audioURL: fakeAudioURL)
-        await drainMainActor()
+        await sut.transcriptionTask?.value
 
         // Assert — history entry is completed
         let all = historyService.getAll()
@@ -109,7 +109,7 @@ final class TranscriptionWindowModelTests: XCTestCase {
 
         // Act
         sut.beginTranscription(audioURL: fakeAudioURL)
-        await drainMainActor()
+        await sut.transcriptionTask?.value
 
         // Assert — no failed entry, state is idle
         let all = historyService.getAll()
@@ -130,7 +130,7 @@ final class TranscriptionWindowModelTests: XCTestCase {
 
         // Act
         sut.beginTranscription(audioURL: fakeAudioURL)
-        await drainMainActor()
+        await sut.transcriptionTask?.value
 
         // Assert — the inProgress entry was deleted, not marked .failed
         let all = historyService.getAll()
@@ -146,7 +146,7 @@ final class TranscriptionWindowModelTests: XCTestCase {
 
         // Act
         sut.beginTranscription(audioURL: fakeAudioURL)
-        await drainMainActor()
+        await sut.transcriptionTask?.value
 
         // Assert — entry marked failed
         let all = historyService.getAll()
@@ -163,15 +163,17 @@ final class TranscriptionWindowModelTests: XCTestCase {
     // MARK: - cancelTranscription
 
     func test_cancelTranscription_deletes_active_entry_and_transitions_to_idle() async throws {
-        // Arrange — start transcription (spy blocks until we cancel)
+        // Arrange — start transcription (spy blocks until we cancel).
+        // beginTranscription adds the inProgress entry synchronously before
+        // spawning the task, so no wait is needed before cancelling.
         spyTranscription.shouldBlock = true
         sut.beginTranscription(audioURL: fakeAudioURL)
-        // Give the Task a moment to start and add the history entry
-        await drainMainActor()
 
-        // Act
+        // Act — grab the task before cancel nils it, then await the cancel
+        // cleanup path deterministically.
+        let task = sut.transcriptionTask
         sut.cancelTranscription()
-        await drainMainActor()
+        await task?.value
 
         // Assert
         if case .idle = sut.windowState {

@@ -53,7 +53,10 @@ final class TranscriptionWindowModel: ObservableObject {
     /// Injected transcription service — if nil, falls through to coordinator.transcription.
     /// Provide a test double in unit tests to avoid spawning a real Python process.
     private let injectedTranscriptionService: (any TranscriptionServiceProtocol)?
-    private var transcriptionTask: Task<Void, Never>?
+    /// The in-flight transcription, if any. Getter is internal so tests can
+    /// `await transcriptionTask?.value` for deterministic completion instead
+    /// of racing a fixed-duration sleep; the setter stays private.
+    private(set) var transcriptionTask: Task<Void, Never>?
     private var activeEntryID: UUID?
     private static let log = Logger(subsystem: "com.murmur.app", category: "window-model")
 

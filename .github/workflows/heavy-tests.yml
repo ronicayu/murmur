@@ -1,0 +1,42 @@
+name: Heavy tests (manual)
+
+# Model-loading tests, isolated in their own workflow so they can NEVER run
+# implicitly. There is no push/pull_request trigger — the only way in is a
+# deliberate "Run workflow" click (workflow_dispatch).
+#
+# Why isolated: these tests load transcription model weights (Cohere ~1.5 GB,
+# FireRed ~1.24 GB, Silero, CT-Transformer) via TestHeavyGate. They have
+# crashed the RAM-limited development Mac mini, so they must run only on a
+# GitHub-hosted runner — never on a developer machine, never as a routine
+# local step. MURMUR_RUN_HEAVY_TESTS=1 is set only here.
+#
+# NOTE: model weights are downloaded at test time; this job is slow and may
+# require network access to the model host. Expect it to be long-running.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  heavy:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve SPM dependencies
+        working-directory: Murmur
+        run: swift package resolve
+
+      - name: Patch ORT for Float16 support
+        working-directory: Murmur
+        run: bash Scripts/patch-ort-float16.sh
+
+      - name: Build (debug)
+        working-directory: Murmur
+        run: swift build
+
+      - name: Run heavy-tier tests
+        working-directory: Murmur
+        env:
+          MURMUR_RUN_HEAVY_TESTS: "1"
+        run: swift test

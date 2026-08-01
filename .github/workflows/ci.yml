@@ -1,0 +1,46 @@
+name: CI
+
+# Gates every pull request and every push to main with a build + the
+# light-tier test suite. This is the regression gate the repo lacked while
+# v0.4.2–v0.4.10 shipped eight consecutive fixes to the same subsystem.
+#
+# LIGHT TIER ONLY. This workflow never sets MURMUR_RUN_HEAVY_TESTS, so tests
+# that load transcription model weights (Cohere/FireRed/SenseVoice/Silero)
+# stay skipped via TestHeavyGate. Heavy, model-loading tests run only in the
+# manually-triggered heavy-tests.yml workflow on a GitHub-hosted runner —
+# never here, and never on a developer machine.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve SPM dependencies
+        working-directory: Murmur
+        run: swift package resolve
+
+      - name: Patch ORT for Float16 support
+        working-directory: Murmur
+        run: bash Scripts/patch-ort-float16.sh
+
+      - name: Build (debug)
+        working-directory: Murmur
+        run: swift build
+
+      # No MURMUR_RUN_HEAVY_TESTS here — light tier only. Model-loading tests
+      # skip themselves via TestHeavyGate; AX tests skip without an
+      # Accessibility grant. Both are expected skips on CI, not failures.
+      - name: Run light-tier tests
+        working-directory: Murmur
+        run: swift test

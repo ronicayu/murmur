@@ -107,11 +107,6 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
 /// no notion of an "active" auxiliary — each one is downloaded and managed
 /// independently on demand.
 enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
-    /// Whisper-tiny multilingual, ONNX quantised. Used by
-    /// `LanguageIdentificationService` when the user enables audio-based
-    /// language detection.
-    case lidWhisperTiny
-
     /// Sherpa-onnx CT-Transformer punctuation model (Chinese + English).
     /// Used by `ASRPunctuationService` when the user enables ASR-side
     /// punctuation. Adds ，。？！ to bare ASR transcripts at ~1 ms / clip.
@@ -130,7 +125,6 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
 
     var displayName: String {
         switch self {
-        case .lidWhisperTiny: return "Language Detection Model"
         case .punctuationCT: return "Punctuation Model"
         case .sileroVad: return "Voice Activity Detection Model"
         }
@@ -138,7 +132,6 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
 
     var modelRepo: String {
         switch self {
-        case .lidWhisperTiny: return "onnx-community/whisper-tiny"
         case .punctuationCT: return "csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12"
         case .sileroVad: return "onnx-community/silero-vad"
         }
@@ -146,7 +139,6 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
 
     var modelSubdirectory: String {
         switch self {
-        case .lidWhisperTiny: return "Murmur/Models-LID"
         case .punctuationCT: return "Murmur/Models-PuncCT"
         case .sileroVad: return "Murmur/Models-SileroVAD"
         }
@@ -155,7 +147,6 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
     /// ~50 MB worst-case. Quantised encoder + decoder are each ~15–25 MB.
     var requiredDiskSpace: Int64 {
         switch self {
-        case .lidWhisperTiny: return 100_000_000
         case .punctuationCT: return 320_000_000   // 280 MB ONNX + 4 MB tokens.json + headroom
         case .sileroVad: return 10_000_000        // ~2.2 MB ONNX + headroom
         }
@@ -163,7 +154,6 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
 
     var sizeDescription: String {
         switch self {
-        case .lidWhisperTiny: return "~40 MB"
         case .punctuationCT: return "~280 MB"
         case .sileroVad: return "~2 MB"
         }
@@ -171,12 +161,6 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
 
     var allowPatterns: [String] {
         switch self {
-        case .lidWhisperTiny:
-            return [
-                "onnx/encoder_model_quantized.onnx",
-                "onnx/decoder_model_quantized.onnx",
-                "*.json",
-            ]
         case .punctuationCT:
             // Skip the upstream test.py / show-model-input-output.py / add-model-metadata.py.
             return ["model.onnx", "tokens.json", "*.yaml"]
@@ -188,12 +172,6 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
 
     var requiredFiles: [String] {
         switch self {
-        case .lidWhisperTiny:
-            return [
-                "onnx/encoder_model_quantized.onnx",
-                "onnx/decoder_model_quantized.onnx",
-                "config.json",
-            ]
         case .punctuationCT:
             return ["model.onnx", "tokens.json"]
         case .sileroVad:

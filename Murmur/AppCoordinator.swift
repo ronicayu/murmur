@@ -75,21 +75,9 @@ final class AppCoordinator: ObservableObject {
     let audioFeedback: AudioFeedbackService
     let pill: any PillControlling
 
-    /// Legacy slot — Whisper-tiny LID was removed in favour of Cohere-echo
-    /// (see `transcribeWithAutoDetectIfNeeded`). Kept to avoid breaking the
-    /// public surface during the deprecation window. Always nil at runtime.
-    /// TODO(v0.4): delete when no external code references it.
-    var lid: Any? = nil
-
-    /// Optional post-transcription cleanup service. When non-nil and the
-    /// `cleanupTranscription` UserDefault is on, called after V1 transcription
-    /// succeeds and before text is injected. Injected by MurmurApp on every
-    /// launch (rule-based; no download gate in v0.3.0).
-    var cleanup: (any TranscriptionCleanup)?
-
     /// Optional ASR error-correction service. When non-nil and the
-    /// `correctTranscription` UserDefault is on, runs BEFORE `cleanup` on the
-    /// raw transcribed text. Concrete implementation is chosen by
+    /// `correctTranscription` UserDefault is on, runs on the punctuated
+    /// transcribed text. Concrete implementation is chosen by
     /// `reconfigureCorrectionEngine()` based on the `correctionEngine`
     /// UserDefault: `"apple"` → `FoundationModelsCorrector` (or NoOp on
     /// older systems), `"ollama"` → `OllamaCorrector`. Re-wired whenever
@@ -136,10 +124,6 @@ final class AppCoordinator: ObservableObject {
             self.correction = NoOpCorrector()
             Self.log.info("correction engine: noop (apple unavailable)")
         }
-    }
-
-    private var cleanupEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "cleanupTranscription")
     }
 
     private var correctionEnabled: Bool {
@@ -198,12 +182,6 @@ final class AppCoordinator: ObservableObject {
     }
 
     /// Replace the transcription service (e.g. when switching between ONNX and Python backends)
-    func replaceTranscriptionService(_ newService: any TranscriptionServiceProtocol) {
-        Task { await transcription.killProcess() }
-        transcription = newService
-        preloadModelInBackground()
-    }
-
     /// Wire up (or tear down) the FireRed service. Called from `MurmurApp` in
     /// response to `committedUseFireRedChange` and `committedBackendChange`.
     /// Passing `nil` releases the recognizer.
@@ -283,7 +261,16 @@ final class AppCoordinator: ObservableObject {
     init(
         hotkey: HotkeyService = HotkeyService(),
         audio: AudioService = AudioService(),
-        transcription: any TranscriptionServiceProtocol = TranscriptionService(),
+        // Default is the in-process Cohere ONNX engine pointed at the standard
+        // model directory. Production always injects an explicit service
+        // (MurmurApp); this default keeps `AppCoordinator()` usable in tests,
+        // which inject their own service before transcribing. Construction is
+        // cheap — the model isn't loaded until first use.
+        transcription: any TranscriptionServiceProtocol = NativeTranscriptionService(
+            modelPath: FileManager.default
+                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent(ModelBackend.onnx.modelSubdirectory)
+        ),
         injection: TextInjectionService = TextInjectionService(),
         permissions: PermissionsService = PermissionsService(),
         audioFeedback: AudioFeedbackService = AudioFeedbackService(),
@@ -821,12 +808,10 @@ final class AppCoordinator: ObservableObject {
             let lang = Self.cohereCode(for: result.language) ?? initialLang
 
             // Pipeline: transcribe → ASR-punc (CT-Transformer, ~1 ms) → correction (LLM, 2.5 s cap)
-            // → cleanup (rules, 250 ms cap) → inject. Each step silently falls back to its input on
-            // timeout or error.
+            // → inject. Each step silently falls back to its input on timeout or error.
             let rawTranscribed = result.text
             let punctuated = await applyASRPunctuationIfEnabled(text: rawTranscribed, language: lang)
-            let corrected = await applyCorrectionIfEnabled(text: punctuated, language: lang)
-            let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
+            let textToInject = await applyCorrectionIfEnabled(text: punctuated, language: lang)
 
             transition(to: .injecting)
             pill.show(state: .injecting)
@@ -839,11 +824,11 @@ final class AppCoordinator: ObservableObject {
             lastLanguage = result.language
             // History records the injected (final) text. `rawText` captures
             // the pre-pipeline transcription whenever ANY post-processing
-            // step (LLM correction OR rule-based cleanup) changed the text.
-            // Comparing against the final injected text — not just the
-            // correction step — means cleanup-only diffs (e.g. just adding
-            // a terminal `。`) also surface in Recent, so the user can
-            // always tell whether the pipeline did anything to their words.
+            // step (ASR punctuation OR LLM correction) changed the text.
+            // Comparing against the final injected text means punctuation-only
+            // diffs (e.g. just adding a terminal `。`) also surface in Recent,
+            // so the user can always tell whether the pipeline did anything to
+            // their words.
             let rawForHistory: String? = (textToInject != rawTranscribed) ? rawTranscribed : nil
             transcriptionHistory.insert((text: textToInject, rawText: rawForHistory, language: result.language, date: Date()), at: 0)
             if transcriptionHistory.count > maxHistoryCount {
@@ -897,26 +882,9 @@ final class AppCoordinator: ObservableObject {
         return punctuated.isEmpty ? rawText : punctuated
     }
 
-    /// Runs the cleanup service if the toggle is on and a service is wired in.
-    /// Always returns a valid string: the cleaned text on success, `rawText` on
-    /// timeout, throw, or toggle-off. Never surfaces an error to the caller.
-    private func applyCleanupIfEnabled(text rawText: String, language: String) async -> String {
-        guard cleanupEnabled, let cleanup else { return rawText }
-        do {
-            let cleaned = try await withTimeout(seconds: Self.cleanupTimeoutSeconds, operation: "cleanup") {
-                try await cleanup.improve(rawText, language: language)
-            }
-            return cleaned
-        } catch {
-            Self.log.warning("Cleanup failed, using raw text: \(String(describing: error), privacy: .public)")
-            return rawText
-        }
-    }
-
     /// Runs the ASR-error correction service if the toggle is on and a service
     /// is wired in. Silent fallback to `rawText` on timeout, throw, toggle-off,
     /// or if the safety rails in `TranscriptionCorrection` reject the candidate.
-    /// Generative LLM inference is given a longer budget than rule-based cleanup.
     private func applyCorrectionIfEnabled(text rawText: String, language: String) async -> String {
         guard correctionEnabled, let correction else { return rawText }
         do {
@@ -930,9 +898,6 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    /// Hard cap for post-transcription cleanup (250 ms per spec).
-    private static let cleanupTimeoutSeconds: TimeInterval = 0.25
-
     /// Hard cap for ASR-error correction. 2.5 s accommodates Apple Foundation
     /// Models first-token + generation on M-series; shorter would cause a
     /// fallback on nearly every invocation when the session is cold.
@@ -940,8 +905,8 @@ final class AppCoordinator: ObservableObject {
 
 #if DEBUG
     /// Testable entry-point that bypasses audio I/O. Exercises the transcribe →
-    /// cleanup → inject pipeline with a pre-recorded WAV and a pre-resolved
-    /// language code. Only used by `CoordinatorCleanupTests`.
+    /// ASR-punc → correction → inject pipeline with a pre-recorded WAV and a
+    /// pre-resolved language code. Used by the correction test suite.
     func stopAndTranscribeV1ForTesting(wav: URL, lang: String) async {
         do {
             let result = try await withTimeout(seconds: 120, operation: "transcription") {
@@ -950,8 +915,7 @@ final class AppCoordinator: ObservableObject {
 
             let rawTranscribed = result.text
             let punctuated = await applyASRPunctuationIfEnabled(text: rawTranscribed, language: lang)
-            let corrected = await applyCorrectionIfEnabled(text: punctuated, language: lang)
-            let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
+            let textToInject = await applyCorrectionIfEnabled(text: punctuated, language: lang)
 
             // Skip real injection in tests — just record what would be injected.
             lastTranscription = textToInject

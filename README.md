@@ -82,7 +82,11 @@ The entire setup takes 3-5 minutes depending on your internet speed.
 
 With **streaming mode** enabled (Settings > Experimental), text appears in real-time as you speak. A full-pass refinement runs when you stop to correct any streaming errors.
 
-The hotkey and recording mode (toggle vs hold-to-talk) are customizable in Settings.
+The hotkey and recording mode are customizable in Settings. Three modes are available:
+
+- **Toggle** (default) — tap Right Command to start, tap again to stop.
+- **Hold-to-talk** — hold Right Command to record, release to stop.
+- **Hands-free** — tap to start; recording auto-stops after a configurable trailing-silence window (1–10 s). Silero VAD decides when you've stopped speaking, so it holds through mid-sentence pauses and won't cut you off. Requires the Voice Activity Detection model (~2 MB, enabled in Settings).
 
 ### Recording in noisy environments — turn on macOS Voice Isolation
 
@@ -206,21 +210,20 @@ Murmur unloads the model when your Mac sleeps to free memory, and reloads it whe
 │          │          │                │              │                │
 │ RightCmd │ AVAudio  │ Native ONNX    │ Clipboard    │ Mic + A11y     │
 │ Toggle/  │ Engine   │ (pure Swift)   │ paste        │                │
-│ Hold     │ RMS/VAD  │ + Python IPC   │ (Cmd+V)     │                │
-│          │          │ fallback       │              │                │
-│          │ Streaming│                │              │                │
-│          │ Accum.   │ Mel Spectro.   │              │                │
-│          │ (chunks) │ (pure Swift)   │              │                │
+│ Hold/    │ Silero   │ FireRed (opt)  │ (Cmd+V)     │                │
+│ HandsFree│ VAD      │ Mel Spectro.   │ CGEvent      │                │
+│          │ Streaming│ (pure Swift)   │ fallback     │                │
+│          │ Accum.   │                │              │                │
 └──────────┴──────────┴────────────────┴──────────────┴────────────────┘
          │
          └─── StreamingTranscriptionCoordinator
               (chunk transcribe + full-pass refinement + focus guard)
 ```
 
-- **Native ONNX backend** — pure Swift, no Python dependency. Uses ONNX Runtime Swift bindings with CoreML acceleration
+- **Native ONNX backend** — pure Swift, no Python dependency. Uses ONNX Runtime Swift bindings with CoreML acceleration. (Transcription is fully in-process; the app no longer shells out to a Python transcription subprocess. Python is used only for the one-time model download.)
 - **MelSpectrogramExtractor** — pure Swift mel spectrogram, replacing the ONNX mel_extractor dependency
 - **StreamingTranscriptionCoordinator** — manages real-time chunk transcription, text injection, and full-pass refinement
-- **Python subprocess** (legacy fallback) communicates via JSON lines over stdin/stdout
+- **Silero VAD** — drives endpointing across live push-to-talk, hands-free auto-stop, streaming chunk boundaries, and long-audio chunking
 - Model preloads on launch and after wake for instant first transcription
 
 ## Project Structure
@@ -237,7 +240,10 @@ Murmur/
 │   ├── BPETokenizerDecoder.swift            # BPE token decoding
 │   ├── StreamingTranscriptionCoordinator.swift # V3 streaming state machine
 │   ├── AudioBufferAccumulator.swift         # Streaming audio chunk accumulator
-│   ├── TranscriptionService.swift           # Python subprocess bridge (legacy)
+│   ├── FireRedTranscriptionService.swift    # FireRed zh-first backend (opt-in)
+│   ├── VadService.swift                     # Silero VAD wrapper (endpointing)
+│   ├── SilenceGate.swift                    # Pure post-recording silence decision
+│   ├── HandsFreeAutoStopTimer.swift         # Pure hands-free auto-stop state machine
 │   ├── HotkeyService.swift                  # Global hotkey (Right Command)
 │   ├── AudioService.swift                   # AVAudioEngine recording + VAD
 │   ├── TextInjectionService.swift           # Clipboard paste + CGEvent fallback
@@ -257,7 +263,7 @@ Murmur/
 ├── Onboarding/
 │   ├── OnboardingView.swift                 # 5-step first-launch flow
 │   └── OnboardingViewModel.swift            # Onboarding logic
-├── Tests/                                   # 295 unit tests
+├── Tests/                                   # 400+ unit tests (light + heavy tiers)
 │   ├── V3Phase1Tests.swift                  # Streaming voice input tests
 │   ├── V3Phase0Tests.swift                  # Streaming spike tests
 │   ├── NativeTranscriptionTests.swift       # Native ONNX backend tests
@@ -282,7 +288,7 @@ cd Murmur
 swift package resolve
 bash Scripts/patch-ort-float16.sh   # Required before first build
 swift build        # Build
-swift test         # Run 295 unit tests
+swift test         # Run the light-tier unit tests (400+; model-loading tests skip by default)
 open .build/debug/Murmur.app   # Launch
 ```
 
