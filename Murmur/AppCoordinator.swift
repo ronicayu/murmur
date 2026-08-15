@@ -80,6 +80,11 @@ final class AppCoordinator: ObservableObject {
     /// `MurmurApp` wires the real recorder at launch.
     var metricsRecorder: SessionMetricsRecorder?
 
+    /// Learns repeatedly-corrected terms and proposes them for the glossary
+    /// (Phase 3.2). Nil disables learning; tests leave it nil. Suggestions are
+    /// surfaced in Settings for review — never applied silently.
+    var vocabularyStore: LearnedVocabularyStore?
+
     /// Optional ASR error-correction service. When non-nil and the
     /// `correctTranscription` UserDefault is on, runs on the punctuated
     /// transcribed text. Concrete implementation is chosen by
@@ -922,6 +927,12 @@ final class AppCoordinator: ObservableObject {
         stopRequestedAt: Date
     ) {
         let coord = streamingCoordinator
+        // Phase 3.2: the full pass disagreeing with the streamed text is
+        // evidence about terms the streaming engine mishears. Must be read
+        // before resetToIdle() clears it.
+        if let diff = coord?.lastFinalizeDiff {
+            learnVocabulary(before: diff.heard, after: diff.corrected)
+        }
         recordSessionMetrics(
             SessionMetrics(
                 date: Date(),
@@ -984,10 +995,24 @@ final class AppCoordinator: ObservableObject {
             let corrected = try await withTimeout(seconds: Self.correctionTimeoutSeconds, operation: "correction") {
                 try await correction.correct(rawText, language: language)
             }
+            // Phase 3.2: what the corrector changed is evidence about this
+            // speaker's vocabulary. Learn from it off the hot path.
+            learnVocabulary(before: rawText, after: corrected)
             return corrected
         } catch {
             Self.log.warning("Correction failed, using raw text: \(String(describing: error), privacy: .public)")
             return rawText
+        }
+    }
+
+    /// Feed one before/after pair to the vocabulary learner. Runs detached so
+    /// tokenisation and disk I/O never sit between the user and their text;
+    /// a no-op when no store is wired (tests, or learning disabled).
+    private func learnVocabulary(before: String, after: String) {
+        guard let vocabularyStore, before != after else { return }
+        let glossary = CorrectionPrompts.currentGlossary()
+        Task.detached(priority: .utility) {
+            vocabularyStore.observe(before: before, after: after, existingGlossary: glossary)
         }
     }
 

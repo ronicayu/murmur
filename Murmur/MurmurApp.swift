@@ -85,6 +85,11 @@ struct MurmurApp: App {
         // dogfooding. Nothing leaves the machine.
         coord.metricsRecorder = SessionMetricsRecorder()
 
+        // Learns repeatedly-corrected terms and proposes them in Settings
+        // (Phase 3.2). Suggestions are always reviewed by the user — a wrong
+        // entry in an authoritative-spellings list forces bad substitutions.
+        coord.vocabularyStore = LearnedVocabularyStore()
+
         // Wire the ASR-error correction engine chosen by Settings. Supports
         // swapping between Apple on-device and a local Ollama server — see
         // AppCoordinator.reconfigureCorrectionEngine for the decision logic.

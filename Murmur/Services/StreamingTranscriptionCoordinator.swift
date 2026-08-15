@@ -341,6 +341,11 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     /// computed during the closing pass. Nil until that pass runs.
     private(set) var lastEditDistanceRatio: Double?
 
+    /// The streamed-vs-final text pair from the closing pass, when they
+    /// differed. Consumed by the vocabulary learner (Phase 3.2). Nil when the
+    /// session streamed nothing or the full pass agreed exactly.
+    private(set) var lastFinalizeDiff: (heard: String, corrected: String)?
+
     /// Milliseconds from session start to the first visible streamed word.
     /// The plan's "time to first word" target (< 1 s).
     var timeToFirstWordMs: Int? {
@@ -452,6 +457,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         self.sessionStartedAt = Date()
         self.firstDeltaAt = nil
         self.lastEditDistanceRatio = nil
+        self.lastFinalizeDiff = nil
 
         // Build a fresh per-session VAD if a model is configured.
         // minSilenceDurationSeconds: 0.8 — Silero's 0.25 s default closes
@@ -775,6 +781,12 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         let streamedText = streamingChunks.joined()
         let editDistance = computeEditDistanceRatio(a: streamedText, b: fullText)
         lastEditDistanceRatio = editDistance
+        // Phase 3.2: where the full pass disagreed with the streamed text is
+        // evidence about terms the streaming engine mishears. Retained for the
+        // vocabulary learner to consume at end of session.
+        if !streamedText.isEmpty, streamedText != fullText {
+            lastFinalizeDiff = (heard: streamedText, corrected: fullText)
+        }
         logger.info("StreamingCoordinator: full-pass complete. edit_distance_ratio=\(editDistance, format: .fixed(precision: 3))")
 
         if editDistance > 0.01,

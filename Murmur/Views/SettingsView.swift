@@ -23,6 +23,8 @@ struct SettingsView: View {
     @AppStorage("localLLMAPIKey") private var localLLMAPIKey: String = ""
     @AppStorage(CorrectionPrompts.glossaryKey) private var correctionGlossary: String = ""
     @AppStorage(CorrectionPrompts.systemPromptKey) private var correctionSystemPrompt: String = ""
+    /// Learned-term suggestions awaiting the user's decision (Phase 3.2).
+    @State private var learnedSuggestions: [LearnedTerm] = []
 
     @State private var useRightCommand: Bool = true
     @State private var showDeleteConfirmation = false
@@ -425,9 +427,74 @@ struct SettingsView: View {
                     .padding(.vertical, 4)
 
                 glossaryEditor
+                learnedTermSuggestions
                 correctionPromptEditor
             }
         }
+        // Load suggestions when the section appears — not inside the
+        // suggestions view itself, which is hidden until the list is non-empty
+        // and so would never get a chance to populate it.
+        .onAppear(perform: refreshLearnedSuggestions)
+    }
+
+    /// Terms Murmur has repeatedly seen corrected, offered for the glossary.
+    /// Deliberately a review step: silently adding to an authoritative-spellings
+    /// list would force substitutions the user never sanctioned.
+    @ViewBuilder
+    private var learnedTermSuggestions: some View {
+        if !learnedSuggestions.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Suggested terms")
+                    .font(.subheadline)
+                Text("Terms Murmur has corrected more than once. Add the ones you actually use — they become authoritative spellings in the glossary above.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ForEach(learnedSuggestions, id: \.term) { suggestion in
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(suggestion.term)
+                                .font(.system(.body, design: .rounded))
+                            if let example = suggestion.heardAs.last {
+                                Text("heard as “\(example)” · \(suggestion.count)×")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        Button("Add") { acceptSuggestion(suggestion.term) }
+                            .controlSize(.small)
+                        Button("Dismiss") { dismissSuggestion(suggestion.term) }
+                            .controlSize(.small)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .padding(.top, 6)
+        }
+    }
+
+    private func refreshLearnedSuggestions() {
+        learnedSuggestions = coordinator.vocabularyStore?.suggestions() ?? []
+    }
+
+    /// Append the term to the glossary and mark it accepted. This is the only
+    /// place a learned term is allowed to reach the glossary, and it happens
+    /// because the user pressed Add.
+    private func acceptSuggestion(_ term: String) {
+        var terms = CorrectionPrompts.currentGlossary()
+        if !terms.contains(where: { $0.caseInsensitiveCompare(term) == .orderedSame }) {
+            terms.append(term)
+        }
+        correctionGlossary = terms.joined(separator: ", ")
+        coordinator.vocabularyStore?.markAccepted(term)
+        refreshLearnedSuggestions()
+    }
+
+    private func dismissSuggestion(_ term: String) {
+        coordinator.vocabularyStore?.markDismissed(term)
+        refreshLearnedSuggestions()
     }
 
     @ViewBuilder
