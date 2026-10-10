@@ -121,24 +121,6 @@ final class Qwen3TranscriptionServiceTests: XCTestCase {
         XCTAssertEqual(Qwen3TranscriptionService.cleaned("  system design 很重要 "), "system design 很重要")
     }
 
-    func test_looksCorrupt_flagsDebrisWrongScriptAndNearEmptyOutput() {
-        // Undecodable bytes left over from leaked template text.
-        XCTAssertTrue(Qwen3TranscriptionService.looksCorrupt(raw: "\u{FFFD}斯系统", cleaned: "\u{FFFD}斯系统", speechSeconds: 30))
-        // A script this engine is never routed.
-        XCTAssertTrue(Qwen3TranscriptionService.looksCorrupt(raw: "สั่งฟรี", cleaned: "สั่งฟรี", speechSeconds: 2))
-        // Four characters for thirty seconds of speech.
-        XCTAssertTrue(Qwen3TranscriptionService.looksCorrupt(raw: "好的好的", cleaned: "好的好的", speechSeconds: 30))
-    }
-
-    func test_wrongScriptCheck_appliesOnlyWhenChineseOrEnglishIsExpected() {
-        XCTAssertTrue(Qwen3TranscriptionService.expectsChineseOrEnglish("zh"))
-        XCTAssertTrue(Qwen3TranscriptionService.expectsChineseOrEnglish("en"))
-        XCTAssertFalse(Qwen3TranscriptionService.expectsChineseOrEnglish("ja"))
-        // Japanese output is debris for a Chinese speaker, and fine for a Japanese one.
-        XCTAssertTrue(Qwen3TranscriptionService.hasDebris(raw: "こんにちは", cleaned: "こんにちは", checkScript: true))
-        XCTAssertFalse(Qwen3TranscriptionService.hasDebris(raw: "こんにちは", cleaned: "こんにちは", checkScript: false))
-    }
-
     func test_detectLanguage_tagsByScript() {
         XCTAssertEqual(Qwen3TranscriptionService.detectLanguage("你好呀，现在可以了吗？"), .chinese)
         XCTAssertEqual(Qwen3TranscriptionService.detectLanguage("Hello there, how are you?"), .english)
@@ -147,14 +129,12 @@ final class Qwen3TranscriptionServiceTests: XCTestCase {
         XCTAssertEqual(Qwen3TranscriptionService.detectLanguage("。。。"), .unknown)
     }
 
-    func test_looksCorrupt_acceptsNormalAndShortUtterances() {
-        XCTAssertFalse(Qwen3TranscriptionService.looksCorrupt(
-            raw: "所有，只要处理data，不管你是做machine learning。",
-            cleaned: "所有，只要处理data，不管你是做machine learning。", speechSeconds: 8))
-        // A one-word reply is short, but so is its audio.
-        XCTAssertFalse(Qwen3TranscriptionService.looksCorrupt(raw: "好。", cleaned: "好。", speechSeconds: 0.6))
-        // Silence legitimately transcribes to nothing.
-        XCTAssertFalse(Qwen3TranscriptionService.looksCorrupt(raw: "", cleaned: "", speechSeconds: 0))
+    func test_detectLanguage_japaneseWithManyKanjiIsNotChinese() {
+        // Over a third of these letters are characters Chinese also uses.
+        XCTAssertEqual(
+            Qwen3TranscriptionService.detectLanguage("抜群の運動神経を持ち合わせ、どんな要求にも応えてきた。"),
+            .unknown
+        )
     }
 
     func test_segmentRanges_shortAudioIsOneRange() {

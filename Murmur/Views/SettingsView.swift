@@ -10,7 +10,6 @@ struct SettingsView: View {
     @AppStorage("handsFreeTrailingSilenceSeconds") private var handsFreeTrailingSilenceSeconds: Double = AppCoordinator.defaultHandsFreeTrailingSilenceSeconds
     @AppStorage("soundEffects") private var soundEffects: Bool = true
     @AppStorage("launchAtLogin") private var launchAtLogin: Bool = true
-    @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
     @AppStorage("streamingInputEnabled") private var streamingInputEnabled: Bool = false
     @AppStorage("streamingDiscoveryBadgeDismissed") private var discoveryBadgeDismissed: Bool = false
     @AppStorage("streamingFocusAbandonSeconds") private var focusAbandonSeconds: Double = 10.0
@@ -128,32 +127,7 @@ struct SettingsView: View {
                             .foregroundStyle(.orange)
                     }
                 }
-                LabeledContent("Language") {
-                    Picker("", selection: $transcriptionLanguage) {
-                        Text("Auto").tag("auto")
-                        Divider()
-                        Text("English").tag("en")
-                        Text("中文").tag("zh")
-                        Text("日本語").tag("ja")
-                        Text("한국어").tag("ko")
-                        Divider()
-                        Text("Français").tag("fr")
-                        Text("Deutsch").tag("de")
-                        Text("Español").tag("es")
-                        Text("Português").tag("pt")
-                        Text("Italiano").tag("it")
-                        Text("Nederlands").tag("nl")
-                        Text("Polski").tag("pl")
-                        Text("Ελληνικά").tag("el")
-                        Text("العربية").tag("ar")
-                        Text("Tiếng Việt").tag("vi")
-                    }
-                    .labelsHidden()
-                    .frame(width: 160)
-                }
-                Text("A hint only — the speech model recognises the language you speak by itself. Auto follows your keyboard layout.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                SpokenLanguagesSetting()
                 LabeledContent("Sound effects") {
                     Toggle("", isOn: $soundEffects)
                         .labelsHidden()

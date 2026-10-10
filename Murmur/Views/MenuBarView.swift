@@ -3,29 +3,10 @@ import HotKey
 
 struct MenuBarView: View {
     @ObservedObject var coordinator: AppCoordinator
-    @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
     @AppStorage("streamingInputEnabled") private var streamingInputEnabled: Bool = false
     var onOpenSettings: () -> Void = {}
     var onOpenTranscription: () -> Void = {}
     var onOpenRecentHistory: () -> Void = {}
-
-    private static let allLanguages: [(code: String, label: String)] = [
-        ("auto", "Auto"),
-        ("en", "English"),
-        ("zh", "中文"),
-        ("ja", "日本語"),
-        ("ko", "한국어"),
-        ("fr", "Français"),
-        ("de", "Deutsch"),
-        ("es", "Español"),
-        ("pt", "Português"),
-        ("it", "Italiano"),
-        ("nl", "Nederlands"),
-        ("pl", "Polski"),
-        ("el", "Ελληνικά"),
-        ("ar", "العربية"),
-        ("vi", "Tiếng Việt"),
-    ]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,28 +31,6 @@ struct MenuBarView: View {
                 menuButton(icon: "waveform", label: "Transcription", trailing: .shortcut("⌘⇧T")) {
                     onOpenTranscription()
                 }
-
-                // Language picker — styled as inline menu row
-                HStack(spacing: 8) {
-                    Image(systemName: "globe")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 16, alignment: .center)
-                    Text("Language")
-                        .font(.system(size: 13))
-                    Spacer()
-                    Picker("", selection: $transcriptionLanguage) {
-                        ForEach(Self.allLanguages, id: \.code) { lang in
-                            Text(lang.label).tag(lang.code)
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 1)
 
                 menuButton(icon: "gear", label: "Settings...") {
                     onOpenSettings()
@@ -200,10 +159,6 @@ struct MenuBarView: View {
         }
     }
 
-
-    private var currentLanguageLabel: String {
-        Self.allLanguages.first { $0.code == transcriptionLanguage }?.label ?? transcriptionLanguage.uppercased()
-    }
 
     /// Trailing label for the Recent menu row: show the entry count in
     /// muted text when non-empty so the row is useful even without opening

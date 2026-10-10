@@ -3,22 +3,17 @@ import SwiftUI
 struct FloatingPillView: View {
     let state: AppState
     let audioLevel: Float
-    let languageBadge: String?
     let onCancel: (() -> Void)?
 
-    init(state: AppState, audioLevel: Float, languageBadge: String? = nil, onCancel: (() -> Void)? = nil) {
+    init(state: AppState, audioLevel: Float, onCancel: (() -> Void)? = nil) {
         self.state = state
         self.audioLevel = audioLevel
-        self.languageBadge = languageBadge
         self.onCancel = onCancel
     }
 
     var body: some View {
         HStack(spacing: 8) {
             stateIcon
-            if let badge = languageBadge, isLanguageBadgeVisible {
-                LanguageBadgeView(text: badge)
-            }
             stateText
             if isRecordingState, let onCancel {
                 Button(action: onCancel) {
@@ -42,15 +37,6 @@ struct FloatingPillView: View {
     var isRecordingState: Bool {
         switch state {
         case .recording, .streaming: return true
-        default: return false
-        }
-    }
-
-    /// Badge is shown during recording, streaming, AND transcribing — so the
-    /// badge remains visible while the audio is being transcribed.
-    var isLanguageBadgeVisible: Bool {
-        switch state {
-        case .recording, .streaming, .transcribing: return true
         default: return false
         }
     }
@@ -146,16 +132,13 @@ struct FloatingPillView: View {
 /// Only `show` and `hide` are required; the concrete class adds window management.
 protocol PillControlling: AnyObject {
     /// Show the pill in a given state. All parameters except `state` are optional.
-    func show(state: AppState, audioLevel: Float, languageBadge: String?, onCancel: (() -> Void)?)
+    func show(state: AppState, audioLevel: Float, onCancel: (() -> Void)?)
     func hide(after delay: TimeInterval)
 }
 
 extension PillControlling {
     func show(state: AppState) {
-        show(state: state, audioLevel: 0, languageBadge: nil, onCancel: nil)
-    }
-    func show(state: AppState, languageBadge: String?) {
-        show(state: state, audioLevel: 0, languageBadge: languageBadge, onCancel: nil)
+        show(state: state, audioLevel: 0, onCancel: nil)
     }
     func hide() { hide(after: 0) }
 }
@@ -168,10 +151,10 @@ final class FloatingPillController: PillControlling {
     private var hostingView: NSHostingView<FloatingPillView>?
     private var hideTask: Task<Void, Never>?
 
-    func show(state: AppState, audioLevel: Float, languageBadge: String?, onCancel: (() -> Void)?) {
+    func show(state: AppState, audioLevel: Float, onCancel: (() -> Void)?) {
         hideTask?.cancel()
 
-        let pillView = FloatingPillView(state: state, audioLevel: audioLevel, languageBadge: languageBadge, onCancel: onCancel)
+        let pillView = FloatingPillView(state: state, audioLevel: audioLevel, onCancel: onCancel)
 
         if let hostingView {
             hostingView.rootView = pillView

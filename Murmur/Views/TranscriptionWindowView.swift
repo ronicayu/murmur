@@ -255,7 +255,7 @@ struct TranscriptionWindowView: View {
                 duration: duration,
                 fileSizeBytes: size,
                 onDiscard: { windowModel.discardRecording(url: url) },
-                onStart: { lang in windowModel.beginTranscription(audioURL: url, language: lang) }
+                onStart: { windowModel.beginTranscription(audioURL: url) }
             )
 
         case .uploadConfirm(let fileURL, let duration):
@@ -263,7 +263,7 @@ struct TranscriptionWindowView: View {
                 fileURL: fileURL,
                 duration: duration,
                 onCancel: { windowModel.transitionToIdle() },
-                onStart: { lang in windowModel.beginTranscription(audioURL: fileURL, language: lang) }
+                onStart: { windowModel.beginTranscription(audioURL: fileURL) }
             )
 
         case .transcribing(let progress):
