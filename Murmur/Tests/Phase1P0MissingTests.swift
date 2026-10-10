@@ -44,29 +44,73 @@ final class M4AAutoDeleteTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    /// 轉寫成功後，m4a臨時文件必須被刪除。
-    func test_beginTranscription_success_deletesM4AFile() async throws {
-        // Arrange — m4a文件存在
-        XCTAssertTrue(FileManager.default.fileExists(atPath: fakeAudioURL.path),
-                      "Precondition: m4a must exist before transcription")
-
+    /// 轉寫成功後，Murmur自己錄製的m4a必須被刪除。
+    func test_beginTranscription_success_deletesOwnRecording() async throws {
+        // Arrange — 經由真實的record → stop流程產生Murmur自己的錄音
         let spy = SpyTranscriptionService()
         spy.stubbedResult = TranscriptionResult(text: "Hello", language: .english, durationMs: 100)
-        let sut = TranscriptionWindowModel(
-            historyService: historyService,
-            coordinator: coordinator,
-            transcriptionService: spy
+        let sut = makeRecordingModelP0(
+            historyService: historyService, coordinator: coordinator, storeURL: storeURL, spy: spy
+        )
+        let recordingURL = try await recordOwnAudio(with: sut)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recordingURL.path),
+                      "Precondition: m4a must exist before transcription")
+
+        // Act
+        sut.beginTranscription(audioURL: recordingURL)
+        await drainMainActorP0()
+
+        // Assert — transcription成功後m4a應被刪除
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: recordingURL.path),
+            "Own recording must be deleted after successful transcription (IT-004)"
+        )
+        XCTAssertEqual(historyService.getAll().map(\.status), [.completed],
+                       "The recording's own entry must be the one completed")
+    }
+
+    /// 轉寫成功後，用戶上傳的原始文件絕不可被刪除。
+    func test_beginTranscription_success_uploadedFilePreserved() async throws {
+        // Arrange — fakeAudioURL is a user's file: Murmur did not record it
+        let spy = SpyTranscriptionService()
+        spy.stubbedResult = TranscriptionResult(text: "Hello", language: .english, durationMs: 100)
+        let sut = makeRecordingModelP0(
+            historyService: historyService, coordinator: coordinator, storeURL: storeURL, spy: spy
         )
 
         // Act
         sut.beginTranscription(audioURL: fakeAudioURL)
         await drainMainActorP0()
 
-        // Assert — transcription成功後m4a應被刪除
-        XCTAssertFalse(
+        // Assert
+        XCTAssertEqual(historyService.getAll().map(\.status), [.completed],
+                       "Precondition: the transcription succeeded")
+        XCTAssertTrue(
             FileManager.default.fileExists(atPath: fakeAudioURL.path),
-            "m4a must be deleted after successful transcription (IT-004)"
+            "An uploaded file must NOT be deleted after successful transcription"
         )
+    }
+
+    /// 即使上傳的文件位於錄音目錄內，只要不是本次錄製的，也不可刪除。
+    func test_beginTranscription_success_uploadedFileInsideRecordingsDirPreserved() async throws {
+        // Arrange — the user picks a file that lies in Murmur's recordings directory
+        let spy = SpyTranscriptionService()
+        let sut = makeRecordingModelP0(
+            historyService: historyService, coordinator: coordinator, storeURL: storeURL, spy: spy
+        )
+        let recordingsDir = recordingsDirectoryP0(storeURL: storeURL)
+        try FileManager.default.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
+        let pickedURL = recordingsDir.appendingPathComponent("picked-by-user.m4a")
+        FileManager.default.createFile(atPath: pickedURL.path, contents: Data("stub".utf8))
+
+        // Act
+        sut.beginTranscription(audioURL: pickedURL)
+        await drainMainActorP0()
+
+        // Assert
+        XCTAssertEqual(historyService.getAll().map(\.status), [.completed])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pickedURL.path),
+                      "A file the user picked must never be deleted, wherever it lies")
     }
 
     /// 轉寫成功後，history entry的m4aPath應為nil。
@@ -170,6 +214,70 @@ final class CancelM4ACleanupTests: XCTestCase {
             "Upload source file must NOT be deleted on cancellation"
         )
     }
+
+    /// 用戶取消（cancelTranscription）後，上傳的原始文件仍須保留。
+    func test_cancelTranscription_uploadedFilePreserved() async throws {
+        // Arrange
+        let spy = SpyTranscriptionService()
+        spy.shouldBlock = true
+        let sut = makeRecordingModelP0(
+            historyService: historyService, coordinator: coordinator, storeURL: storeURL, spy: spy
+        )
+
+        // Act
+        sut.beginTranscription(audioURL: fakeAudioURL)
+        await drainMainActorP0()
+        sut.cancelTranscription()
+        await drainMainActorP0()
+
+        // Assert
+        XCTAssertTrue(historyService.getAll().isEmpty, "Precondition: the cancel was processed")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: fakeAudioURL.path),
+            "An uploaded file must NOT be deleted when the user cancels"
+        )
+    }
+
+    /// 用戶取消後，Murmur自己錄製的m4a不再有用，必須刪除 (EC-004)。
+    func test_cancelTranscription_deletesOwnRecording() async throws {
+        // Arrange
+        let spy = SpyTranscriptionService()
+        spy.shouldBlock = true
+        let sut = makeRecordingModelP0(
+            historyService: historyService, coordinator: coordinator, storeURL: storeURL, spy: spy
+        )
+        let recordingURL = try await recordOwnAudio(with: sut)
+
+        // Act
+        sut.beginTranscription(audioURL: recordingURL)
+        await drainMainActorP0()
+        sut.cancelTranscription()
+        await drainMainActorP0()
+
+        // Assert
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recordingURL.path),
+                       "A cancelled own recording must be deleted (EC-004)")
+        XCTAssertTrue(historyService.getAll().isEmpty)
+    }
+
+    /// 轉寫因CancellationError終止時，Murmur自己錄製的m4a同樣刪除。
+    func test_cancellationError_deletesOwnRecording() async throws {
+        // Arrange
+        let spy = SpyTranscriptionService()
+        spy.stubbedError = CancellationError()
+        let sut = makeRecordingModelP0(
+            historyService: historyService, coordinator: coordinator, storeURL: storeURL, spy: spy
+        )
+        let recordingURL = try await recordOwnAudio(with: sut)
+
+        // Act
+        sut.beginTranscription(audioURL: recordingURL)
+        await drainMainActorP0()
+
+        // Assert
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recordingURL.path))
+        XCTAssertTrue(historyService.getAll().isEmpty)
+    }
 }
 
 // MARK: - 3. Python crash → history.failed，保留m4a (EC-014)
@@ -224,26 +332,53 @@ final class PythonCrashHistoryFailedTests: XCTestCase {
                        "History entry must be .failed after Python crash")
     }
 
-    /// Python crash後，m4a文件必須被保留（供retry）。
-    func test_transcriptionFailed_m4aFilePreserved() async throws {
+    /// Python crash後，Murmur自己錄製的m4a必須被保留（供retry），entry仍記錄其路徑。
+    func test_transcriptionFailed_ownRecordingPreserved() async throws {
         // Arrange
         let spy = SpyTranscriptionService()
         spy.stubbedError = MurmurError.transcriptionFailed("Python crashed")
-        let sut = TranscriptionWindowModel(
-            historyService: historyService,
-            coordinator: coordinator,
-            transcriptionService: spy
+        let sut = makeRecordingModelP0(
+            historyService: historyService, coordinator: coordinator, storeURL: storeURL, spy: spy
+        )
+        let recordingURL = try await recordOwnAudio(with: sut)
+
+        // Act
+        sut.beginTranscription(audioURL: recordingURL)
+        await drainMainActorP0()
+
+        // Assert — 失敗時m4a應保留
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: recordingURL.path),
+            "m4a must be retained for retry after transcription failure (EC-014)"
+        )
+        let all = historyService.getAll()
+        XCTAssertEqual(all.map(\.status), [.failed])
+        XCTAssertEqual(all.first?.m4aPath, recordingURL.path,
+                       "The failed entry must still point at the retained recording")
+    }
+
+    /// 轉寫失敗後，用戶上傳的原始文件仍須保留，且history不記錄其路徑。
+    func test_transcriptionFailed_uploadedFilePreserved() async throws {
+        // Arrange
+        let spy = SpyTranscriptionService()
+        spy.stubbedError = MurmurError.transcriptionFailed("Python crashed")
+        let sut = makeRecordingModelP0(
+            historyService: historyService, coordinator: coordinator, storeURL: storeURL, spy: spy
         )
 
         // Act
         sut.beginTranscription(audioURL: fakeAudioURL)
         await drainMainActorP0()
 
-        // Assert — 失敗時m4a應保留
+        // Assert
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: fakeAudioURL.path),
-            "m4a must be retained for retry after transcription failure (EC-014)"
+            "An uploaded file must NOT be deleted after a failed transcription"
         )
+        let all = historyService.getAll()
+        XCTAssertEqual(all.map(\.status), [.failed])
+        XCTAssertNil(all.first?.m4aPath,
+                     "History must not hold the path of a file Murmur does not own")
     }
 
     /// 失敗後window state返回.idle。
@@ -419,8 +554,32 @@ final class M4APathLifecycleTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    /// 轉寫開始時，history entry應包含m4aPath（inProgress狀態）。
-    func test_beginTranscription_inProgress_entry_hasM4APath() async throws {
+    /// 轉寫Murmur自己的錄音時，history entry應包含m4aPath（inProgress狀態）。
+    func test_beginTranscription_ownRecording_inProgress_entry_hasM4APath() async throws {
+        // Arrange
+        let spy = SpyTranscriptionService()
+        spy.shouldBlock = true
+        let sut = makeRecordingModelP0(
+            historyService: historyService, coordinator: coordinator, storeURL: storeURL, spy: spy
+        )
+        let recordingURL = try await recordOwnAudio(with: sut)
+
+        // Act — 開始轉寫（不完成）
+        sut.beginTranscription(audioURL: recordingURL)
+        await drainMainActorP0()
+
+        // Assert — 轉寫進行中，entry應有m4aPath
+        let all = historyService.getAll()
+        XCTAssertEqual(all.map(\.status), [.inProgress])
+        XCTAssertEqual(all.first?.m4aPath, recordingURL.path,
+                       "inProgress entry must track m4aPath for orphan recovery")
+        // 清理
+        sut.cancelTranscription()
+        await drainMainActorP0()
+    }
+
+    /// 轉寫上傳文件時，history entry不可記錄用戶文件的路徑。
+    func test_beginTranscription_upload_inProgress_entry_hasNoM4APath() async throws {
         // Arrange
         let audioURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString).m4a")
@@ -429,22 +588,19 @@ final class M4APathLifecycleTests: XCTestCase {
 
         let spy = SpyTranscriptionService()
         spy.shouldBlock = true
-        let sut = TranscriptionWindowModel(
-            historyService: historyService,
-            coordinator: coordinator,
-            transcriptionService: spy
+        let sut = makeRecordingModelP0(
+            historyService: historyService, coordinator: coordinator, storeURL: storeURL, spy: spy
         )
 
         // Act — 開始轉寫（不完成）
         sut.beginTranscription(audioURL: audioURL)
         await drainMainActorP0()
 
-        // Assert — 轉寫進行中，entry應有m4aPath
+        // Assert
         let all = historyService.getAll()
-        if let entry = all.first(where: { $0.status == .inProgress }) {
-            XCTAssertNotNil(entry.m4aPath,
-                            "inProgress entry must track m4aPath for orphan recovery")
-        }
+        XCTAssertEqual(all.map(\.status), [.inProgress])
+        XCTAssertNil(all.first?.m4aPath,
+                     "m4aPath is only for files Murmur recorded — never a user's file")
         // 清理
         sut.cancelTranscription()
         await drainMainActorP0()
@@ -479,6 +635,31 @@ final class M4APathLifecycleTests: XCTestCase {
 }
 
 // MARK: - Helpers
+
+/// The recordings directory of `makeRecordingModelP0`: next to the temp history
+/// store, so each test's tearDown removes it together with the store.
+private func recordingsDirectoryP0(storeURL: URL) -> URL {
+    storeURL.deletingLastPathComponent().appendingPathComponent("Recordings", isDirectory: true)
+}
+
+/// A model that records through a stub recorder into a temp directory, so a
+/// test can produce one of Murmur's own recordings with `recordOwnAudio(with:)`.
+@MainActor
+private func makeRecordingModelP0(
+    historyService: TranscriptionHistoryService,
+    coordinator: AppCoordinator,
+    storeURL: URL,
+    spy: SpyTranscriptionService
+) -> TranscriptionWindowModel {
+    TranscriptionWindowModel(
+        historyService: historyService,
+        coordinator: coordinator,
+        recordingService: makeStubRecordingService(
+            outputDirectory: recordingsDirectoryP0(storeURL: storeURL)
+        ),
+        transcriptionService: spy
+    )
+}
 
 /// MainActor drainHelper — identical to TranscriptionWindowModelTests version.
 @MainActor

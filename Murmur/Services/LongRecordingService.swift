@@ -66,8 +66,7 @@ final class AVAudioRecorderBridge: AVRecorderBridging {
 ///
 /// Constraints enforced:
 /// - Minimum 1 GB free disk space before start
-/// - 2 GB disk budget (recording auto-stopped at limit)
-/// - 2 hour maximum duration
+/// - 2 hour maximum duration (auto-stop, reported through `onAutoStop`)
 /// - NSProcessInfo.performActivity prevents App Nap during recording
 ///
 /// Thread safety: Must be called on the Main actor.
@@ -78,7 +77,6 @@ final class LongRecordingService {
     // nonisolated so they are accessible from non-MainActor contexts (tests, etc.)
 
     nonisolated static let maxDurationSeconds: TimeInterval = 7200     // 2 hours
-    nonisolated static let diskBudgetBytes: Int64 = 2 * 1024 * 1024 * 1024   // 2 GB
     nonisolated static let minimumFreeSpaceBytes: Int64 = 1024 * 1024 * 1024 // 1 GB
 
     private static let log = Logger(subsystem: "com.murmur.app", category: "long-recording")
@@ -88,6 +86,11 @@ final class LongRecordingService {
     private let outputDirectory: URL
     private let diskChecker: DiskSpaceChecking
     private let recorderFactory: (URL, [String: Any]) throws -> AVRecorderBridging
+    private let autoStopSleep: @Sendable (TimeInterval) async throws -> Void
+
+    /// Called with the finished .m4a when the 2-hour cap stops the recording.
+    /// Not called for a `stopRecording()` or `cancel()` made by the owner.
+    var onAutoStop: ((URL) -> Void)?
 
     // MARK: - State
 
@@ -105,11 +108,15 @@ final class LongRecordingService {
         recorderFactory: @escaping (URL, [String: Any]) throws -> AVRecorderBridging = { url, settings in
             let avRecorder = try AVAudioRecorder(url: url, settings: settings)
             return AVAudioRecorderBridge(recorder: avRecorder)
+        },
+        autoStopSleep: @escaping @Sendable (TimeInterval) async throws -> Void = { seconds in
+            try await Task.sleep(for: .seconds(seconds))
         }
     ) {
         self.outputDirectory = outputDirectory
         self.diskChecker = diskChecker
         self.recorderFactory = recorderFactory
+        self.autoStopSleep = autoStopSleep
     }
 
     /// Convenience initialiser using the default App Support/Murmur/Recordings directory.
@@ -120,6 +127,24 @@ final class LongRecordingService {
             .appendingPathComponent("Murmur", isDirectory: true)
             .appendingPathComponent("Recordings", isDirectory: true)
         self.init(outputDirectory: dir)
+    }
+
+    // MARK: - File ownership
+
+    /// True only for a file directly inside this service's output directory,
+    /// i.e. one Murmur recorded itself. Deleting audio is allowed for these
+    /// files only — never for a file the user picked or dropped.
+    func ownsRecording(at url: URL) -> Bool {
+        Self.isFile(url, directlyInside: outputDirectory)
+    }
+
+    /// Compares standardised, symlink-resolved paths, so `..` segments and a
+    /// symlink placed in the directory cannot make an outside file look owned.
+    nonisolated static func isFile(_ url: URL, directlyInside directory: URL) -> Bool {
+        guard url.isFileURL else { return false }
+        let file = url.standardizedFileURL.resolvingSymlinksInPath()
+        let dir = directory.standardizedFileURL.resolvingSymlinksInPath()
+        return file.deletingLastPathComponent().path == dir.path
     }
 
     // MARK: - Public API
@@ -168,11 +193,12 @@ final class LongRecordingService {
         )
 
         // 5. Schedule 2-hour auto-stop
-        maxDurationTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.maxDurationSeconds))
+        maxDurationTask = Task { [weak self, autoStopSleep] in
+            try? await autoStopSleep(Self.maxDurationSeconds)
             guard !Task.isCancelled, let self else { return }
             Self.log.info("2-hour cap reached — auto-stopping recording")
-            _ = try? await self.stopRecording()
+            guard let url = try? await self.stopRecording() else { return }
+            self.onAutoStop?(url)
         }
 
         Self.log.info("Recording started → \(outputURL.lastPathComponent)")
