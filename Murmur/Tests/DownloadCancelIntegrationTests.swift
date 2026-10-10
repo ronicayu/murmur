@@ -38,14 +38,23 @@ private func makeSleeper() -> Process {
     return proc
 }
 
-/// A shell that ignores SIGTERM, so only SIGKILL ends it. Its `sleep 1`
-/// children inherit that and end by themselves within a second.
-private func makeSigtermIgnorer() -> Process {
+/// Starts a shell that ignores SIGTERM, so only SIGKILL ends it, and returns
+/// once the shell has said that the signal is ignored. Without that wait, a
+/// SIGTERM sent right after launch ends the shell before its `trap` runs.
+/// The shell's `sleep 1` children end by themselves within a second.
+private func runSigtermIgnorer() throws -> Process {
     let proc = Process()
+    let ready = Pipe()
     proc.executableURL = URL(fileURLWithPath: "/bin/sh")
-    proc.arguments = ["-c", "trap '' TERM; while :; do sleep 1; done"]
-    proc.standardOutput = FileHandle.nullDevice
+    proc.arguments = ["-c", "trap '' TERM; echo ready; while :; do sleep 1 >/dev/null; done"]
+    proc.standardOutput = ready
     proc.standardError = FileHandle.nullDevice
+    try proc.run()
+    let line = String(decoding: ready.fileHandleForReading.availableData, as: UTF8.self)
+    guard line.hasPrefix("ready") else {
+        proc.terminate()
+        throw CocoaError(.fileReadUnknown)
+    }
     return proc
 }
 
@@ -180,8 +189,7 @@ final class DownloadCancelIntegrationTests: XCTestCase {
     /// SIGKILL escalation.
     func test_cancelDownload_sigtermIgnored_processIsKilled() async throws {
         // Arrange — spawn a process that ignores SIGTERM.
-        let proc = makeSigtermIgnorer()
-        try proc.run()
+        let proc = try runSigtermIgnorer()
         let pid = proc.processIdentifier
         XCTAssertTrue(proc.isRunning, "Precondition: SIGTERM-ignoring process must be running")
 
