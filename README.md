@@ -264,7 +264,7 @@ swift test         # Run the unit tests
 open .build/debug/Murmur.app   # Launch
 ```
 
-`swift test` skips the tests that need the speech model unless the model is installed and `MURMUR_RUN_HEAVY_TESTS=1` is set. To run them, including on a Mac that has the Command Line Tools but not Xcode:
+`swift test` skips the tests that need the speech model when the model is not installed, as on CI. To run them, including on a Mac that has the Command Line Tools but not Xcode:
 
 ```bash
 Scripts/model-regression.sh    # uses the model the app downloaded
