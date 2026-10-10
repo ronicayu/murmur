@@ -90,4 +90,48 @@ final class TranscriptionRouterTests: XCTestCase {
     // still works correctly for any future case via the fall-through
     // `.existing(activeBackend)` path — covered indirectly by the
     // FireRed/ONNX cases above.
+
+    // MARK: - Qwen3-ASR backend
+
+    func test_qwen3Backend_zh_routesToQwen3() {
+        XCTAssertEqual(
+            TranscriptionRouter.route(activeBackend: .qwen3, useFireRedForChinese: false,
+                                      language: "zh", version: .v1FullPass),
+            .qwen3
+        )
+    }
+
+    func test_qwen3Backend_en_routesToQwen3() {
+        XCTAssertEqual(
+            TranscriptionRouter.route(activeBackend: .qwen3, useFireRedForChinese: false,
+                                      language: "en", version: .v1FullPass),
+            .qwen3
+        )
+    }
+
+    func test_qwen3Backend_ja_fallsBackToCohereONNX() {
+        XCTAssertEqual(
+            TranscriptionRouter.route(activeBackend: .qwen3, useFireRedForChinese: false,
+                                      language: "ja", version: .v1FullPass),
+            .cohereONNX
+        )
+    }
+
+    func test_qwen3Backend_ignoresFireRedToggle() {
+        // The toggle only applies under the Standard backend; a stale ON value
+        // must not pull Chinese audio away from Qwen3.
+        XCTAssertEqual(
+            TranscriptionRouter.route(activeBackend: .qwen3, useFireRedForChinese: true,
+                                      language: "zh", version: .v1FullPass),
+            .qwen3
+        )
+    }
+
+    func test_v3Streaming_alwaysRoutesToCohere_evenWithQwen3Active() {
+        XCTAssertEqual(
+            TranscriptionRouter.route(activeBackend: .qwen3, useFireRedForChinese: false,
+                                      language: "zh", version: .v3Streaming),
+            .cohereStreaming
+        )
+    }
 }

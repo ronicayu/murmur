@@ -27,6 +27,7 @@ private final class ResumeGuard: @unchecked Sendable {
 enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
     case onnx
     case fireRed
+    case qwen3
 
     var id: String { rawValue }
 
@@ -34,6 +35,7 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .onnx: return "Standard (Recommended)"
         case .fireRed: return "FireRed (Chinese-first)"
+        case .qwen3: return "Qwen3-ASR (Chinese + English)"
         }
     }
 
@@ -41,6 +43,7 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .onnx: return "Standard"
         case .fireRed: return "FireRed"
+        case .qwen3: return "Qwen3-ASR"
         }
     }
 
@@ -48,6 +51,7 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .onnx: return "onnx-community/cohere-transcribe-03-2026-ONNX"
         case .fireRed: return "csukuangfj2/sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26"
+        case .qwen3: return "csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25"
         }
     }
 
@@ -55,6 +59,7 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .onnx: return 1_600_000_000       // ~1.5 GB
         case .fireRed: return 1_300_000_000    // ~1.24 GB rounded up
+        case .qwen3: return 1_050_000_000      // ~0.99 GB rounded up
         }
     }
 
@@ -62,6 +67,7 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .onnx: return "Murmur/Models-ONNX"
         case .fireRed: return "Murmur/Models-FireRed"
+        case .qwen3: return "Murmur/Models-Qwen3ASR"
         }
     }
 
@@ -70,6 +76,7 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .onnx: return ["onnx/encoder_model_q4f16*", "onnx/decoder_model_merged_q4f16*", "*.json"]
         case .fireRed: return ["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt", "*.json"]
+        case .qwen3: return ["conv_frontend.onnx", "encoder.int8.onnx", "decoder.int8.onnx", "tokenizer/*"]
         }
     }
 
@@ -78,6 +85,11 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .onnx: return ["config.json", "onnx/encoder_model_q4f16.onnx", "onnx/decoder_model_merged_q4f16.onnx"]
         case .fireRed: return ["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt"]
+        case .qwen3:
+            return [
+                "conv_frontend.onnx", "encoder.int8.onnx", "decoder.int8.onnx",
+                "tokenizer/vocab.json", "tokenizer/merges.txt", "tokenizer/tokenizer_config.json",
+            ]
         }
     }
 
@@ -89,6 +101,7 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .onnx: return "~1.5 GB"
         case .fireRed: return "~1.24 GB"
+        case .qwen3: return "~0.99 GB"
         }
     }
 
@@ -96,6 +109,7 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .onnx: return "Smaller download, fast and lightweight. Great for most users."
         case .fireRed: return "Best Chinese accuracy, including dialects and Chinese-English code-switching. Other languages fall back to Cohere ONNX (1.5 GB additional)."
+        case .qwen3: return "Smaller and about 5× faster than FireRed with similar Chinese accuracy, and adds punctuation itself. Slightly weaker on English terms inside Chinese speech. Other languages fall back to Cohere ONNX (1.5 GB additional)."
         }
     }
 }

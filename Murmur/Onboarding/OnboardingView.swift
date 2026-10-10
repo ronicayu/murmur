@@ -554,6 +554,7 @@ struct OnboardingView: View {
         switch backend {
         case .onnx: return "hare.fill"
         case .fireRed: return "flame.fill"
+        case .qwen3: return "bolt.fill"
         }
     }
 
@@ -561,6 +562,7 @@ struct OnboardingView: View {
         switch backend {
         case .onnx: return .blue
         case .fireRed: return .red
+        case .qwen3: return .purple
         }
     }
 

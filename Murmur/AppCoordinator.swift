@@ -175,6 +175,13 @@ final class AppCoordinator: ObservableObject {
     /// the log readable when the model is missing or broken.
     private var hasLoggedFireRedFailureThisSession = false
 
+    /// Qwen3-ASR transcription service. Set while the Qwen3-ASR backend is
+    /// active and its model is on disk; nil otherwise.
+    private var qwen3: Qwen3TranscriptionService?
+
+    /// Suppress repeat Qwen3 failure logs the same way as FireRed.
+    private var hasLoggedQwen3FailureThisSession = false
+
     /// CT-Transformer punctuation service. Active when the user has enabled
     /// the ASR-punctuation toggle AND the aux model is on disk. nil otherwise.
     private var asrPunc: ASRPunctuationService?
@@ -211,6 +218,16 @@ final class AppCoordinator: ObservableObject {
         self.fireRed = service
         self.fireRedModelDirectory = modelDirectory
         self.hasLoggedFireRedFailureThisSession = false
+    }
+
+    var hasQwen3Service: Bool { qwen3 != nil }
+
+    /// Wire up (or tear down) the Qwen3-ASR service. Called from `MurmurApp`
+    /// in response to `committedBackendChange`. Passing `nil` releases the
+    /// recognizer.
+    func setQwen3Service(_ service: Qwen3TranscriptionService?) {
+        self.qwen3 = service
+        self.hasLoggedQwen3FailureThisSession = false
     }
 
     /// Wire up (or tear down) the ASR-punctuation service. Called from
@@ -1139,9 +1156,9 @@ final class AppCoordinator: ObservableObject {
     }
 
     /// V1 transcribe path that consults `TranscriptionRouter` and dispatches to
-    /// either FireRed or the existing transcription service. On FireRed errors
-    /// we fall back to Cohere for THIS request only and log the failure once
-    /// per session.
+    /// FireRed, Qwen3-ASR, or the existing transcription service. On FireRed
+    /// or Qwen3 errors we fall back to Cohere for THIS request only and log
+    /// the failure once per session.
     private func routedTranscribeV1(wav: URL, language: String) async throws -> TranscriptionResult {
         let mm = self.modelManager
         let choice = TranscriptionRouter.route(
@@ -1172,6 +1189,25 @@ final class AppCoordinator: ObservableObject {
                 if !hasLoggedFireRedFailureThisSession {
                     hasLoggedFireRedFailureThisSession = true
                     Self.log.warning("FireRed inference failed (further failures suppressed this session): \(String(describing: error), privacy: .public)")
+                }
+                return try await transcription.transcribe(audioURL: wav, language: language)
+            }
+
+        case .qwen3:
+            guard let svc = qwen3 else {
+                Self.log.warning("Qwen3 routing chosen but service not initialised — falling back to Cohere")
+                return try await transcription.transcribe(audioURL: wav, language: language)
+            }
+            do {
+                let samples = try Self.loadSamples16k(url: wav)
+                let text = try await svc.transcribe(samples: samples, sampleRate: 16000)
+                // Tag by content for the same reason as FireRed above.
+                let lang: DetectedLanguage = Self.detectLanguageFromText(text)
+                return TranscriptionResult(text: text, language: lang, durationMs: 0)
+            } catch {
+                if !hasLoggedQwen3FailureThisSession {
+                    hasLoggedQwen3FailureThisSession = true
+                    Self.log.warning("Qwen3 inference failed (further failures suppressed this session): \(String(describing: error), privacy: .public)")
                 }
                 return try await transcription.transcribe(audioURL: wav, language: language)
             }
@@ -1319,8 +1355,8 @@ final class AppCoordinator: ObservableObject {
         return hasCJK
     }
 
-    /// Content-based language detection, used to tag FireRed transcripts
-    /// because FireRed itself doesn't return a language. Mirrors
+    /// Content-based language detection, used to tag FireRed and Qwen3
+    /// transcripts because neither service returns a language. Mirrors
     /// NativeTranscriptionService.detectLanguage(_:): if Chinese characters
     /// make up >30% of the alphabetic chars, call it Chinese.
     fileprivate static func detectLanguageFromText(_ text: String) -> DetectedLanguage {

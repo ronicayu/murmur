@@ -6,6 +6,19 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.5.0] — 2026-10-09
+
+### Added
+- **Qwen3-ASR speech engine** as a third option in Settings → Speech Engine, next to Standard and FireRed. It runs Alibaba's [Qwen3-ASR-0.6B](https://github.com/QwenLM/Qwen3-ASR) int8 through the already-vendored sherpa-onnx (`csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25`, ~0.99 GB vs FireRed's 1.24 GB). Select the row, then press Download Model.
+  - **Speed:** on the 14.7 s reference clip it transcribes in ~1.0 s against ~5.1 s for FireRed (M5 Max, 4 threads).
+  - **Quality:** in an offline benchmark (ASCEND conversational + FLEURS read Mandarin, ~1,360 utterances) it was slightly better than FireRed on pure Chinese (mixed error rate 6.99 vs 7.99, and 4.35 vs 5.35) and slightly worse on Chinese-English mixed speech (14.13 vs 12.77). It occasionally translates an English term into Chinese instead of transcribing it.
+  - **Punctuation:** Qwen3-ASR emits `，。？` and natural casing itself, so the ASR Punctuation add-on is not needed with it.
+  - **Routing:** Chinese and English full-pass audio use Qwen3-ASR; other languages fall back to Cohere ONNX. V3 streaming is unchanged and always uses Cohere, because sherpa-onnx has no streaming mode for this model.
+  - FireRed is untouched and remains selectable, including the "Use FireRed for Chinese transcription" toggle under Standard.
+
+### Fixed
+- **Streaming and non-Chinese/English audio did not work while FireRed was the selected engine.** The fallback service was the legacy Python bridge pointed at the FireRed model folder, which it cannot load. Every engine now keeps the native Cohere ONNX service (pointed at the Cohere model folder) for streaming and fallback languages. The Cohere model still has to be downloaded for those paths.
+
 ## [0.4.10] — 2026-05-01
 
 ### Fixed

@@ -26,14 +26,7 @@ struct MurmurApp: App {
         }
 
         let mm = ModelManager()
-        let backend = mm.activeBackend
-        let modelPath = mm.modelDirectory(for: backend)
-        let ts: any TranscriptionServiceProtocol
-        if backend == .onnx {
-            ts = NativeTranscriptionService(modelPath: modelPath)
-        } else {
-            ts = TranscriptionService(modelPath: modelPath)
-        }
+        let ts = Self.makeCohereService(modelManager: mm)
         let coord = AppCoordinator(transcription: ts)
         coord.modelManager = mm
 
@@ -43,6 +36,9 @@ struct MurmurApp: App {
                 coord.setFireRedService(svc, modelDirectory: mm.modelDirectory(for: .fireRed))
             }
         }
+
+        // Build Qwen3-ASR service if it is the active backend and the model is on disk.
+        coord.setQwen3Service(Self.makeQwen3ServiceIfNeeded(modelManager: mm))
 
         // Build ASR-punctuation service if the toggle is on and the aux model is on disk.
         if mm.useASRPunctuation {
@@ -125,10 +121,7 @@ struct MurmurApp: App {
                     // previous pattern (subscribing to $activeBackend) from tearing down
                     // the transcription service mid-download when a refused switch
                     // published a transient @Published willSet value.
-                    let newPath = modelManager.modelDirectory(for: newBackend)
-                    let newService: any TranscriptionServiceProtocol = newBackend == .onnx
-                        ? NativeTranscriptionService(modelPath: newPath)
-                        : TranscriptionService(modelPath: newPath)
+                    let newService = Self.makeCohereService(modelManager: modelManager)
                     coordinator.replaceTranscriptionService(newService)
 
                     // Re-attach VAD across consumers (gated on the toggle)
@@ -155,6 +148,19 @@ struct MurmurApp: App {
                     } else {
                         coordinator.setFireRedService(nil, modelDirectory: nil)
                     }
+
+                    coordinator.setQwen3Service(
+                        Self.makeQwen3ServiceIfNeeded(modelManager: modelManager)
+                    )
+                }
+                .onReceive(modelManager.$state) { newState in
+                    // Selecting Qwen3-ASR before its model is downloaded leaves the
+                    // coordinator without a recognizer; build it as soon as the
+                    // download finishes so the user doesn't have to relaunch.
+                    guard newState == .ready, !coordinator.hasQwen3Service else { return }
+                    coordinator.setQwen3Service(
+                        Self.makeQwen3ServiceIfNeeded(modelManager: modelManager)
+                    )
                 }
                 .onReceive(modelManager.committedUseFireRedChange) { _ in
                     if Self.shouldHaveFireRed(modelManager: modelManager) {
@@ -312,6 +318,22 @@ struct MurmurApp: App {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow = window
+    }
+
+    /// The Cohere service every backend relies on: Standard uses it for
+    /// everything, while FireRed and Qwen3-ASR use it for V3 streaming and for
+    /// languages they don't cover. It therefore always points at the Cohere
+    /// ONNX directory, whichever backend is active.
+    private static func makeCohereService(modelManager mm: ModelManager) -> any TranscriptionServiceProtocol {
+        NativeTranscriptionService(modelPath: mm.modelDirectory(for: .onnx))
+    }
+
+    /// Qwen3-ASR is loaded only while it is the active backend and its model
+    /// files are on disk. Returns nil otherwise, which releases any recognizer
+    /// the coordinator was holding.
+    private static func makeQwen3ServiceIfNeeded(modelManager mm: ModelManager) -> Qwen3TranscriptionService? {
+        guard mm.activeBackend == .qwen3 else { return nil }
+        return try? Qwen3TranscriptionService(modelDirectory: mm.modelDirectory(for: .qwen3))
     }
 
     /// FireRed should be loaded if (a) the FireRed backend is active, OR

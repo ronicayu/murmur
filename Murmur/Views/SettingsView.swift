@@ -259,6 +259,8 @@ struct SettingsView: View {
                 }
 
                 engineRow(.fireRed)
+
+                engineRow(.qwen3)
             }
 
             Section("ASR Punctuation") {

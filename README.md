@@ -127,6 +127,8 @@ Murmur ships with [Cohere Transcribe](https://cohere.com/blog/transcribe) by def
 
 2. **Add punctuation to ASR transcripts** (~280 MB additional download) — runs the [sherpa-onnx CT-Transformer](https://huggingface.co/csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12) zh-en punctuation model on the bare transcript at ~1 ms per clip. **FireRed never emits punctuation on its own**, so this toggle is what gives you `，。？！` automatically. Skipped for pure-English audio.
 
+**Smaller, faster alternative: Qwen3-ASR** (~0.99 GB) — pick **Qwen3-ASR (Chinese + English)** in **Settings → Speech Engine** and press **Download Model**. It runs [Qwen3-ASR-0.6B](https://github.com/QwenLM/Qwen3-ASR) and is about 5× faster than FireRed with similar Chinese accuracy, and it writes punctuation itself, so the punctuation add-on is not needed. FireRed remains a little better at keeping English terms verbatim inside Chinese speech. As with FireRed, streaming mode and languages other than Chinese and English still use Cohere.
+
 中文场景启用这两项后,转写质量(尤其是字面忠实度)和标点完整度都会显著好于默认配置。完全离线,无需 LLM。
 
 > Use the toggles together. FireRed gives the most accurate Chinese characters; the punctuation model adds the marks FireRed itself never produces.
