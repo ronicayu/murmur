@@ -201,22 +201,31 @@ final class LongRecordingServiceTests: XCTestCase {
         }
     }
 
-    func test_manual_stop_does_not_report_autoStop() async throws {
-        // Arrange
-        let recorder = MockAVRecorderBridge()
-        let (service, reachCap) = makeServiceWithManualCap(recorder: recorder)
-        sut = service
+    func test_manual_stop_cancels_the_cap_of_that_recording() async throws {
+        // Arrange — the cap of each recording is reached when its gate opens
+        mockDiskCheck.freeBytes = 2 * 1024 * 1024 * 1024
+        let firstCap = TestGate()
+        let caps = LockedCaps([firstCap, TestGate()])
+        sut = LongRecordingService(
+            outputDirectory: tempDir,
+            diskChecker: mockDiskCheck,
+            recorderFactory: { url, settings in MockAVRecorderBridge() },
+            autoStopSleep: { _ in await caps.next().wait() }
+        )
         var autoStopCount = 0
         sut.onAutoStop = { _ in autoStopCount += 1 }
         try await sut.startRecording()
 
-        // Act — the owner stops first; the cap is reached afterwards
+        // Act — the owner stops the first recording and starts a second one;
+        // only then does the first recording's cap end its wait
         _ = try await sut.stopRecording()
-        reachCap()
-        for _ in 0..<50 { await Task.yield() }
+        try await sut.startRecording()
+        firstCap.open()
+        try await Task.sleep(for: .milliseconds(200))
 
-        // Assert
+        // Assert — the first cap must not end the second recording
         XCTAssertEqual(autoStopCount, 0, "onAutoStop is only for the duration cap")
+        _ = try await sut.stopRecording()
     }
 
     // MARK: - file ownership
@@ -266,24 +275,22 @@ final class LongRecordingServiceTests: XCTestCase {
 
 // MARK: - Test doubles
 
+/// Hands out one gate per recording, in order.
+private final class LockedCaps: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining: [TestGate]
+
+    init(_ gates: [TestGate]) { remaining = gates }
+
+    func next() -> TestGate {
+        lock.withLock { remaining.isEmpty ? TestGate() : remaining.removeFirst() }
+    }
+}
+
 final class MockDiskSpaceChecker: DiskSpaceChecking {
     var freeBytes: Int64 = 0
 
     func availableCapacityBytes() throws -> Int64 {
         return freeBytes
-    }
-}
-
-final class MockAVRecorderBridge: AVRecorderBridging {
-    var didStart = false
-    var didStop = false
-
-    func prepareToRecord() -> Bool { true }
-    func record() -> Bool {
-        didStart = true
-        return true
-    }
-    func stop() {
-        didStop = true
     }
 }
