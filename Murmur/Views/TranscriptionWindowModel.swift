@@ -310,17 +310,6 @@ final class TranscriptionWindowModel: ObservableObject {
             try? historyService.updateStatus(id: superseded.entryID, status: .failed)
         }
 
-        // The model detects the language; the user's "Languages you speak"
-        // only tell it which scripts to expect.
-        let hint = SpokenLanguages.hint(for: SpokenLanguages.current())
-        windowState = .transcribing(progress: nil)
-
-        // P0 fix: pause voice input (global hotkey) for the duration of
-        // transcription. Recording uses only AVAudioRecorder and does not
-        // compete with the model — so we must NOT pause during recording,
-        // only here at transcription-start.
-        coordinator.beginWindowTranscription()
-
         let source: AudioSource
         let entryID: UUID
         if let recording = takePendingRecording(at: audioURL) {
@@ -341,6 +330,44 @@ final class TranscriptionWindowModel: ObservableObject {
                 m4aPath: nil
             ))
         }
+
+        startTranscription(audioURL: audioURL, entryID: entryID, source: source)
+    }
+
+    /// The audio of an entry whose transcription failed, when it is Murmur's
+    /// own recording and is still on disk. `nil` means there is nothing to
+    /// retry: a file the user picked is never kept.
+    func retryableAudio(for entry: TranscriptionEntry) -> URL? {
+        guard entry.status == .failed, let path = entry.m4aPath else { return nil }
+        let url = URL(fileURLWithPath: path)
+        guard recordingService.ownsRecording(at: url),
+              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
+    }
+
+    /// Transcribes the kept recording of a failed entry again, into the same
+    /// entry. Does nothing while a recording or a transcription is under way.
+    func retryTranscription(of entry: TranscriptionEntry) {
+        switch windowState {
+        case .idle, .result: break
+        default: return
+        }
+        guard activeTranscription == nil, let url = retryableAudio(for: entry) else { return }
+        try? historyService.updateStatus(id: entry.id, status: .inProgress)
+        startTranscription(audioURL: url, entryID: entry.id, source: .ownRecording)
+    }
+
+    private func startTranscription(audioURL: URL, entryID: UUID, source: AudioSource) {
+        // The model detects the language; the user's "Languages you speak"
+        // only tell it which scripts to expect.
+        let hint = SpokenLanguages.hint(for: SpokenLanguages.current())
+        windowState = .transcribing(progress: nil)
+
+        // P0 fix: pause voice input (global hotkey) for the duration of
+        // transcription. Recording uses only AVAudioRecorder and does not
+        // compete with the model — so we must NOT pause during recording,
+        // only here at transcription-start.
+        coordinator.beginWindowTranscription()
 
         let session = TranscriptionSession(
             generation: nextGeneration,

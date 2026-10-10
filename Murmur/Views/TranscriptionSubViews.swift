@@ -530,6 +530,8 @@ struct ResultView: View {
     let isHistoryMode: Bool
     let onNew: () -> Void
     let onBack: () -> Void
+    /// Set when the entry failed and its recording was kept.
+    var onRetry: (() -> Void)? = nil
 
     @State private var copyButtonLabel = "Copy All"
 
@@ -554,10 +556,28 @@ struct ResultView: View {
                     .foregroundStyle(.secondary)
                 }
                 Spacer()
+                if let onRetry {
+                    Button("Retry", systemImage: "arrow.clockwise", action: onRetry)
+                        .help("Transcribe the kept recording again")
+                }
             }
             .padding(.horizontal, 20)
             .padding(.top, 16)
             .padding(.bottom, 12)
+
+            if entry.status == .failed {
+                Label(
+                    onRetry == nil
+                        ? "Transcription failed."
+                        : "Transcription failed. The recording was kept.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
+            }
 
             Divider()
 

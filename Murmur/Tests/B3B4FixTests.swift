@@ -8,7 +8,7 @@ import Combine
 // backend's result authoritative via the state machine.
 //
 // COVERAGE NOTE: States .downloading, .verifying, .corrupt, and .error are
-// private(set) and can only be reached via real async flows (download(), verify()).
+// private(set) and can only be reached via the real async download() flow.
 // Tests for those states require a test seam in ModelManager. See handoff
 // 062_QA_EN_b4-state-seam-request.md for the EN ask.
 

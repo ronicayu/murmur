@@ -428,11 +428,13 @@ final class ModelDownloadFlowTests: XCTestCase {
     private func install(
         listing: Data? = nil,
         stallTimeout: TimeInterval = 90,
+        pinned: [String: HFDownload.Checksum] = [:],
         makeProcess: @escaping @MainActor (_ firstDestination: String) -> Process = { _ in shell("exit 0") }
     ) {
         let listing = listing ?? self.listing
         let recorder = self.recorder!
         var environment = ModelManager.DownloadEnvironment()
+        environment.pinnedChecksums = pinned
         environment.fetchListing = { _ in listing }
         environment.makeProcess = { arguments in
             recorder.calls.append(arguments)
@@ -444,6 +446,44 @@ final class ModelDownloadFlowTests: XCTestCase {
 
     private func exists(_ path: String) -> Bool {
         FileManager.default.fileExists(atPath: directory.appendingPathComponent(path).path)
+    }
+
+    // MARK: Checksums pinned in the source
+
+    func test_download_listingDisagreesWithAPinnedChecksum_isRejectedBeforeAnyFetch() async throws {
+        // The files on disk match the listing, so only the pin can reject them.
+        try plantRequiredFiles()
+        install(pinned: ["encoder.int8.onnx": .sha256(String(repeating: "0", count: 64))])
+
+        do {
+            try await manager.download()
+            XCTFail("a listing that disagrees with a pinned checksum must fail the download")
+        } catch {}
+
+        XCTAssertNotEqual(manager.state, .ready)
+        XCTAssertTrue(recorder.calls.isEmpty, "nothing may be fetched on the word of that listing")
+    }
+
+    func test_firstPinMismatch_namesOnlyAFileWhoseChecksumDiffers() {
+        let a = HFDownload.File(path: "a", size: 1, checksum: .sha256("aa"))
+        let b = HFDownload.File(path: "b", size: 1, checksum: .gitBlobSHA1("bb"))
+
+        XCTAssertNil(HFDownload.firstPinMismatch(in: [a, b], pinned: [:]))
+        XCTAssertNil(HFDownload.firstPinMismatch(
+            in: [a, b], pinned: ["a": .sha256("aa"), "b": .gitBlobSHA1("bb")]
+        ))
+        XCTAssertEqual(HFDownload.firstPinMismatch(in: [a, b], pinned: ["b": .gitBlobSHA1("cc")]), "b")
+        // The same digits as another kind of checksum are not a match.
+        XCTAssertEqual(HFDownload.firstPinMismatch(in: [a, b], pinned: ["a": .gitBlobSHA1("aa")]), "a")
+    }
+
+    func test_everyRequiredFile_hasAPinnedChecksum() {
+        XCTAssertEqual(
+            Set(ModelBackend.qwen3.pinnedChecksums.keys), Set(ModelBackend.qwen3.requiredFiles)
+        )
+        XCTAssertEqual(
+            Set(AuxiliaryModel.sileroVad.pinnedChecksums.keys), Set(AuxiliaryModel.sileroVad.requiredFiles)
+        )
     }
 
     // MARK: Accepting a download
@@ -508,14 +548,13 @@ final class ModelDownloadFlowTests: XCTestCase {
         XCTAssertTrue(exists("decoder.int8.onnx"), "a short file is kept so the next attempt can resume it")
     }
 
-    func test_unverifiedDownload_isNotBlessedByManifestMigration() async throws {
+    func test_unverifiedDownload_isNotAModelAtTheNextLaunch() async throws {
         // A failed download leaves every required file name on disk, one of
-        // them wrong. The launch-time migration must not turn that into a model.
+        // them wrong. Looking at the directory again must not make it a model.
         try plantRequiredFiles(except: "decoder.int8.onnx")
         install { destination in shell("printf 'con' > \"$1\"", [destination]) }
         try? await manager.download()
 
-        manager.migrateToManifestIfNeeded(for: .qwen3)
         manager.refreshState()
 
         XCTAssertNil(manager.loadManifest(for: .qwen3))
@@ -602,6 +641,7 @@ final class ModelDownloadFlowTests: XCTestCase {
         let listing = self.listing
         let recorder = self.recorder!
         var environment = ModelManager.DownloadEnvironment()
+        environment.pinnedChecksums = [:]
         environment.fetchListing = { [manager] _ in
             manager!.cancelDownload()
             return listing
@@ -626,6 +666,7 @@ final class ModelDownloadFlowTests: XCTestCase {
 
     func test_cancelDuringFailingListing_endsNotDownloaded_notError() async throws {
         var environment = ModelManager.DownloadEnvironment()
+        environment.pinnedChecksums = [:]
         environment.fetchListing = { [manager] _ in
             manager!.cancelDownload()
             throw URLError(.timedOut)
@@ -735,6 +776,7 @@ final class AuxiliaryDownloadFlowTests: XCTestCase {
         let listing = json([listingEntry("onnx/model.onnx", model, lfs: true)])
         let destination = directory.appendingPathComponent("onnx/model.onnx").path
         var environment = ModelManager.DownloadEnvironment()
+        environment.pinnedChecksums = [:]
         environment.fetchListing = { _ in listing }
         environment.makeProcess = { _ in
             shell("mkdir -p \"$(dirname \"$1\")\" && printf '%s' \"$2\" > \"$1\"", [destination, payload])

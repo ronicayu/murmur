@@ -78,6 +78,15 @@ enum HFDownload {
         return files
     }
 
+    /// Path of the first listed file whose checksum differs from its pinned
+    /// one. A file without a pin is not checked here.
+    static func firstPinMismatch(in files: [File], pinned: [String: Checksum]) -> String? {
+        files.first { file in
+            guard let expected = pinned[file.path] else { return false }
+            return file.checksum != expected
+        }?.path
+    }
+
     private static func checksum(of entry: [String: Any]) -> Checksum? {
         if let lfs = entry["lfs"] {
             guard let oid = (lfs as? [String: Any])?["oid"] as? String, isHex(oid, length: 64) else { return nil }

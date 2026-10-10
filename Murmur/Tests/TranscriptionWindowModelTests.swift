@@ -389,6 +389,69 @@ final class TranscriptionWindowModelTests: XCTestCase {
         }
     }
 
+    // MARK: - retry of a failed transcription
+
+    /// Records, fails the transcription, and returns the failed entry.
+    private func failOwnRecording() async throws -> TranscriptionEntry {
+        let url = try await recordOwnAudio(with: sut)
+        spyTranscription.stubbedError = MurmurError.transcriptionFailed("engine failed")
+        sut.beginTranscription(audioURL: url)
+        await drainMainActor()
+        spyTranscription.stubbedError = nil
+        return try XCTUnwrap(historyService.getAll().first)
+    }
+
+    func test_retry_transcribes_the_kept_recording_into_the_same_entry() async throws {
+        // Arrange
+        let failed = try await failOwnRecording()
+        XCTAssertEqual(failed.status, .failed)
+        let audio = try XCTUnwrap(sut.retryableAudio(for: failed))
+        spyTranscription.stubbedResult = TranscriptionResult(
+            text: "second attempt", language: .english, durationMs: 10
+        )
+
+        // Act
+        sut.retryTranscription(of: failed)
+        await drainMainActor()
+
+        // Assert
+        let all = historyService.getAll()
+        XCTAssertEqual(all.count, 1, "A retry must not add a second entry")
+        XCTAssertEqual(all[0].id, failed.id)
+        XCTAssertEqual(all[0].status, .completed)
+        XCTAssertEqual(all[0].text, "second attempt")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: audio.path),
+                       "The recording is deleted once it is transcribed")
+    }
+
+    func test_failed_upload_has_nothing_to_retry() async throws {
+        // Arrange — a file the user picked is never kept by Murmur
+        spyTranscription.stubbedError = MurmurError.transcriptionFailed("engine failed")
+        sut.beginTranscription(audioURL: makeUserFile())
+        await drainMainActor()
+        let failed = try XCTUnwrap(historyService.getAll().first)
+        XCTAssertEqual(failed.status, .failed)
+
+        // Act + Assert
+        XCTAssertNil(sut.retryableAudio(for: failed))
+    }
+
+    func test_retry_does_nothing_while_recording() async throws {
+        // Arrange
+        let failed = try await failOwnRecording()
+        sut.startRecording()
+        await drainMainActor()
+
+        // Act
+        sut.retryTranscription(of: failed)
+        await drainMainActor()
+
+        // Assert
+        let entry = try XCTUnwrap(historyService.getAll().first { $0.id == failed.id })
+        XCTAssertEqual(entry.status, .failed)
+        XCTAssertNotNil(sut.retryableAudio(for: entry))
+    }
+
     // MARK: - cancelTranscription
 
     func test_cancelTranscription_deletes_active_entry_and_transitions_to_idle() async throws {

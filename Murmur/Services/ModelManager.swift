@@ -60,6 +60,22 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
         ]
     }
 
+    /// The checksum of every required file at `modelRevision`. The download
+    /// takes the checksums to verify against from the Hugging Face listing;
+    /// a listing that disagrees with these is rejected, so what a shipped app
+    /// accepts as the model does not depend on what the server answers.
+    /// Update together with `modelRevision`.
+    var pinnedChecksums: [String: HFDownload.Checksum] {
+        [
+            "conv_frontend.onnx": .sha256("d22dc4423e0940e49884e903d2ea2f7e5567c14fc1aed97e4e26d6b8f208ef9e"),
+            "encoder.int8.onnx": .sha256("60748d3e6744a57c9c91e1b17424a6c2990567e8adceb0783940c03ed98fa9d9"),
+            "decoder.int8.onnx": .sha256("4f6885be5959ae26af3089d38ee7972c5fafbeeb1cf8d5e76eab6d8b61ca5771"),
+            "tokenizer/vocab.json": .sha256("ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"),
+            "tokenizer/merges.txt": .gitBlobSHA1("31349551d90c7606f325fe0f11bbb8bd5fa0d7c7"),
+            "tokenizer/tokenizer_config.json": .sha256("4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c"),
+        ]
+    }
+
     /// Whether this model requires a HuggingFace token (gated model).
     var requiresHFLogin: Bool { false }
 
@@ -110,6 +126,11 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
     var allowPatterns: [String] { ["onnx/model.onnx"] }
 
     var requiredFiles: [String] { ["onnx/model.onnx"] }
+
+    /// See `ModelBackend.pinnedChecksums`.
+    var pinnedChecksums: [String: HFDownload.Checksum] {
+        ["onnx/model.onnx": .sha256("a4a068cd6cf1ea8355b84327595838ca748ec29a25bc91fc82e6c299ccdc5808")]
+    }
 }
 
 enum ModelState: Sendable, Equatable {
@@ -234,6 +255,10 @@ final class ModelManager: ObservableObject {
         // 90s gives a grace period for momentary network hiccups without leaving the
         // user stuck indefinitely.
         var stallTimeout: TimeInterval = 90
+        /// Replaces the checksums pinned in the source (`pinnedChecksums` of
+        /// the model), which no made-up test file can match. `nil` in
+        /// production.
+        var pinnedChecksums: [String: HFDownload.Checksum]?
     }
     private var downloadEnvironment = DownloadEnvironment()
 
@@ -270,7 +295,7 @@ final class ModelManager: ObservableObject {
     /// Persisted manifest written to `manifest.json` after a successful download.
     ///
     /// `isModelDownloaded(for:)` reads this file on the hot path (size-only check).
-    /// `verify()` recomputes SHA-256 on every entry on the cold path.
+    /// The SHA-256 values are the ones the download verified.
     struct ModelManifest: Codable {
         let version: Int
         let backend: String
@@ -403,32 +428,6 @@ final class ModelManager: ObservableObject {
         return manifestIsValid(for: backend)
     }
 
-    /// One-time migration: if required files exist on disk but no manifest is
-    /// present, compute hashes and write the manifest so the user is not forced
-    /// into a redownload. Logs clearly and sets state to .ready on success.
-    /// Falls through to .notDownloaded if hashing fails or files are absent.
-    func migrateToManifestIfNeeded(for backend: ModelBackend) {
-        guard loadManifest(for: backend) == nil else { return }
-
-        let dir = modelDirectory(for: backend)
-        // Files of a download that never passed verification must not be
-        // blessed with a manifest; the next download() checks and completes them.
-        guard !FileManager.default.fileExists(atPath: dir.appendingPathComponent(Self.incompleteMarker).path) else { return }
-        let requiredFilesPresent = backend.requiredFiles.allSatisfy { file in
-            FileManager.default.fileExists(atPath: dir.appendingPathComponent(file).path)
-        }
-        guard requiredFilesPresent else { return }
-
-        logger.info("Manifest migration: hashing existing files for \(backend.rawValue)…")
-        do {
-            let manifest = try buildManifest(for: backend)
-            try writeManifest(manifest, for: backend)
-            logger.info("Manifest migration complete for \(backend.rawValue): \(manifest.files.count) files recorded")
-        } catch {
-            logger.error("Manifest migration failed for \(backend.rawValue): \(error) — will require redownload")
-        }
-    }
-
     init() {
         // Downgrade the VAD toggle to OFF if its model is not actually on disk —
         // guards against stale state when the folder was deleted by hand.
@@ -444,13 +443,6 @@ final class ModelManager: ObservableObject {
             UserDefaults.standard.set(false, forKey: "useVAD")
         }
         self.useVAD = effectiveVAD
-
-        // FU-04 manifest migration: if existing downloads predate the manifest
-        // system, generate the manifest from on-disk files so users are not
-        // forced to redownload 1.5–4 GB. Runs once per backend, noop thereafter.
-        for backend in ModelBackend.allCases {
-            migrateToManifestIfNeeded(for: backend)
-        }
 
         refreshState()
 
@@ -526,7 +518,8 @@ final class ModelManager: ObservableObject {
         do {
             files = try await listFiles(
                 repo: backend.modelRepo, revision: backend.modelRevision,
-                patterns: backend.allowPatterns, required: backend.requiredFiles, into: directory
+                patterns: backend.allowPatterns, required: backend.requiredFiles,
+                pinned: backend.pinnedChecksums, into: directory
             )
         } catch {
             try throwIfCancelled(epoch)
@@ -810,73 +803,6 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    func verify() async throws -> Bool {
-        let backend = activeBackend
-        state = .verifying
-        logger.info("Verifying model (\(backend.rawValue))…")
-
-        let dir = modelDirectory(for: backend)
-
-        // Check that required files exist before attempting to hash.
-        for file in backend.requiredFiles {
-            let path = dir.appendingPathComponent(file)
-            if !FileManager.default.fileExists(atPath: path.path) {
-                logger.warning("Missing required model file: \(file)")
-                state = .corrupt
-                statusMessage = "Corrupt: missing \(file)"
-                return false
-            }
-        }
-
-        // Cold path: build a fresh manifest from disk, compare against stored manifest.
-        // If no manifest exists yet (first download), write one and trust it.
-        let freshManifest: ModelManifest
-        do {
-            freshManifest = try buildManifest(for: backend)
-        } catch {
-            logger.error("verify() failed to hash model files: \(error)")
-            state = .corrupt
-            statusMessage = "Corrupt: could not read model files"
-            return false
-        }
-
-        if let storedManifest = loadManifest(for: backend) {
-            // Compare SHA-256 of every file in the stored manifest against fresh hashes.
-            var mismatches: [String] = []
-            for (relative, storedEntry) in storedManifest.files {
-                if let freshEntry = freshManifest.files[relative] {
-                    if freshEntry.sha256 != storedEntry.sha256 {
-                        mismatches.append(relative)
-                        logger.warning("SHA-256 mismatch: \(relative) stored=\(storedEntry.sha256) actual=\(freshEntry.sha256)")
-                    }
-                } else {
-                    mismatches.append(relative)
-                    logger.warning("File in manifest but missing on disk: \(relative)")
-                }
-            }
-            if !mismatches.isEmpty {
-                let firstMismatch = mismatches.first ?? "unknown"
-                state = .corrupt
-                statusMessage = "Corrupt: hash mismatch in \(firstMismatch)"
-                return false
-            }
-            logger.info("verify(): all \(storedManifest.files.count) files match stored manifest")
-        } else {
-            // No manifest yet — write one from the freshly computed hashes.
-            do {
-                try writeManifest(freshManifest, for: backend)
-                logger.info("verify(): wrote initial manifest for \(backend.rawValue) with \(freshManifest.files.count) files")
-            } catch {
-                logger.error("verify(): failed to write manifest: \(error)")
-                // Non-fatal: verification still passes; next call will retry migration.
-            }
-        }
-
-        state = .ready
-        logger.info("Model verification passed (\(backend.rawValue))")
-        return true
-    }
-
     func delete() throws {
         if FileManager.default.fileExists(atPath: modelDirectory.path) {
             try FileManager.default.removeItem(at: modelDirectory)
@@ -941,9 +867,11 @@ final class ModelManager: ObservableObject {
 
     /// Lists the files of `repo` at `revision` that match `patterns`. Every
     /// name in `required` must be among them, so a short or paged listing
-    /// fails here instead of producing a model with files missing.
+    /// fails here instead of producing a model with files missing. A file
+    /// whose listed checksum differs from the `pinned` one fails here too.
     private func listFiles(
-        repo: String, revision: String, patterns: [String]?, required: [String], into directory: URL
+        repo: String, revision: String, patterns: [String]?, required: [String],
+        pinned: [String: HFDownload.Checksum], into directory: URL
     ) async throws -> [HFDownload.File] {
         guard let url = HFDownload.listingURL(repo: repo, revision: revision) else {
             throw MurmurError.transcriptionFailed("Invalid model repository: \(repo)")
@@ -952,6 +880,12 @@ final class ModelManager: ObservableObject {
         let files = try HFDownload.parseListing(data, patterns: patterns, into: directory)
         if let missing = required.first(where: { name in !files.contains { $0.path == name } }) {
             throw MurmurError.transcriptionFailed("\(missing) is not in the file listing of \(repo)")
+        }
+        let pins = downloadEnvironment.pinnedChecksums ?? pinned
+        if let changed = HFDownload.firstPinMismatch(in: files, pinned: pins) {
+            throw MurmurError.transcriptionFailed(
+                "The file listing of \(repo) gives a checksum for \(changed) that this version of Murmur does not expect"
+            )
         }
         return files
     }
@@ -1217,7 +1151,8 @@ final class ModelManager: ObservableObject {
         do {
             files = try await listFiles(
                 repo: aux.modelRepo, revision: aux.modelRevision,
-                patterns: aux.allowPatterns, required: aux.requiredFiles, into: dir
+                patterns: aux.allowPatterns, required: aux.requiredFiles,
+                pinned: aux.pinnedChecksums, into: dir
             )
         } catch {
             throw fail(Self.downloadListingErrorMessage(error))

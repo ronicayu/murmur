@@ -6,6 +6,21 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [Unreleased]
+
+### Added
+- **Retry for a failed file transcription.** When transcription of a recording made in the Transcription window fails, the recording is kept. The history context menu and the result view now have Retry, which transcribes it again into the same entry.
+
+### Fixed
+- **Onboarding did not save the replacement shortcut.** On the "Hotkey Conflict Detected" screen, the shortcut you recorded was not put into effect, so Ctrl+Space stayed the hotkey.
+- **A second recording could start while the first start was stuck.** When the audio engine took more than 5 s to start, pressing the hotkey again entered the engine a second time. A new start is now refused until the stuck one returns.
+
+### Security
+- **Model checksums are fixed in the app.** The download took the checksums to verify against from the Hugging Face file listing. The app now also holds the checksum of every model file and rejects a listing that disagrees.
+
+### Removed
+- Launch no longer writes a manifest for model files that have none. Only a download that passed verification makes a model usable.
+
 ## [0.5.0] — 2026-10-10
 
 Murmur now runs a single speech model, Qwen3-ASR, and streaming shows a live preview instead of typing as you speak.
