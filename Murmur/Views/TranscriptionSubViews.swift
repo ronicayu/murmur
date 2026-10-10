@@ -133,7 +133,7 @@ struct RecordingView: View {
                 Circle()
                     .fill(Color.red)
                     .frame(width: 10, height: 10)
-                    .symbolEffect(.pulse)
+                    .pulsing()
                 Text("Recording")
                     .font(.system(.headline, design: .rounded))
                     .foregroundStyle(.red)
@@ -448,6 +448,9 @@ struct TranscribingView: View {
                     }
                 }
                 .frame(maxWidth: 400, maxHeight: 4)
+                .accessibilityElement()
+                .accessibilityLabel("Transcription progress")
+                .accessibilityValue("\(Int((progressFraction * 100).rounded())) percent")
 
                 HStack {
                     Text(remainingTimeLabel)
@@ -593,7 +596,7 @@ struct ResultView: View {
                 actionButton(
                     icon: "doc.on.doc",
                     label: copyButtonLabel,
-                    shortcut: "C"
+                    shortcut: nil
                 ) {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(entry.text, forType: .string)
@@ -609,7 +612,8 @@ struct ResultView: View {
                 actionButton(
                     icon: "square.and.arrow.up",
                     label: "Export .txt",
-                    shortcut: "S"
+                    shortcut: "S",
+                    keyEquivalent: "s"
                 ) {
                     exportText(entry)
                 }
@@ -635,6 +639,7 @@ struct ResultView: View {
         icon: String,
         label: String,
         shortcut: String?,
+        keyEquivalent: KeyEquivalent? = nil,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -655,6 +660,7 @@ struct ResultView: View {
         }
         .buttonStyle(.plain)
         .frame(maxWidth: .infinity)
+        .keyboardShortcut(keyEquivalent.map { KeyboardShortcut($0, modifiers: .command) })
     }
 
     private func durationLabel(_ s: TimeInterval) -> String {
@@ -718,6 +724,7 @@ private extension View {
             Button("", action: action)
                 .keyboardShortcut(key, modifiers: modifiers)
                 .opacity(0)
+                .accessibilityHidden(true)
         )
     }
 }

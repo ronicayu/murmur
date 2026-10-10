@@ -124,12 +124,12 @@ struct MenuBarView: View {
             Image(systemName: "mic.circle.fill")
                 .font(.system(size: 24))
                 .foregroundStyle(.red)
-                .symbolEffect(.pulse)
+                .pulsing()
         case .streaming:
             Image(systemName: "waveform")
                 .font(.system(size: 22))
                 .foregroundStyle(.orange)
-                .symbolEffect(.pulse, options: .repeating)
+                .pulsing()
         case .transcribing:
             ProgressView()
                 .controlSize(.small)
