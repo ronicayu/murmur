@@ -14,7 +14,7 @@ import Darwin
 //      when isDownloadActive is true when the Task fires (C8 race fix)
 //
 // Each test uses:
-//   - A real Python subprocess (`python3`) as the stand-in for `snapshot_download`.
+//   - A real subprocess (`/bin/sleep`, `/bin/sh`) as the stand-in for the downloader.
 //   - `__testing_injectDownloadProcess` to inject the live Process into ModelManager.
 //   - `__testing_setModelDirectory` to redirect all file operations to a temp dir.
 //   - `__testing_setState` to put ModelManager into `.downloading` without a real download.
@@ -26,37 +26,36 @@ import Darwin
 // destroyed in tearDown. The real ~/Library/Application Support/Murmur path is
 // never touched.
 
-// MARK: - Python availability helper
+// MARK: - Stand-in subprocesses
 
-private func findPython3() -> URL? {
-    let candidates = [
-        "/usr/bin/python3",
-        "/opt/homebrew/bin/python3",
-        "/usr/local/bin/python3",
-        // miniforge / conda — picked up on developer machines
-        "/Users/\(NSUserName())/miniforge3/bin/python3",
-        "/Users/\(NSUserName())/opt/anaconda3/bin/python3",
-    ]
-    for path in candidates {
-        if FileManager.default.fileExists(atPath: path) {
-            return URL(fileURLWithPath: path)
-        }
-    }
-    // Last resort: ask the shell (slow but reliable on PATH-configured machines)
+/// A process that runs for 30 s unless it is signalled.
+private func makeSleeper() -> Process {
     let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    proc.arguments = ["which", "python3"]
-    let pipe = Pipe()
-    proc.standardOutput = pipe
+    proc.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    proc.arguments = ["30"]
+    proc.standardOutput = FileHandle.nullDevice
     proc.standardError = FileHandle.nullDevice
-    guard (try? proc.run()) != nil else { return nil }
-    proc.waitUntilExit()
-    guard proc.terminationStatus == 0 else { return nil }
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    let path = String(data: data, encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    guard !path.isEmpty else { return nil }
-    return URL(fileURLWithPath: path)
+    return proc
+}
+
+/// Starts a shell that ignores SIGTERM, so only SIGKILL ends it, and returns
+/// once the shell has said that the signal is ignored. Without that wait, a
+/// SIGTERM sent right after launch ends the shell before its `trap` runs.
+/// The shell's `sleep 1` children end by themselves within a second.
+private func runSigtermIgnorer() throws -> Process {
+    let proc = Process()
+    let ready = Pipe()
+    proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+    proc.arguments = ["-c", "trap '' TERM; echo ready; while :; do sleep 1 >/dev/null; done"]
+    proc.standardOutput = ready
+    proc.standardError = FileHandle.nullDevice
+    try proc.run()
+    let line = String(decoding: ready.fileHandleForReading.availableData, as: UTF8.self)
+    guard line.hasPrefix("ready") else {
+        proc.terminate()
+        throw CocoaError(.fileReadUnknown)
+    }
+    return proc
 }
 
 // MARK: - Polling helpers
@@ -93,20 +92,10 @@ private func pollUntilDead(pid: Int32, timeoutSeconds: Double) async -> Bool {
 final class DownloadCancelIntegrationTests: XCTestCase {
 
     private var manager: ModelManager!
-    private var python3: URL!
     private var tempDir: URL!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-
-        // Locate python3 — skip the whole class if not available.
-        guard let py = findPython3() else {
-            throw XCTSkip(
-                "python3 not found on this machine — skipping DownloadCancelIntegrationTests. " +
-                "Install python3 via Xcode Command Line Tools, Homebrew, or the python.org installer."
-            )
-        }
-        python3 = py
 
         // Create a unique temp directory for this test run.
         // All model directory operations are redirected here via __testing_setModelDirectory.
@@ -148,12 +137,8 @@ final class DownloadCancelIntegrationTests: XCTestCase {
     ///   b. The subprocess is dead within 3 seconds (kill(pid,0) == -1/ESRCH).
     ///   c. The model directory is removed within 3 seconds (cleanup Task ran).
     func test_cancelDownload_stateResets_processKilled_dirRemoved() async throws {
-        // Arrange — spawn a long-lived Python subprocess.
-        let proc = Process()
-        proc.executableURL = python3
-        proc.arguments = ["-c", "import time; time.sleep(30)"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
+        // Arrange — spawn a long-lived subprocess.
+        let proc = makeSleeper()
         try proc.run()
         let pid = proc.processIdentifier
         XCTAssertTrue(proc.isRunning, "Precondition: process must be running after proc.run()")
@@ -200,19 +185,11 @@ final class DownloadCancelIntegrationTests: XCTestCase {
 
     // MARK: - Test 2: SIGKILL escalation
 
-    /// Verifies that a SIGTERM-ignoring process is force-killed within 2.5 seconds,
-    /// proving the 2-second SIGKILL escalation path fired.
-    func test_cancelDownload_sigtermIgnored_sigkillFiredWithin2500ms() async throws {
-        // Arrange — spawn a Python process that explicitly ignores SIGTERM.
-        let proc = Process()
-        proc.executableURL = python3
-        proc.arguments = [
-            "-c",
-            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"
-        ]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        try proc.run()
+    /// Verifies that a SIGTERM-ignoring process is force-killed by the
+    /// SIGKILL escalation.
+    func test_cancelDownload_sigtermIgnored_processIsKilled() async throws {
+        // Arrange — spawn a process that ignores SIGTERM.
+        let proc = try runSigtermIgnorer()
         let pid = proc.processIdentifier
         XCTAssertTrue(proc.isRunning, "Precondition: SIGTERM-ignoring process must be running")
 
@@ -228,15 +205,17 @@ final class DownloadCancelIntegrationTests: XCTestCase {
             "State must reset synchronously even when the subprocess ignores SIGTERM"
         )
 
-        // Assert: process must die within 2.5 seconds. The SIGKILL escalation fires
-        // after the 2-second poll window, so the process should be dead shortly after
-        // that. 2.5s gives a 500ms grace window on top of the escalation window.
-        let processDied = await pollUntilDead(pid: pid, timeoutSeconds: 2.5)
+        // Assert: the process dies, and it dies by SIGKILL. The limit is far
+        // above the 2-second escalation window so a slow machine does not
+        // fail the test; what proves the escalation is the signal.
+        let processDied = await pollUntilDead(pid: pid, timeoutSeconds: 15)
         XCTAssertTrue(
             processDied,
-            "SIGTERM-ignoring process (pid: \(pid)) must be killed within 2.5 seconds " +
-            "— SIGKILL escalation must have fired after the 2-second wait window"
+            "SIGTERM-ignoring process (pid: \(pid)) must be killed by the SIGKILL escalation"
         )
+        proc.waitUntilExit()
+        XCTAssertEqual(proc.terminationReason, .uncaughtSignal)
+        XCTAssertEqual(proc.terminationStatus, SIGKILL)
 
         // tempDir may have been deleted by cleanup Task — set to nil to prevent
         // tearDown double-remove (tearDown checks fileExists before removeItem).
@@ -253,11 +232,7 @@ final class DownloadCancelIntegrationTests: XCTestCase {
         try "exists".write(to: sentinel, atomically: true, encoding: .utf8)
 
         // Spawn a subprocess (doesn't need to do anything useful).
-        let proc = Process()
-        proc.executableURL = python3
-        proc.arguments = ["-c", "import time; time.sleep(30)"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
+        let proc = makeSleeper()
         try proc.run()
 
         manager.__testing_injectDownloadProcess(proc)

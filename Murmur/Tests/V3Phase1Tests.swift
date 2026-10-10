@@ -6,7 +6,7 @@ import AppKit
 // MARK: - V3 Phase 1 Tests
 //
 // Covers:
-//   1. AudioBufferAccumulator (production file, extracted from Phase 0 prototype)
+//   1. AudioBufferAccumulator 
 //   2. StreamingTranscriptionCoordinator state machine
 //   3. TextInjectionService streaming extensions (appendText / replaceRange)
 //   4. V1UsageCounter — discovery badge logic
@@ -18,9 +18,6 @@ import AppKit
 
 // MARK: - 1. AudioBufferAccumulator (production file)
 
-// V3Phase0Tests.swift declares a test-only `AudioBufferAccumulator` prototype in
-// this module, which an unqualified name would pick. Every use in this file is
-// qualified with the module name so that it means the production type.
 final class AudioBufferAccumulatorProductionTests: XCTestCase {
 
     private let sampleRate: Double = 16000
@@ -41,7 +38,7 @@ final class AudioBufferAccumulatorProductionTests: XCTestCase {
     func test_accumulator_firesCallback_whenChunkThresholdReached() {
         // Arrange
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = Murmur.AudioBufferAccumulator(
+        let accumulator = AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -66,7 +63,7 @@ final class AudioBufferAccumulatorProductionTests: XCTestCase {
 
     func test_accumulator_doesNotFire_beforeThreshold() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = Murmur.AudioBufferAccumulator(
+        let accumulator = AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -83,7 +80,7 @@ final class AudioBufferAccumulatorProductionTests: XCTestCase {
 
     func test_accumulator_flush_returnsPartialBuffer_andClearsState() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = Murmur.AudioBufferAccumulator(
+        let accumulator = AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -108,7 +105,7 @@ final class AudioBufferAccumulatorProductionTests: XCTestCase {
 
     func test_accumulator_firesMultipleCallbacks_whenFeedingMultipleChunksAtOnce() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = Murmur.AudioBufferAccumulator(
+        let accumulator = AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -124,7 +121,7 @@ final class AudioBufferAccumulatorProductionTests: XCTestCase {
     // MARK: - Private helpers
 
     private func feedSilence(
-        to accumulator: Murmur.AudioBufferAccumulator,
+        to accumulator: AudioBufferAccumulator,
         totalSamples: Int,
         fragmentSize: Int
     ) {
@@ -615,10 +612,13 @@ final class CPULoadMonitorTests: XCTestCase {
     }
 
     func test_cpuMonitor_stop_preventsSubsequentCallbacks() async throws {
+        // The load is high from the first reading, and stop() comes long
+        // before the 1 s it must last. A monitor that kept polling after
+        // stop() would fire during the wait below.
         let ticks = FakeCPUTicks.busyNowIdleSinceBoot()
         let monitor = CPULoadMonitor(
             threshold: 0.9,
-            sustainedSeconds: 0.1,
+            sustainedSeconds: 1.0,
             pollInterval: 0.05,
             sampleTicks: { ticks.next() }
         )
@@ -627,18 +627,10 @@ final class CPULoadMonitorTests: XCTestCase {
             monitor.onSustainedHighLoad = { fires.increment() }
         }
         monitor.start()
-        try await Task.sleep(for: .seconds(0.5))
         await MainActor.run { monitor.stop() }
-        // Let a callback that was already in flight when stop() ran land
-        // before taking the baseline.
-        try await Task.sleep(for: .seconds(0.1))
-        let countAtStop = fires.value
-        try await Task.sleep(for: .seconds(0.3))
+        try await Task.sleep(for: .seconds(1.5))
 
-        // After stop, count must not increase
-        let finalCount = fires.value
-        XCTAssertEqual(finalCount, countAtStop,
-            "stop() must prevent further callbacks")
+        XCTAssertEqual(fires.value, 0, "A stopped monitor must not report load")
     }
 }
 
@@ -1526,7 +1518,7 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
 
     func test_accumulator_appendZeroLengthBuffer_isNoOp() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = Murmur.AudioBufferAccumulator(
+        let accumulator = AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -1544,7 +1536,7 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
     // MARK: 17b — flush on empty accumulator returns nil
 
     func test_accumulator_flush_onEmpty_returnsNil() {
-        let accumulator = Murmur.AudioBufferAccumulator(
+        let accumulator = AudioBufferAccumulator(
             samplesPerChunk: Int(sampleRate * 3.0),
             sampleRate: sampleRate
         )
@@ -1556,7 +1548,7 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
 
     func test_accumulator_feedTwoChunksPlusRemainder_flushesRemainder() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = Murmur.AudioBufferAccumulator(
+        let accumulator = AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -1586,7 +1578,7 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
 
     func test_accumulator_replacingOnChunkReady_midAccumulation() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = Murmur.AudioBufferAccumulator(
+        let accumulator = AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -1619,7 +1611,7 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
 
     func test_accumulator_nilOnChunkReady_suppressesDelivery() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = Murmur.AudioBufferAccumulator(
+        let accumulator = AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -1638,7 +1630,7 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
     // MARK: 17f — the callback can be changed while the audio thread appends
 
     func test_accumulator_changingOnChunkReady_whileAppending_isSafe() {
-        let accumulator = Murmur.AudioBufferAccumulator(samplesPerChunk: 160, sampleRate: sampleRate)
+        let accumulator = AudioBufferAccumulator(samplesPerChunk: 160, sampleRate: sampleRate)
         let delivered = LockedCounter()
         let format = self.format!
         let rounds = 2000
@@ -1659,6 +1651,15 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
 
         XCTAssertLessThanOrEqual(delivered.value, rounds,
             "Each appended chunk is delivered at most once, to whichever callback was set")
+
+        // The accumulator still works after the contention: one more chunk
+        // goes exactly once to the callback that is set now.
+        let after = LockedCounter()
+        accumulator.onChunkReady = { _ in after.increment() }
+        let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 160)!
+        buf.frameLength = 160
+        accumulator.append(buf)
+        XCTAssertEqual(after.value, 1)
     }
 }
 
@@ -1700,7 +1701,7 @@ final class StreamingCoordinatorSessionIdentityTests: XCTestCase {
         _ coordinator: StreamingTranscriptionCoordinator,
         incrementalSeconds: Double = 1.0,
         onPreviewText: ((String) -> Void)? = nil
-    ) -> Murmur.AudioBufferAccumulator {
+    ) -> AudioBufferAccumulator {
         coordinator.beginSession(
             language: "en", targetAppPID: getpid(), startOffset: 0, fullWavURL: wavURL,
             incrementalSeconds: incrementalSeconds, onPreviewText: onPreviewText
@@ -2102,74 +2103,3 @@ final class GatedTranscriptionService: TranscriptionServiceProtocol, @unchecked 
     func preloadModel() async throws {}
     func unloadModel() async {}
 }
-
-// MARK: MockTranscriptionService
-
-final class MockTranscriptionService: TranscriptionServiceProtocol, @unchecked Sendable {
-    var stubbedResult: TranscriptionResult = TranscriptionResult(
-        text: "mock text",
-        language: .english,
-        durationMs: 500
-    )
-    var stubbedError: Error?
-    var isModelLoaded: Bool = false
-    /// Optional per-call override — returns a different result for each sequential call.
-    var onTranscribe: ((URL) throws -> TranscriptionResult)?
-
-    func transcribe(audioURL: URL, language: String) async throws -> TranscriptionResult {
-        if let err = stubbedError { throw err }
-        // Clean up the temp file like the real service does
-        try? FileManager.default.removeItem(at: audioURL)
-        if let handler = onTranscribe {
-            return try handler(audioURL)
-        }
-        return stubbedResult
-    }
-
-    func transcribeLong(
-        audioURL: URL,
-        language: String,
-        onProgress: @escaping (TranscriptionProgress) -> Void
-    ) async throws -> TranscriptionResult {
-        if let err = stubbedError { throw err }
-        return stubbedResult
-    }
-
-    func preloadModel() async throws {}
-    func unloadModel() async {}
-}
-
-// MARK: MockTextInjectionService
-
-final class MockTextInjectionService: TextInjectionServiceProtocol,
-                                       StreamingTextInjectionProtocol,
-                                       @unchecked Sendable {
-    var stubbedInjectMethod: InjectionMethod = .clipboard
-    var stubbedAppendText: (() -> Void)?
-    var stubbedReplaceRange: (() -> Void)?
-    var stubbedError: Error?
-
-    private(set) var appendedTexts: [String] = []
-    private(set) var replaceRangeCalls: [(start: Int, length: Int, text: String)] = []
-
-    func inject(text: String) async throws -> InjectionMethod {
-        if let err = stubbedError { throw err }
-        return stubbedInjectMethod
-    }
-
-    func undoLastInjection() async throws {}
-
-    func appendText(_ text: String) async throws {
-        if let err = stubbedError { throw err }
-        guard !text.isEmpty else { return }   // mirrors real implementation guard
-        appendedTexts.append(text)
-        stubbedAppendText?()
-    }
-
-    func replaceRange(start: Int, length: Int, with text: String) async throws {
-        if let err = stubbedError { throw err }
-        replaceRangeCalls.append((start: start, length: length, text: text))
-        stubbedReplaceRange?()
-    }
-}
-
