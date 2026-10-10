@@ -767,57 +767,27 @@ final class ModelManager: ObservableObject {
 
         logger.info("Starting model download from HuggingFace: \(backend.modelRepo) (backend: \(backend.rawValue))")
 
-        statusMessage = "Preparing first-time setup..."
+        statusMessage = "Preparing download..."
 
-        // Ensure bundled Python env exists with all dependencies
-        let pythonBin = try await ensurePythonEnv()
-
-        statusMessage = "Downloading speech model..."
-
-        let allowPatternsArg: String
-        if let patterns = backend.allowPatterns {
-            let quoted = patterns.map { "\"\($0)\"" }.joined(separator: ", ")
-            allowPatternsArg = "allow_patterns=[\(quoted)],"
-        } else {
-            allowPatternsArg = ""
+        // Model files are fetched with the system curl rather than a Python
+        // `snapshot_download`. This needs no pip-installed environment, and both
+        // URLSession (file listing) and /usr/bin/curl (SecureTransport) trust the
+        // macOS keychain, so TLS-intercepting clients such as Cloudflare WARP
+        // work without a custom CA bundle.
+        let process: Process
+        do {
+            process = try await makeHFDownloadProcess(
+                repo: backend.modelRepo, patterns: backend.allowPatterns, into: modelDirectory
+            )
+        } catch {
+            let message = Self.downloadListingErrorMessage(error)
+            logger.error("Model file listing failed: \(String(describing: error))")
+            statusMessage = "Error: \(message)"
+            state = .error(String(message.prefix(200)))
+            throw MurmurError.transcriptionFailed(message)
         }
 
-        let downloadScript = """
-        import sys, json, os, traceback
-        print("[murmur] python", sys.version.split()[0], "starting download", flush=True)
-        print("[murmur] SSL_CERT_FILE=" + repr(os.environ.get("SSL_CERT_FILE")), flush=True)
-        print("[murmur] REQUESTS_CA_BUNDLE=" + repr(os.environ.get("REQUESTS_CA_BUNDLE")), flush=True)
-        from huggingface_hub import snapshot_download
-
-        try:
-            print("[murmur] calling snapshot_download(\(backend.modelRepo))", flush=True)
-            path = snapshot_download(
-                "\(backend.modelRepo)",
-                local_dir="\(modelDirectory.path)",
-                \(allowPatternsArg)
-            )
-            print(json.dumps({"status": "ok", "path": path}), flush=True)
-        except Exception as e:
-            etype = type(e).__name__
-            tb = traceback.format_exc()
-            print("[murmur] download failed: " + etype + ": " + str(e), flush=True)
-            print(tb, flush=True)
-            msg = str(e)
-            if "401" in msg or "gated" in msg.lower() or "restricted" in msg.lower():
-                msg = "Access denied. Please log in and request access at huggingface.co first."
-            elif "404" in msg:
-                msg = "Model not found. Please check your internet connection and try again."
-            elif "CERTIFICATE_VERIFY_FAILED" in msg or "SSLError" in etype or "SSLCertVerificationError" in etype:
-                msg = "TLS certificate verification failed. If you use Cloudflare WARP / Zero Trust or another TLS-intercepting proxy, set Settings → Advanced → Custom CA bundle to a PEM file containing the intercepting root."
-            elif "ConnectionError" in etype or "Timeout" in etype or "NameResolutionError" in etype or "getaddrinfo" in msg:
-                msg = "Could not reach huggingface.co (" + etype + "). Check your network or try again later."
-            print(json.dumps({"status": "error", "error": msg, "type": etype}), flush=True)
-        """
-
-        let process = Process()
-        process.executableURL = pythonBin
-        process.arguments = ["-c", downloadScript]
-        process.environment = pythonSubprocessEnvironment()
+        statusMessage = "Downloading speech model..."
 
         let stdout = Pipe()
         let stderr = Pipe()
@@ -837,9 +807,7 @@ final class ModelManager: ObservableObject {
         let streamStdout = Task {
             for try await line in stdout.fileHandleForReading.bytes.lines {
                 outputAccumulator.appendStdout(line)
-                if line.hasPrefix("[murmur]") || line.hasPrefix("{") {
-                    logger.info("py> \(line)")
-                }
+                logger.info("curl> \(line)")
             }
         }
         let streamStderr = Task {
@@ -847,7 +815,7 @@ final class ModelManager: ObservableObject {
                 outputAccumulator.appendStderr(line)
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if !trimmed.isEmpty {
-                    logger.info("py! \(trimmed)")
+                    logger.info("curl! \(trimmed)")
                 }
             }
         }
@@ -963,8 +931,8 @@ final class ModelManager: ObservableObject {
         }
         streamStdout.cancel()
         streamStderr.cancel()
-        let outputStr = outputAccumulator.stdoutText
         let stderrStr = outputAccumulator.stderrText
+        let outputStr = Self.downloadResultJSON(for: process, stderr: stderrStr)
 
         // Try to parse JSON response from our script
         if let jsonLine = outputStr.components(separatedBy: "\n").last(where: { $0.contains("{") }),
@@ -1233,6 +1201,147 @@ final class ModelManager: ObservableObject {
     /// - Returns: `true` if no progress has been made for at least `timeout` seconds.
     nonisolated static func isStalled(lastProgressAt: Date, now: Date, timeout: TimeInterval) -> Bool {
         return now.timeIntervalSince(lastProgressAt) >= timeout
+    }
+
+    // MARK: - HuggingFace download (native)
+
+    private struct HFFile {
+        let path: String
+        let size: Int64
+    }
+
+    /// Shell-style match of a repo-relative path against HuggingFace
+    /// `allow_patterns`. Like Python's `fnmatch`, `*` also matches `/`.
+    nonisolated static func hfPath(_ path: String, matchesAny patterns: [String]?) -> Bool {
+        guard let patterns else { return true }
+        return patterns.contains { fnmatch($0, path, 0) == 0 }
+    }
+
+    /// Lists the files of `repo` (main branch) that match `patterns`.
+    private func listHFFiles(repo: String, patterns: [String]?) async throws -> [HFFile] {
+        guard let url = URL(string: "https://huggingface.co/api/models/\(repo)/tree/main?recursive=true") else {
+            throw MurmurError.transcriptionFailed("Invalid model repository: \(repo)")
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard status == 200 else {
+            throw MurmurError.transcriptionFailed("huggingface.co returned HTTP \(status) when listing model files")
+        }
+        guard let entries = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            throw MurmurError.transcriptionFailed("Unexpected response when listing model files")
+        }
+        return entries.compactMap { entry -> HFFile? in
+            guard entry["type"] as? String == "file",
+                  let path = entry["path"] as? String,
+                  Self.hfPath(path, matchesAny: patterns)
+            else { return nil }
+            let size = (entry["size"] as? NSNumber)?.int64Value ?? -1
+            return HFFile(path: path, size: size)
+        }
+    }
+
+    /// Builds (but does not start) the subprocess that downloads every file of
+    /// `repo` matching `patterns` into `directory`.
+    ///
+    /// Files already on disk at their full size are skipped; partial files are
+    /// resumed. If nothing is left to fetch, the process is a no-op that exits 0
+    /// so callers can treat both cases the same way.
+    private func makeHFDownloadProcess(repo: String, patterns: [String]?, into directory: URL) async throws -> Process {
+        let files = try await listHFFiles(repo: repo, patterns: patterns)
+        guard !files.isEmpty else {
+            throw MurmurError.transcriptionFailed("No model files found in \(repo)")
+        }
+
+        let fm = FileManager.default
+        var transfers: [String] = []
+        for file in files {
+            let destination = directory.appendingPathComponent(file.path)
+            if let attrs = try? fm.attributesOfItem(atPath: destination.path),
+               let onDisk = (attrs[.size] as? NSNumber)?.int64Value,
+               file.size >= 0 {
+                if onDisk == file.size { continue }
+                // Larger than upstream means a stale or corrupt file; resuming
+                // would fail, so start it over.
+                if onDisk > file.size { try? fm.removeItem(at: destination) }
+            }
+            let encodedPath = file.path
+                .split(separator: "/")
+                .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+                .joined(separator: "/")
+            transfers += ["--output", destination.path, "https://huggingface.co/\(repo)/resolve/main/\(encodedPath)"]
+        }
+
+        let process = Process()
+        if transfers.isEmpty {
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+            return process
+        }
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        process.arguments = [
+            "--fail", "--location", "--silent", "--show-error",
+            "--retry", "3", "--retry-delay", "2", "--connect-timeout", "30",
+            "--create-dirs", "--continue-at", "-",
+        ] + transfers
+        return process
+    }
+
+    /// Translates a finished download subprocess into the one-line JSON result
+    /// the callers parse. A process killed by a signal (user cancel, stall
+    /// timeout) yields an empty string so the caller's exit-status fallback
+    /// handles it.
+    nonisolated static func downloadResultJSON(for process: Process, stderr: String) -> String {
+        guard process.terminationReason == .exit else { return "" }
+        return downloadResultJSON(exitStatus: process.terminationStatus, stderr: stderr)
+    }
+
+    nonisolated static func downloadResultJSON(exitStatus: Int32, stderr: String) -> String {
+        let payload: [String: String]
+        if exitStatus == 0 {
+            payload = ["status": "ok"]
+        } else {
+            payload = ["status": "error", "error": curlErrorMessage(exitStatus: exitStatus, stderr: stderr)]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8)
+        else { return "" }
+        return json
+    }
+
+    /// User-facing explanation for a curl exit code.
+    nonisolated static func curlErrorMessage(exitStatus: Int32, stderr: String) -> String {
+        let detail = stderr
+            .components(separatedBy: "\n")
+            .last { !$0.trimmingCharacters(in: .whitespaces).isEmpty }?
+            .trimmingCharacters(in: .whitespaces) ?? "curl exit \(exitStatus)"
+        switch exitStatus {
+        case 5, 6, 7, 28:
+            return "Could not reach huggingface.co. Check your network or try again later. (\(detail))"
+        case 35, 51, 58, 60, 77:
+            return "TLS certificate verification failed. If you use Cloudflare WARP / Zero Trust or another TLS-intercepting proxy, make sure its root certificate is trusted in Keychain Access. (\(detail))"
+        case 22, 56:
+            return "huggingface.co refused the download. (\(detail))"
+        case 23:
+            return "Could not write the model files to disk. (\(detail))"
+        default:
+            return "Download failed. (\(detail))"
+        }
+    }
+
+    /// User-facing explanation for a failure while listing the model files.
+    nonisolated static func downloadListingErrorMessage(_ error: Error) -> String {
+        if case MurmurError.transcriptionFailed(let message) = error { return message }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .serverCertificateUntrusted, .serverCertificateHasUnknownRoot,
+                 .serverCertificateHasBadDate, .serverCertificateNotYetValid, .secureConnectionFailed:
+                return "TLS certificate verification failed for huggingface.co. If you use Cloudflare WARP / Zero Trust, make sure its root certificate is trusted in Keychain Access."
+            default:
+                return "Could not reach huggingface.co (\(urlError.localizedDescription))."
+            }
+        }
+        return "Could not list model files: \(error.localizedDescription)"
     }
 
     // MARK: - Helpers
@@ -1692,8 +1801,8 @@ final class ModelManager: ObservableObject {
         auxiliarySpeed[aux] = 0
     }
 
-    /// Download an auxiliary model via the bundled Python env. Shares the same
-    /// `snapshot_download` path as the primary backend — a second subprocess is
+    /// Download an auxiliary model. Shares the same curl-based download path
+    /// as the primary backend (`makeHFDownloadProcess`) — a second subprocess is
     /// run, independent of any in-flight backend download, so the user can
     /// enable LID without interrupting a primary download.
     func downloadAuxiliary(_ aux: AuxiliaryModel) async throws {
@@ -1718,28 +1827,19 @@ final class ModelManager: ObservableObject {
         auxiliaryDownloadedBytes[aux] = 0
         auxiliaryStatusMessage[aux] = "Preparing download..."
 
-        let pythonBin = try await ensurePythonEnv()
+        let process: Process
+        do {
+            process = try await makeHFDownloadProcess(
+                repo: aux.modelRepo, patterns: aux.allowPatterns, into: dir
+            )
+        } catch {
+            let message = Self.downloadListingErrorMessage(error)
+            auxiliaryStatusMessage[aux] = "Error: \(message)"
+            auxiliaryStates[aux] = .error(String(message.prefix(200)))
+            throw MurmurError.transcriptionFailed(message)
+        }
         auxiliaryStatusMessage[aux] = "Downloading..."
 
-        let quoted = aux.allowPatterns.map { "\"\($0)\"" }.joined(separator: ", ")
-        let script = """
-        import sys, json
-        from huggingface_hub import snapshot_download
-        try:
-            path = snapshot_download(
-                "\(aux.modelRepo)",
-                local_dir="\(dir.path)",
-                allow_patterns=[\(quoted)],
-            )
-            print(json.dumps({"status": "ok", "path": path}), flush=True)
-        except Exception as e:
-            print(json.dumps({"status": "error", "error": str(e)}), flush=True)
-        """
-
-        let process = Process()
-        process.executableURL = pythonBin
-        process.arguments = ["-c", script]
-        process.environment = pythonSubprocessEnvironment()
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
@@ -1782,10 +1882,9 @@ final class ModelManager: ObservableObject {
         }
         monitorTask.cancel()
 
-        let outData = stdout.fileHandleForReading.readDataToEndOfFile()
         let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-        let outStr = String(data: outData, encoding: .utf8) ?? ""
         let errStr = String(data: errData, encoding: .utf8) ?? ""
+        let outStr = Self.downloadResultJSON(for: process, stderr: errStr)
 
         if let line = outStr.components(separatedBy: "\n").last(where: { $0.contains("{") }),
            let data = line.data(using: .utf8),

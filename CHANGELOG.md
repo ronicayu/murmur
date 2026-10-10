@@ -16,6 +16,9 @@
   - **Routing:** Chinese and English full-pass audio use Qwen3-ASR; other languages fall back to Cohere ONNX. V3 streaming is unchanged and always uses Cohere, because sherpa-onnx has no streaming mode for this model.
   - FireRed is untouched and remains selectable, including the "Use FireRed for Chinese transcription" toggle under Standard.
 
+### Changed
+- **Model downloads no longer need Python.** Downloading a speech engine or add-on model used to create a Python environment and `pip install` eight packages (including PyTorch) just to call `snapshot_download`; any failure there surfaced as "Setup failed. Please check your internet connection." Murmur now lists the files through `URLSession` and fetches them with the system `/usr/bin/curl`, resuming partial files. Both use the macOS keychain for TLS trust, so Cloudflare WARP / Zero Trust needs no custom CA bundle.
+
 ### Fixed
 - **Streaming and non-Chinese/English audio did not work while FireRed was the selected engine.** The fallback service was the legacy Python bridge pointed at the FireRed model folder, which it cannot load. Every engine now keeps the native Cohere ONNX service (pointed at the Cohere model folder) for streaming and fallback languages. The Cohere model still has to be downloaded for those paths.
 
