@@ -162,23 +162,7 @@ struct TranscriptionWindowView: View {
                     ForEach(group.entries) { entry in
                         historyRow(entry)
                             .tag(entry.id)
-                            .contextMenu {
-                                Button(role: .destructive) {
-                                    try? historyService.delete(id: entry.id)
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                                Button {
-                                    exportEntry(entry)
-                                } label: {
-                                    Label("Export .txt", systemImage: "square.and.arrow.up")
-                                }
-                                Button {
-                                    copyToClipboard(entry.text)
-                                } label: {
-                                    Label("Copy All", systemImage: "doc.on.doc")
-                                }
-                            }
+                            .contextMenu { historyContextMenu(for: entry) }
                     }
                     .onDelete { indices in
                         let toDelete = indices.map { group.entries[$0] }
@@ -193,6 +177,34 @@ struct TranscriptionWindowView: View {
                let entry = historyService.getAll().first(where: { $0.id == id }) {
                 windowModel.windowState = .result(entry: entry)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func historyContextMenu(for entry: TranscriptionEntry) -> some View {
+        if windowModel.retryableAudio(for: entry) != nil {
+            Button {
+                selectedEntryID = nil
+                windowModel.retryTranscription(of: entry)
+            } label: {
+                Label("Retry Transcription", systemImage: "arrow.clockwise")
+            }
+            .disabled(windowModel.hasActiveSession)
+        }
+        Button(role: .destructive) {
+            try? historyService.delete(id: entry.id)
+        } label: {
+            Label("Delete", systemImage: "trash")
+        }
+        Button {
+            exportEntry(entry)
+        } label: {
+            Label("Export .txt", systemImage: "square.and.arrow.up")
+        }
+        Button {
+            copyToClipboard(entry.text)
+        } label: {
+            Label("Copy All", systemImage: "doc.on.doc")
         }
     }
 
@@ -298,7 +310,11 @@ struct TranscriptionWindowView: View {
                     selectedEntryID = nil
                     windowModel.transitionToIdle()
                 },
-                onBack: { selectedEntryID = nil }
+                onBack: { selectedEntryID = nil },
+                onRetry: windowModel.retryableAudio(for: entry) == nil ? nil : {
+                    selectedEntryID = nil
+                    windowModel.retryTranscription(of: entry)
+                }
             )
         }
     }

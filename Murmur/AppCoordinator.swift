@@ -224,9 +224,10 @@ final class AppCoordinator: ObservableObject {
     /// A hotkey press that arrived while a transcription was running: start
     /// recording when that transcription is delivered.
     private(set) var pendingRecording = false
-    /// Counts audio-engine starts, so a start that outlives its timeout can
-    /// tell whether a newer recording has begun since.
-    private var recordingAttempt = 0
+    /// True from the moment the audio engine is asked to start until that
+    /// call returns — which, for a start that timed out, is later than the
+    /// error the user saw.
+    private var audioStartInFlight = false
     private var undoTimer: Task<Void, Never>?
     private var hotkeyTask: Task<Void, Never>?
     private var audioLevelTask: Task<Void, Never>?
@@ -416,19 +417,33 @@ final class AppCoordinator: ObservableObject {
     }
 
     /// Start the audio engine, giving up after 5 s.
+    ///
+    /// A start that timed out is still running inside `AudioService`, which
+    /// is not safe to enter twice. Until it returns, a new start is refused
+    /// with the same timeout error.
     private func startAudioCapture() async throws {
-        recordingAttempt += 1
-        let attempt = recordingAttempt
-        try await withTimeout(seconds: 5, operation: "start recording", onLateCompletion: { [weak self] _ in
-            // The start outlived its timeout and the app has already reported
-            // the failure. Release the engine, unless a newer recording
-            // (which resets the engine itself) has started since.
-            Task { @MainActor [weak self] in
-                guard let self, self.recordingAttempt == attempt else { return }
-                self.audio.cancelRecording()
+        guard !audioStartInFlight else {
+            throw MurmurError.timeout(operation: "start recording")
+        }
+        audioStartInFlight = true
+        do {
+            try await withTimeout(seconds: 5, operation: "start recording", onLateCompletion: { [weak self] _ in
+                // The start outlived its timeout and the app has already
+                // reported the failure. Release the engine.
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.audio.cancelRecording()
+                    self.audioStartInFlight = false
+                }
+            }) {
+                try await self.audio.startRecording()
             }
-        }) {
-            try await self.audio.startRecording()
+            audioStartInFlight = false
+        } catch {
+            // After a timeout the call is still running; the late-completion
+            // handler above clears the flag.
+            if case .timeout? = error as? MurmurError {} else { audioStartInFlight = false }
+            throw error
         }
     }
 
