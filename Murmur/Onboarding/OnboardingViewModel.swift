@@ -13,8 +13,8 @@ final class OnboardingViewModel: ObservableObject {
     @Published var hotkeyPracticeMode = false
     @Published var hotkeyTestResult: String?
     @Published var hotkeyConflictDetected = false
-    @Published var customKey: Key = .space
-    @Published var customModifiers: NSEvent.ModifierFlags = .command // fallback if user switches off Right Command
+    @Published var customKey: Key = HotkeyPreference.defaultCustomKey
+    @Published var customModifiers: NSEvent.ModifierFlags = HotkeyPreference.defaultCustomModifiers
 
     let coordinator: AppCoordinator
     let modelManager: ModelManager
@@ -150,21 +150,37 @@ final class OnboardingViewModel: ObservableObject {
         // Right Command is the default — it never conflicts with input source switching.
         // Only check for conflict if user has set a custom Ctrl+Space hotkey.
         if let keyCode = UserDefaults.standard.object(forKey: "hotkeyKeyCode") as? Int,
-           let modsRaw = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? UInt {
-            let mods = NSEvent.ModifierFlags(rawValue: modsRaw)
-            let isCtrlSpace = Key(carbonKeyCode: UInt32(keyCode)) == .space && mods == .control
-            if isCtrlSpace {
-                hotkeyConflictDetected = HotkeyConflictDetector.ctrlSpaceConflictsWithInputSources()
-            }
+           let modsRaw = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? UInt,
+           Self.isCtrlSpace(key: Key(carbonKeyCode: UInt32(keyCode)), modifiers: NSEvent.ModifierFlags(rawValue: modsRaw)) {
+            hotkeyConflictDetected = HotkeyConflictDetector.ctrlSpaceConflictsWithInputSources()
         }
+    }
+
+    /// Re-evaluates the conflict after the user records a replacement
+    /// shortcut. Any change away from Ctrl+Space — key or modifiers — clears it.
+    func customHotkeyDidChange() {
+        hotkeyConflictDetected = Self.isCtrlSpace(key: customKey, modifiers: customModifiers)
+            && HotkeyConflictDetector.ctrlSpaceConflictsWithInputSources()
+    }
+
+    static func isCtrlSpace(key: Key?, modifiers: NSEvent.ModifierFlags) -> Bool {
+        key == .space && modifiers == .control
     }
 
     func completeOnboarding() {
         UserDefaults.standard.set(true, forKey: "onboardingCompleted")
-        coordinator.skipAccessibilityCheck = false // Re-enable for normal use
         try? SMAppService.mainApp.register()
+        teardown()
+    }
+
+    /// Undoes everything onboarding switched on. Called on every way out —
+    /// finishing, or closing the window part-way — and safe to call twice.
+    func teardown() {
+        coordinator.skipAccessibilityCheck = false // Re-enable for normal use
         accessibilityPollTask?.cancel()
+        accessibilityPollTask = nil
         testWatchTask?.cancel()
+        testWatchTask = nil
     }
 
     deinit {

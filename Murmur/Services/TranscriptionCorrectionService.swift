@@ -258,17 +258,18 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
         // Debug log — symmetric with OpenAICompatibleCorrector. Confirms
         // language + glossary made it into the user message. View with
         // `log stream --predicate 'subsystem == "com.murmur.app" AND
-        // category == "correction"' --level debug`.
+        // category == "correction"' --level debug`. Transcript, glossary
+        // and prompt are user content: `.private`, never public.
         let trimmedPreview = String(trimmed.prefix(200))
         let systemPreview = String(CorrectionPrompts.current.prefix(120))
             + (CorrectionPrompts.current.count > 120 ? "…" : "")
         Self.log.debug("""
         correction[apple] outgoing → on-device
           language=\(language, privacy: .public)
-          glossary=[\(glossaryLine, privacy: .public)]
-          rawIn=\"\(trimmedPreview, privacy: .public)\" (len=\(trimmed.count, privacy: .public))
-          system=\"\(systemPreview, privacy: .public)\"
-          user=\"\(prompt, privacy: .public)\"
+          glossary=[\(glossaryLine, privacy: .private)]
+          rawIn=\"\(trimmedPreview, privacy: .private)\" (len=\(trimmed.count, privacy: .public))
+          system=\"\(systemPreview, privacy: .private)\"
+          user=\"\(prompt, privacy: .private)\"
         """)
         let options = GenerationOptions(
             sampling: .greedy,
@@ -280,10 +281,10 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
         let candidate = response.content
         let validated = CorrectionSafetyRails.validate(candidate: candidate, raw: trimmed)
 
-        // Diagnostic logging — promoted to .public so `log stream --predicate
-        // 'subsystem == "com.murmur.app" AND category == "correction"'` shows
-        // the full pipeline. Previews are capped at 120 chars to keep Console
-        // readable; longer payloads are fine in the debugger.
+        // Diagnostic logging for `log stream --predicate 'subsystem ==
+        // "com.murmur.app" AND category == "correction"'`. The outcome and
+        // lengths are public; the text previews (capped at 120 chars) are
+        // `.private`.
         let rawPreview = String(trimmed.prefix(120))
         let candidatePreview = String(candidate.prefix(120))
         let validatedPreview = String(validated.prefix(120))
@@ -300,9 +301,9 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
         }
         Self.log.info("""
         correction [\(outcome, privacy: .public)] \
-        raw=\"\(rawPreview, privacy: .public)\" \
-        candidate=\"\(candidatePreview, privacy: .public)\" \
-        final=\"\(validatedPreview, privacy: .public)\" \
+        raw=\"\(rawPreview, privacy: .private)\" \
+        candidate=\"\(candidatePreview, privacy: .private)\" \
+        final=\"\(validatedPreview, privacy: .private)\" \
         rawLen=\(trimmed.count, privacy: .public) \
         candLen=\(candidate.count, privacy: .public) \
         finalLen=\(validated.count, privacy: .public)

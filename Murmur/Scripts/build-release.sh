@@ -1,18 +1,27 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build Murmur release app bundle with icon and proper Info.plist
-# Usage: ./Scripts/build-release.sh
+# Build Murmur release app bundle with icon and proper Info.plist.
+# The release workflow runs this same script, so a local build and a CI
+# build produce the same bundle.
+# Usage: ./Scripts/build-release.sh [version]
+#   version  defaults to CFBundleShortVersionString in Info.plist; CI passes
+#            the git tag without its leading "v".
 # Output: dist/Murmur.app and dist/Murmur-<version>.dmg
 
 cd "$(dirname "$0")/.."
 
-VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)
+VERSION="${1-$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)}"
+# The version ends up in a file name and in Info.plist.
+if [[ ! "$VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+    echo "error: invalid version '$VERSION'" >&2
+    exit 1
+fi
 echo "Building Murmur v${VERSION}..."
 
 # 1. Build release binary
 echo "→ Compiling..."
-swift build -c release 2>&1 | tail -3
+swift build -c release
 
 BINARY=".build/arm64-apple-macosx/release/Murmur"
 if [ ! -f "$BINARY" ]; then
@@ -28,10 +37,11 @@ mkdir -p "$APP/Contents/Resources"
 # Copy binary
 cp "$BINARY" "$APP/Contents/MacOS/Murmur"
 
-# Copy Info.plist and add icon key
+# Copy Info.plist, add icon key and stamp the version
 cp Info.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP/Contents/Info.plist" 2>/dev/null || \
 /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$APP/Contents/Info.plist"
+plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Contents/Info.plist"
 
 # Copy resources
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
@@ -42,9 +52,9 @@ if [ -d "$BUNDLE" ]; then
     cp -R "$BUNDLE" "$APP/Contents/Resources/"
 fi
 
-# 3. Ad-hoc sign
+# 3. Ad-hoc sign with entitlements
 echo "→ Signing..."
-codesign --force --deep --sign - "$APP"
+codesign --force --deep --sign - --entitlements Murmur.entitlements "$APP"
 
 # 4. Create DMG with Applications shortcut (drag-to-install)
 echo "→ Creating DMG..."
