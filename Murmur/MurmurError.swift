@@ -10,7 +10,6 @@ enum MurmurError: Error, Sendable {
     case transcriptionFailed(String)
     case injectionFailed(String)
     case timeout(operation: String)
-    case sessionAbandoned
 
     enum Permission: String, Sendable {
         case microphone
@@ -32,7 +31,7 @@ enum MurmurError: Error, Sendable {
         case .modelNotFound, .diskFull, .downloadStalled, .permissionRevoked:
             return .critical
         case .microphoneBusy, .silenceDetected, .transcriptionFailed,
-             .injectionFailed, .timeout, .sessionAbandoned:
+             .injectionFailed, .timeout:
             return .transient
         }
     }
@@ -51,7 +50,6 @@ enum MurmurError: Error, Sendable {
         case .transcriptionFailed: return "Transcription failed"
         case .injectionFailed: return "Couldn't insert text"
         case .timeout: return "Timed out"
-        case .sessionAbandoned: return "Session ended"
         }
     }
 
@@ -88,8 +86,6 @@ extension MurmurError: LocalizedError {
             return "Could not insert text: \(msg)"
         case .timeout(let op):
             return "\(op) timed out."
-        case .sessionAbandoned:
-            return "Session ended — switched away too long."
         }
     }
 }

@@ -79,7 +79,7 @@ The entire setup takes 3-5 minutes depending on your internet speed.
 4. Press **Right Command** again to stop
 5. Text appears at your cursor within 1-2 seconds
 
-With **streaming mode** enabled (Settings > Experimental), a floating bubble shows the text as you speak, about a second or two behind your voice. Nothing is typed until you stop; then the final text is inserted once. Turn off **Preview bubble** in the same place if you would rather have the text typed into the app as you go.
+With **streaming mode** enabled (Settings > Experimental), a floating bubble shows the text as you speak, about a second or two behind your voice. Nothing is typed until you stop; then the final text is inserted once.
 
 The hotkey and recording mode (toggle vs hold-to-talk) are customizable in Settings.
 
@@ -169,7 +169,6 @@ Open Settings from the menu bar dropdown.
 
 **Experimental tab:**
 - Streaming voice input (live text while you speak)
-- Preview bubble (on: live text in a floating bubble, inserted once at the end; off: typed as you speak)
 
 **Model tab:**
 - Speech model status, download, re-download and delete (~1 GB)

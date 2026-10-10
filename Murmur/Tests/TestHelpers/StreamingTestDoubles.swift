@@ -40,36 +40,18 @@ final class MockTranscriptionService: TranscriptionServiceProtocol, @unchecked S
     func unloadModel() async {}
 }
 
-// MARK: MockTextInjectionService
+// MARK: PreviewRecorder
 
-final class MockTextInjectionService: TextInjectionServiceProtocol,
-                                       StreamingTextInjectionProtocol,
-                                       @unchecked Sendable {
-    var stubbedInjectMethod: InjectionMethod = .clipboard
-    var stubbedAppendText: (() -> Void)?
-    var stubbedReplaceRange: (() -> Void)?
-    var stubbedError: Error?
+/// Records what a streaming session reports to its preview. Each report is
+/// the whole streamed text so far.
+final class PreviewRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reports: [String] = []
 
-    private(set) var appendedTexts: [String] = []
-    private(set) var replaceRangeCalls: [(start: Int, length: Int, text: String)] = []
+    var texts: [String] { lock.withLock { reports } }
+    var latest: String { lock.withLock { reports.last ?? "" } }
 
-    func inject(text: String) async throws -> InjectionMethod {
-        if let err = stubbedError { throw err }
-        return stubbedInjectMethod
-    }
-
-    func undoLastInjection() async throws {}
-
-    func appendText(_ text: String) async throws {
-        if let err = stubbedError { throw err }
-        guard !text.isEmpty else { return }   // mirrors real implementation guard
-        appendedTexts.append(text)
-        stubbedAppendText?()
-    }
-
-    func replaceRange(start: Int, length: Int, with text: String) async throws {
-        if let err = stubbedError { throw err }
-        replaceRangeCalls.append((start: start, length: length, text: text))
-        stubbedReplaceRange?()
+    func record(_ text: String) {
+        lock.withLock { reports.append(text) }
     }
 }

@@ -11,8 +11,7 @@ final class StreamingMetricsTests: XCTestCase {
 
     private func makeCoordinator() -> StreamingTranscriptionCoordinator {
         StreamingTranscriptionCoordinator(
-            transcription: MockTranscriptionService(),
-            injection: MockTextInjectionService()
+            transcription: MockTranscriptionService()
         )
     }
 
@@ -49,13 +48,14 @@ final class StreamingMetricsTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: wav) }
 
         _ = coord.beginSession(
-            language: "en", targetAppPID: getpid(), startOffset: 0, fullWavURL: wav
+            language: "en", fullWavURL: wav,
+            onPreviewText: { _ in }
         )
 
         XCTAssertNotNil(coord.sessionStartedAt,
             "beginSession must stamp the session start")
         XCTAssertNil(coord.firstDeltaAt,
-            "Nothing was injected yet")
+            "Nothing was streamed yet")
         XCTAssertNil(coord.timeToFirstWordMs,
             "Time-to-first-word is undefined until a delta actually lands")
     }
@@ -68,14 +68,16 @@ final class StreamingMetricsTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: wav) }
 
         _ = coord.beginSession(
-            language: "en", targetAppPID: getpid(), startOffset: 0, fullWavURL: wav
+            language: "en", fullWavURL: wav,
+            onPreviewText: { _ in }
         )
         let firstStart = coord.sessionStartedAt
         coord.cancelSession()
         coord.resetToIdle()
 
         _ = coord.beginSession(
-            language: "en", targetAppPID: getpid(), startOffset: 0, fullWavURL: wav
+            language: "en", fullWavURL: wav,
+            onPreviewText: { _ in }
         )
 
         XCTAssertNotNil(coord.sessionStartedAt)
@@ -94,7 +96,8 @@ final class StreamingMetricsTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: wav) }
 
         _ = coord.beginSession(
-            language: "en", targetAppPID: getpid(), startOffset: 0, fullWavURL: wav
+            language: "en", fullWavURL: wav,
+            onPreviewText: { _ in }
         )
         coord.endSession()
         let done = await pollUntil(timeout: 5) { coord.sessionState == .done }
@@ -105,7 +108,8 @@ final class StreamingMetricsTests: XCTestCase {
 
         // The second session is cancelled before it ever finalises.
         _ = coord.beginSession(
-            language: "en", targetAppPID: getpid(), startOffset: 0, fullWavURL: wav
+            language: "en", fullWavURL: wav,
+            onPreviewText: { _ in }
         )
         coord.cancelSession()
 
