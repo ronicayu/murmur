@@ -20,8 +20,7 @@ final class ManifestBuildAndValidationTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        UserDefaults.standard.set(ModelBackend.qwen3.rawValue, forKey: "modelBackend")
-        manager = ModelManager()
+        manager = makeTestModelManager()
 
         // Redirect the ONNX model directory to an isolated temp dir so nothing
         // touches ~/Library/Application Support/Murmur/Models-Qwen3ASR/. This

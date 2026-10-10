@@ -404,7 +404,7 @@ final class ModelDownloadFlowTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        manager = ModelManager()
+        manager = makeTestModelManager()
         directory = try makeTempDirectory("model-download-flow")
         manager.__testing_setModelDirectory(directory, for: .qwen3)
         manager.__testing_setState(.notDownloaded)
@@ -759,7 +759,7 @@ final class AuxiliaryDownloadFlowTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        manager = ModelManager()
+        manager = makeTestModelManager()
         directory = try makeTempDirectory("aux-download-flow")
         manager.__testing_setAuxiliaryDirectory(directory, for: .sileroVad)
         manager.__testing_setAuxiliaryState(.notDownloaded, for: .sileroVad)

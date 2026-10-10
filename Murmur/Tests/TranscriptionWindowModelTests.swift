@@ -40,7 +40,7 @@ final class TranscriptionWindowModelTests: XCTestCase {
         historyService = TranscriptionHistoryService(storeURL: storeURL)
 
         // Coordinator — concrete, but transcription is replaced at ViewModel level
-        coordinator = AppCoordinator()
+        coordinator = makeTestCoordinator()
 
         spyTranscription = SpyTranscriptionService()
 

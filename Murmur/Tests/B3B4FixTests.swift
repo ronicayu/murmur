@@ -19,8 +19,6 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
     // .ready state without running an actual download.
     private var tempModelRoot: URL!
     private var manager: ModelManager!
-    private let defaults = UserDefaults.standard
-    private let backendKey = "modelBackend"
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -28,8 +26,7 @@ final class IsModelDownloadedActiveBackendTests: XCTestCase {
         // Redirect the model directory to an isolated temp dir via
         // `__testing_setModelDirectory`, so nothing here can touch the real
         // ~/Library/Application Support/Murmur/Models-Qwen3ASR/.
-        defaults.set(ModelBackend.qwen3.rawValue, forKey: backendKey)
-        manager = ModelManager()
+        manager = makeTestModelManager()
 
         let modelTemp = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
@@ -146,8 +143,7 @@ final class CancelDownloadCleanupRaceTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        UserDefaults.standard.set(ModelBackend.qwen3.rawValue, forKey: "modelBackend")
-        manager = ModelManager()
+        manager = makeTestModelManager()
 
         // Redirect the ONNX model directory to an isolated temp dir BEFORE
         // planting the sentinel. This replaces the earlier XCTSkipIf-on-real-
@@ -230,8 +226,7 @@ final class CancelDownloadTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        UserDefaults.standard.set(ModelBackend.qwen3.rawValue, forKey: "modelBackend")
-        manager = ModelManager()
+        manager = makeTestModelManager()
         // Defensive redirect — cancelDownload's detached cleanup task could
         // remove the model dir if a subprocess were ever injected.
         modelTempRoot = FileManager.default.temporaryDirectory

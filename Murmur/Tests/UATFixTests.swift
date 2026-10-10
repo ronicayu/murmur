@@ -33,7 +33,7 @@ final class P0VoiceInputPauseTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString)
             .appendingPathComponent("history.json")
         historyService = TranscriptionHistoryService(storeURL: storeURL)
-        coordinator = AppCoordinator()
+        coordinator = makeTestCoordinator()
         spyTranscription = SpyTranscriptionService()
 
         fakeAudioURL = FileManager.default.temporaryDirectory
@@ -263,7 +263,7 @@ final class P1WavUploadTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString)
             .appendingPathComponent("history.json")
         historyService = TranscriptionHistoryService(storeURL: storeURL)
-        coordinator = AppCoordinator()
+        coordinator = makeTestCoordinator()
         spyTranscription = SpyTranscriptionService()
 
         sut = TranscriptionWindowModel(

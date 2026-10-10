@@ -107,8 +107,7 @@ final class DownloadCancelIntegrationTests: XCTestCase {
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
 
         // Configure a fresh manager and redirect its model directory for .qwen3.
-        UserDefaults.standard.set(ModelBackend.qwen3.rawValue, forKey: "modelBackend")
-        manager = ModelManager()
+        manager = makeTestModelManager()
 
         // Redirect file ops to the temp dir.
         manager.__testing_setModelDirectory(tempDir, for: .qwen3)
