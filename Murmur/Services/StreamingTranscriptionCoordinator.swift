@@ -345,6 +345,10 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     private var windowDirty = false
     /// After a window force-reset, the next Latin-leading delta gets a separating space.
     private var pendingWindowSeparator = false
+    /// Incremental mode: the window is re-transcribed on a fixed short cadence
+    /// over *all* captured audio instead of once per closed VAD segment. Only
+    /// worth it with an engine fast enough to keep up (see `beginSession`).
+    private var incrementalMode = false
 
     /// Why the session ended in `.cancelled` state, for UI messaging.
     enum CancellationReason: Sendable {
@@ -367,6 +371,12 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     /// long monologue can't grow the per-pass transcription cost without bound.
     private static let maxWindowSeconds: Double = 12.0
     private static var maxWindowSamples: Int { Int(chunkSampleRate * maxWindowSeconds) }
+    /// Incremental mode: once the speaker pauses, a window at least this long is
+    /// closed at the pause so later passes don't re-transcribe finished sentences.
+    private static let minPauseResetSeconds: Double = 3.0
+    /// Incremental mode: a window with no frame above this RMS (≈ −50 dBFS,
+    /// whisper level) is treated as silence and not sent to the model.
+    private static let silenceRMSThreshold: Float = 0.00316
 
     private let logger = Logger(subsystem: "com.murmur.app", category: "streaming-coordinator")
 
@@ -400,12 +410,19 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     ///   - targetAppPID: PID of the app receiving injected text (for focus guard).
     ///   - startOffset: AX character offset at the current insertion point.
     ///   - fullWavURL: URL where `AudioService` is writing the complete WAV.
+    ///   - incrementalSeconds: When set, re-transcribe the growing window every
+    ///     this many seconds of captured audio instead of once per VAD segment.
+    ///     Text then follows speech by a pass or two rather than waiting for a
+    ///     sentence-end pause, and no speech onset is lost to VAD segmentation.
+    ///     Pass it only for an engine that transcribes a full window well within
+    ///     the interval and stays silent on silence; nil keeps segment-driven passes.
     /// - Returns: The configured `AudioBufferAccumulator` to attach to the audio tap.
     func beginSession(
         language: String,
         targetAppPID: pid_t,
         startOffset: Int,
-        fullWavURL: URL
+        fullWavURL: URL,
+        incrementalSeconds: Double? = nil
     ) -> AudioBufferAccumulator {
         guard case .idle = sessionState else {
             logger.warning("beginSession called while not idle — ignoring")
@@ -430,6 +447,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         self.transcriptionInFlight = false
         self.windowDirty = false
         self.pendingWindowSeparator = false
+        self.incrementalMode = incrementalSeconds != nil
 
         // Build a fresh per-session VAD if a model is configured.
         // minSilenceDurationSeconds: 0.8 — Silero's 0.25 s default closes
@@ -442,7 +460,11 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         // continues, so a long monologue still produces deliverable
         // chunks at a usable cadence.
         let sessionVad: VadService?
-        if let vadURL = self.vadModelURL {
+        if incrementalSeconds != nil {
+            // Incremental mode windows over all captured audio; VAD segmentation
+            // would reintroduce the sentence-end wait and clip soft onsets.
+            sessionVad = nil
+        } else if let vadURL = self.vadModelURL {
             sessionVad = try? VadService(
                 modelURL: vadURL,
                 minSilenceDurationSeconds: 0.8,
@@ -456,7 +478,8 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         }
 
         let acc = AudioBufferAccumulator(
-            samplesPerChunk: Self.samplesPerChunk,
+            samplesPerChunk: incrementalSeconds.map { max(1, Int(Self.chunkSampleRate * $0)) }
+                ?? Self.samplesPerChunk,
             sampleRate: Self.chunkSampleRate,
             vad: sessionVad
         )
@@ -575,6 +598,13 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         guard !transcriptionInFlight else { windowDirty = true; return }
         guard !windowSamples.isEmpty else { return }
 
+        // Incremental mode has no VAD in front of it, so keep silence away from
+        // the model: an all-quiet window is dropped instead of transcribed.
+        if incrementalMode, Self.isSilent(windowSamples) {
+            windowSamples.removeAll(keepingCapacity: true)
+            return
+        }
+
         guard let wavURL = writeSamplesToTempWAV(windowSamples) else {
             logger.error("StreamingCoordinator: failed to write window to temp WAV")
             return
@@ -616,12 +646,21 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
             if !delta.isEmpty { injectDelta(delta) }
         }
 
-        if windowSamples.count >= Self.maxWindowSamples {
+        // Incremental mode: two passes that agree word for word mean the speaker
+        // paused. Close the window there — a clean sentence boundary — rather
+        // than letting it run to the hard cap and cut mid-word. `windowDirty`
+        // means newer audio is already waiting, so the pause is over; keep going.
+        let pausedAtBoundary = incrementalMode
+            && !windowDirty
+            && aggregator.lastPassFullyAgreed
+            && windowSamples.count >= Int(Self.chunkSampleRate * Self.minPauseResetSeconds)
+
+        if windowSamples.count >= Self.maxWindowSamples || pausedAtBoundary {
             let tail = aggregator.flushAndReset()
             if !tail.isEmpty { injectDelta(tail) }
             windowSamples.removeAll(keepingCapacity: true)
             pendingWindowSeparator = true
-            logger.info("StreamingCoordinator: window cap reached — flushed + reset")
+            logger.info("StreamingCoordinator: window \(pausedAtBoundary ? "closed at pause" : "cap reached") — flushed + reset")
         }
 
         if windowDirty { transcribeWindowIfIdle() }
@@ -872,6 +911,20 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
 
     private func resolveCurrentCursorOffsetAX() -> Int? {
         resolveAXCursorOffset()
+    }
+
+    /// True when no 100 ms frame of `samples` reaches `silenceRMSThreshold`.
+    nonisolated static func isSilent(_ samples: [Float]) -> Bool {
+        let frame = Int(chunkSampleRate / 10)
+        var start = 0
+        while start < samples.count {
+            let end = min(start + frame, samples.count)
+            var sum: Float = 0
+            for i in start..<end { sum += samples[i] * samples[i] }
+            if (sum / Float(end - start)).squareRoot() >= silenceRMSThreshold { return false }
+            start = end
+        }
+        return true
     }
 
     /// Write a window of Float32 mono samples to a temporary WAV file and return its URL.

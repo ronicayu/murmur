@@ -17,6 +17,9 @@
   - FireRed is untouched and remains selectable, including the "Use FireRed for Chinese transcription" toggle under Standard.
 
 ### Changed
+- **Streaming shows text while you speak when Qwen3-ASR is the engine.** Instead of transcribing once per pause-delimited segment, Murmur re-transcribes the growing audio window every second and types only the words two consecutive passes agree on (LocalAgreement-2, from the stable-prefix work in PR #2). In simulation with the real model, text follows speech by 1–2 s. The window closes at a natural pause (two identical passes) or at 12 s. Because this mode windows over all captured audio rather than VAD segments, soft opening words are no longer clipped from the streamed text. The final refinement pass after you stop is unchanged.
+  - Agreement ignores punctuation and no longer re-checks already-typed words, so a comma moving or a homophone flipping between passes does not stall output.
+  - Cohere and FireRed streaming keep segment-driven passes (now with the stable-prefix aggregator from PR #2), because they are slower per pass and Cohere can hallucinate on silence.
 - **Model downloads no longer need Python.** Downloading a speech engine or add-on model used to create a Python environment and `pip install` eight packages (including PyTorch) just to call `snapshot_download`; any failure there surfaced as "Setup failed. Please check your internet connection." Murmur now lists the files through `URLSession` and fetches them with the system `/usr/bin/curl`, resuming partial files. Both use the macOS keychain for TLS trust, so Cloudflare WARP / Zero Trust needs no custom CA bundle.
 
 ### Fixed

@@ -96,3 +96,56 @@ final class StablePrefixAggregatorTests: XCTestCase {
         XCTAssertEqual(delta, "", "no new confirmation when the hypothesis shrinks")
     }
 }
+
+/// Punctuation must not block agreement: punctuating models move commas and
+/// full stops between passes of the same audio.
+final class StablePrefixAggregatorPunctuationTests: XCTestCase {
+
+    func test_commaJitter_doesNotStallConfirmation() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("所有，只要处理")
+        // Same words, comma dropped: every word is still agreed.
+        XCTAssertEqual(agg.ingest("所有只要处理 data"), "所有只要处理")
+    }
+
+    func test_trailingFullStopOnPartialHypothesis_isNotConfirmedEarly() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("今天天气。")
+        // The words agree; the full stop that ended the partial pass must not be emitted.
+        XCTAssertEqual(agg.ingest("今天天气很好。"), "今天天气")
+    }
+
+    func test_punctuationBetweenWords_isEmittedWithTheFollowingDelta() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("你好")
+        _ = agg.ingest("你好，现在")
+        XCTAssertEqual(agg.ingest("你好，现在可以"), "，现在")
+    }
+
+    func test_flush_includesTrailingPunctuation() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("你好呀，现在可以了吗？")
+        XCTAssertEqual(agg.ingest("你好呀，现在可以了吗？"), "你好呀，现在可以了吗")
+        XCTAssertEqual(agg.flushAndReset(), "？")
+    }
+
+    func test_lastPassFullyAgreed_onlyWhenWordsAreIdentical() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("你好")
+        XCTAssertFalse(agg.lastPassFullyAgreed, "a first pass has nothing to agree with")
+        _ = agg.ingest("你好，现在")
+        XCTAssertFalse(agg.lastPassFullyAgreed, "the hypothesis is still growing")
+        _ = agg.ingest("你好。现在")
+        XCTAssertTrue(agg.lastPassFullyAgreed, "same words, different punctuation: the speaker paused")
+    }
+
+    func test_flickerInsideConfirmedText_doesNotBlockLaterWords() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("成为科隆群岛")
+        XCTAssertEqual(agg.ingest("成为科隆群岛主要"), "成为科隆群岛")
+        // A homophone flips inside the already-confirmed part; the new words agree.
+        _ = agg.ingest("成为克隆群岛主要的食草")
+        XCTAssertEqual(agg.ingest("成为科隆群岛主要的食草动物"), "主要的食草")
+        XCTAssertEqual(agg.confirmedText, "成为科隆群岛主要的食草")
+    }
+}

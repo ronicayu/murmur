@@ -265,6 +265,21 @@ final class AppCoordinator: ObservableObject {
 
     var hasQwen3Service: Bool { qwen3 != nil }
 
+    /// Cadence for incremental streaming, or nil to keep VAD-segment passes.
+    /// Only Qwen3-ASR qualifies: it re-transcribes a full 12 s window in about
+    /// a second and returns nothing for silence. Cohere and FireRed are slower,
+    /// and Cohere can hallucinate on silence, so they keep segment-driven passes.
+    private func streamingIncrementalSeconds(language: String) -> Double? {
+        guard qwen3 != nil else { return nil }
+        let choice = TranscriptionRouter.route(
+            activeBackend: modelManager?.activeBackend ?? .onnx,
+            useFireRedForChinese: modelManager?.useFireRedForChinese ?? false,
+            language: language,
+            version: .v3Streaming
+        )
+        return choice == .qwen3 ? 1.0 : nil
+    }
+
     /// Wire up (or tear down) the Qwen3-ASR service. Called from `MurmurApp`
     /// in response to `committedBackendChange`. Passing `nil` releases the
     /// recognizer.
@@ -686,7 +701,8 @@ final class AppCoordinator: ObservableObject {
                 language: lang,
                 targetAppPID: targetPID,
                 startOffset: startOffset,
-                fullWavURL: wavURL
+                fullWavURL: wavURL,
+                incrementalSeconds: streamingIncrementalSeconds(language: lang)
             )
             streamingAccumulator = acc
 

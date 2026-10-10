@@ -20,13 +20,19 @@ import Foundation
 /// hypothesis, so original spacing, punctuation and casing are preserved — and the
 /// concatenation of all emitted deltas (plus the final `flushAndReset`) exactly
 /// reproduces the last hypothesis prefix.
+///
+/// Punctuation and symbols never take part in the agreement check. Models that
+/// punctuate (Qwen3-ASR) move commas and full stops between passes of the same
+/// audio — "所有，只要" then "所有只要" — and counting those as disagreement stalls
+/// output for seconds even though every word is stable. Punctuation is still
+/// emitted, verbatim, as part of the slice that follows the word before it.
 struct StablePrefixAggregator {
 
-    /// One token plus the exclusive end offset (in Characters) of its span in the
-    /// hypothesis it was tokenised from.
+    /// One word token (a CJK character or a Latin run) plus the exclusive end
+    /// offset (in Characters) of its span in the hypothesis it was tokenised from.
     private struct Token { let value: String; let charEnd: Int }
 
-    /// Count of tokens confirmed (already emitted). Locked — only ever extended
+    /// Count of word tokens confirmed (already emitted). Locked — only ever extended
     /// within a window.
     private var confirmedCount = 0
     /// Confirmed text accumulated for the current window (== concatenation of deltas).
@@ -35,6 +41,9 @@ struct StablePrefixAggregator {
     private var previousTokens: [Token] = []
     /// Previous hypothesis as a Character array (for tail slicing on flush).
     private var previousChars: [Character] = []
+    /// True when the latest pass matched the one before it word for word — the
+    /// speaker has paused, so the window can be closed without cutting a word.
+    private(set) var lastPassFullyAgreed = false
 
     // MARK: - API
 
@@ -46,7 +55,15 @@ struct StablePrefixAggregator {
         let chars = Array(hypothesis)
         let current = Self.tokenize(chars)
 
-        let agreed = Self.commonPrefixLength(previousTokens, current)
+        // Confirmed words are locked, so only the words after them need to agree.
+        // Comparing the locked region again would let a homophone flip there
+        // (科隆 / 克隆) block everything that follows it.
+        let locked = min(confirmedCount, previousTokens.count, current.count)
+        let agreed = locked + Self.commonPrefixLength(
+            previousTokens[locked...], current[locked...]
+        )
+        lastPassFullyAgreed = !current.isEmpty
+            && agreed == current.count && agreed == previousTokens.count
         let newConfirmed = min(max(confirmedCount, agreed), current.count)
 
         let delta = Self.slice(chars: chars, tokens: current,
@@ -64,8 +81,15 @@ struct StablePrefixAggregator {
     /// next window. Returns the tail text to inject.
     @discardableResult
     mutating func flushAndReset() -> String {
-        let tail = Self.slice(chars: previousChars, tokens: previousTokens,
-                              from: confirmedCount, to: previousTokens.count)
+        // Everything after the last confirmed word, including trailing punctuation.
+        var tail = ""
+        if confirmedCount <= previousTokens.count {
+            let startChar = confirmedCount == 0 ? 0 : previousTokens[confirmedCount - 1].charEnd
+            var endChar = previousChars.count
+            while endChar > startChar && previousChars[endChar - 1].isWhitespace { endChar -= 1 }
+            if startChar < endChar { tail = String(previousChars[startChar..<endChar]) }
+        }
+        lastPassFullyAgreed = false
         confirmedCount = 0
         confirmedText = ""
         previousTokens = []
@@ -84,10 +108,10 @@ struct StablePrefixAggregator {
         return String(chars[startChar..<endChar])
     }
 
-    private static func commonPrefixLength(_ a: [Token], _ b: [Token]) -> Int {
-        let n = min(a.count, b.count)
+    private static func commonPrefixLength(_ a: ArraySlice<Token>, _ b: ArraySlice<Token>) -> Int {
         var i = 0
-        while i < n && a[i].value == b[i].value { i += 1 }
+        while i < a.count && i < b.count
+            && a[a.startIndex + i].value == b[b.startIndex + i].value { i += 1 }
         return i
     }
 
@@ -104,8 +128,12 @@ struct StablePrefixAggregator {
                 tokens.append(Token(value: String(chars[i..<j]).lowercased(), charEnd: j))
                 i = j
             } else {
-                // CJK / kana / Hangul / punctuation / symbol -> single-char token.
-                tokens.append(Token(value: String(c).lowercased(), charEnd: i + 1))
+                // CJK / kana / Hangul -> single-char token. Punctuation and
+                // symbols are skipped: they are emitted with the surrounding
+                // slice but do not vote on agreement.
+                if c.isLetter || c.isNumber {
+                    tokens.append(Token(value: String(c).lowercased(), charEnd: i + 1))
+                }
                 i += 1
             }
         }
