@@ -12,7 +12,7 @@ import XCTest
 //     - A real TranscriptionHistoryService backed by a temp file.
 //     - A stub AppCoordinator (using the default init — it is @MainActor so
 //       side-effects are contained; hotkey/audio services never fire in tests).
-//     - A StubLongRecordingService that returns a fixed URL without touching AVAudio.
+//     - A LongRecordingService on a temp directory with a stub recorder (no AVAudio).
 //     - A StubFilePickerService that returns a pre-configured URL.
 //
 // Run: xcodebuild test -scheme Murmur -only-testing MurmurTests/TranscriptionWindowModelTests
@@ -26,6 +26,9 @@ final class TranscriptionWindowModelTests: XCTestCase {
     private var spyTranscription: SpyTranscriptionService!
     private var sut: TranscriptionWindowModel!
     private var fakeAudioURL: URL!
+    private var recordingsDir: URL!
+    private var autoStopGate: TestGate!
+    private var userFiles: [URL] = []
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -45,18 +48,244 @@ final class TranscriptionWindowModelTests: XCTestCase {
         fakeAudioURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString).m4a")
 
+        // Recordings go to a temp directory through a stub recorder — no microphone
+        recordingsDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        autoStopGate = TestGate()
+
         sut = TranscriptionWindowModel(
             historyService: historyService,
             coordinator: coordinator,
+            recordingService: makeStubRecordingService(
+                outputDirectory: recordingsDir,
+                autoStopGate: autoStopGate
+            ),
             transcriptionService: spyTranscription
         )
     }
 
     override func tearDownWithError() throws {
+        // Lets the stub auto-stop task of any recording still running end
+        autoStopGate.open()
         let dir = storeURL.deletingLastPathComponent()
         try? FileManager.default.removeItem(at: dir)
         try? FileManager.default.removeItem(at: fakeAudioURL)
+        try? FileManager.default.removeItem(at: recordingsDir)
+        userFiles.forEach { try? FileManager.default.removeItem(at: $0) }
+        userFiles = []
         try super.tearDownWithError()
+    }
+
+    /// Creates a real file outside the recordings directory, as a user's upload would be.
+    private func makeUserFile() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).m4a")
+        FileManager.default.createFile(atPath: url.path, contents: Data("user audio".utf8))
+        userFiles.append(url)
+        return url
+    }
+
+    // MARK: - cancel, then a second file before the first task unwinds
+
+    /// The cancelled task unwinds (here: with CancellationError) while the second
+    /// transcription is in flight. It must not touch the second session.
+    func test_cancelled_task_unwinding_late_does_not_touch_the_next_transcription() async throws {
+        try await assertSupersededTaskTouchesNothing(firstTaskEndsWith: CancellationError())
+    }
+
+    /// Same, but the cancelled task ends with an ordinary error — the second
+    /// entry must not be marked failed.
+    func test_cancelled_task_failing_late_does_not_fail_the_next_transcription() async throws {
+        try await assertSupersededTaskTouchesNothing(
+            firstTaskEndsWith: MurmurError.transcriptionFailed("engine torn down")
+        )
+    }
+
+    private func assertSupersededTaskTouchesNothing(firstTaskEndsWith firstError: Error) async throws {
+        // Arrange — each transcribeLong call ends only when the test opens its gate
+        let firstGate = TestGate()
+        let secondGate = TestGate()
+        let service = WindowGatedTranscriptionService(calls: [
+            (firstGate, .failure(firstError)),
+            (secondGate, .success(TranscriptionResult(text: "second", language: .english, durationMs: 1))),
+        ])
+        let model = TranscriptionWindowModel(
+            historyService: historyService,
+            coordinator: coordinator,
+            recordingService: makeStubRecordingService(outputDirectory: recordingsDir),
+            transcriptionService: service
+        )
+        let firstFile = makeUserFile()
+        let secondFile = makeUserFile()
+
+        // Act — cancel the first, start the second, and only then let the first unwind
+        model.beginTranscription(audioURL: firstFile)
+        await drainMainActor()
+        model.cancelTranscription()
+        model.beginTranscription(audioURL: secondFile)
+        await drainMainActor()
+        firstGate.open()
+        await drainMainActor()
+
+        // Assert — the second transcription is untouched and still running
+        if case .transcribing = model.windowState {
+            // correct
+        } else {
+            XCTFail("Expected .transcribing for the second file but got \(model.windowState)")
+        }
+        XCTAssertEqual(coordinator.state, .transcribing,
+                       "Voice input must stay paused while the second transcription runs")
+        XCTAssertEqual(historyService.getAll().map(\.status), [.inProgress],
+                       "Only the second entry may exist, and it must still be in progress")
+
+        // Act — let the second finish
+        secondGate.open()
+        await drainMainActor()
+
+        // Assert
+        if case .result(let entry) = model.windowState {
+            XCTAssertEqual(entry.text, "second")
+        } else {
+            XCTFail("Expected .result for the second file but got \(model.windowState)")
+        }
+        XCTAssertEqual(coordinator.state, .idle)
+        XCTAssertEqual(historyService.getAll().map(\.status), [.completed])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: secondFile.path))
+    }
+
+    /// Voice input stays paused until the cancelled task has really unwound.
+    func test_cancelTranscription_keeps_voice_input_paused_until_task_unwinds() async throws {
+        // Arrange
+        let gate = TestGate()
+        let service = WindowGatedTranscriptionService(calls: [(gate, .failure(CancellationError()))])
+        let model = TranscriptionWindowModel(
+            historyService: historyService,
+            coordinator: coordinator,
+            recordingService: makeStubRecordingService(outputDirectory: recordingsDir),
+            transcriptionService: service
+        )
+        model.beginTranscription(audioURL: makeUserFile())
+        await drainMainActor()
+
+        // Act
+        model.cancelTranscription()
+        await drainMainActor()
+
+        // Assert — the engine is still busy
+        XCTAssertEqual(coordinator.state, .transcribing)
+
+        // Act — the task unwinds
+        gate.open()
+        await drainMainActor()
+
+        // Assert
+        XCTAssertEqual(coordinator.state, .idle)
+        XCTAssertTrue(historyService.getAll().isEmpty)
+    }
+
+    // MARK: - 2-hour auto-stop
+
+    func test_autoStop_offers_the_recording_for_transcription() async throws {
+        // Arrange — a recording is running
+        sut.startRecording()
+        await drainMainActor()
+        guard case .recording = sut.windowState else {
+            return XCTFail("Precondition: expected .recording but got \(sut.windowState)")
+        }
+
+        // Act — the service reaches its duration cap
+        autoStopGate.open()
+        await drainMainActor()
+
+        // Assert — same screen as after a manual stop
+        guard case .recordingConfirm(_, _, let url) = sut.windowState else {
+            return XCTFail("Expected .recordingConfirm after auto-stop but got \(sut.windowState)")
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+
+        // Act — a Stop press that lost the race against the auto-stop
+        sut.stopRecording()
+        await drainMainActor()
+
+        // Assert — the confirm screen is not replaced by idle
+        guard case .recordingConfirm = sut.windowState else {
+            return XCTFail("A late stop must keep .recordingConfirm but got \(sut.windowState)")
+        }
+
+        // Act — transcribe the auto-stopped recording
+        spyTranscription.stubbedResult = TranscriptionResult(
+            text: "two hours", language: .english, durationMs: 1
+        )
+        sut.beginTranscription(audioURL: url)
+        await drainMainActor()
+
+        // Assert — the recording's own entry is completed, and its m4a is gone
+        let all = historyService.getAll()
+        XCTAssertEqual(all.count, 1)
+        XCTAssertEqual(all.first?.status, .completed)
+        XCTAssertEqual(all.first?.text, "two hours")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func test_autoStop_while_window_transcribes_another_file_fails_the_entry_and_keeps_the_m4a() async throws {
+        // Arrange — a recording runs in the background while a user file is transcribed
+        sut.startRecording()
+        await drainMainActor()
+        let recordingPath = try XCTUnwrap(historyService.getAll().first?.m4aPath)
+        sut.transitionToIdle()
+        spyTranscription.shouldBlock = true
+        sut.beginTranscription(audioURL: makeUserFile())
+        await drainMainActor()
+
+        // Act
+        autoStopGate.open()
+        await drainMainActor()
+
+        // Assert — the transcription keeps the window; the recording is not left inProgress
+        guard case .transcribing = sut.windowState else {
+            return XCTFail("Expected .transcribing but got \(sut.windowState)")
+        }
+        let recordingEntry = historyService.getAll().first { $0.m4aPath == recordingPath }
+        XCTAssertEqual(recordingEntry?.status, .failed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recordingPath))
+
+        // Cleanup
+        sut.cancelTranscription()
+        await drainMainActor()
+    }
+
+    // MARK: - discardRecording
+
+    func test_discardRecording_deletes_own_recording_and_its_entry() async throws {
+        // Arrange
+        let url = try await recordOwnAudio(with: sut)
+
+        // Act
+        sut.discardRecording(url: url)
+
+        // Assert
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertTrue(historyService.getAll().isEmpty)
+        guard case .idle = sut.windowState else {
+            return XCTFail("Expected .idle but got \(sut.windowState)")
+        }
+    }
+
+    func test_discardRecording_never_deletes_a_file_it_did_not_record() async throws {
+        // Arrange — one file outside the recordings directory, one placed inside it
+        let outside = makeUserFile()
+        try FileManager.default.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
+        let inside = recordingsDir.appendingPathComponent("not-recorded-by-this-model.m4a")
+        FileManager.default.createFile(atPath: inside.path, contents: Data("x".utf8))
+
+        // Act
+        sut.discardRecording(url: outside)
+        sut.discardRecording(url: inside)
+
+        // Assert
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: inside.path))
     }
 
     // MARK: - beginTranscription — happy path
@@ -305,6 +534,119 @@ final class StubDiskSpaceChecker: DiskSpaceChecking {
     private let freeBytes: Int64
     init(freeBytes: Int64) { self.freeBytes = freeBytes }
     func availableCapacityBytes() throws -> Int64 { freeBytes }
+}
+
+/// A gate a test opens by hand, so that asynchronous work ends exactly when
+/// the test says — no timers. `wait()` ignores task cancellation on purpose:
+/// it models work that keeps running for a while after it was cancelled.
+final class TestGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if isOpen {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func open() {
+        lock.lock()
+        isOpen = true
+        let pending = waiters
+        waiters = []
+        lock.unlock()
+        pending.forEach { $0.resume() }
+    }
+}
+
+/// Transcription service whose n-th `transcribeLong` call ends only when the
+/// test opens that call's gate, and then returns or throws the given outcome.
+final class WindowGatedTranscriptionService: TranscriptionServiceProtocol, @unchecked Sendable {
+    typealias Call = (gate: TestGate, outcome: Result<TranscriptionResult, Error>)
+
+    nonisolated var isModelLoaded: Bool { true }
+
+    private let lock = NSLock()
+    private var remainingCalls: [Call]
+
+    init(calls: [Call]) {
+        remainingCalls = calls
+    }
+
+    func preloadModel() async throws {}
+    func unloadModel() async {}
+
+    func transcribe(audioURL: URL, language: String) async throws -> TranscriptionResult {
+        throw MurmurError.transcriptionFailed("not used")
+    }
+
+    func transcribeLong(
+        audioURL: URL,
+        language: String,
+        onProgress: @escaping (TranscriptionProgress) -> Void
+    ) async throws -> TranscriptionResult {
+        guard let call = nextCall() else {
+            throw MurmurError.transcriptionFailed("unexpected transcribeLong call")
+        }
+        await call.gate.wait()
+        return try call.outcome.get()
+    }
+
+    private func nextCall() -> Call? {
+        lock.lock()
+        defer { lock.unlock() }
+        return remainingCalls.isEmpty ? nil : remainingCalls.removeFirst()
+    }
+}
+
+/// A LongRecordingService that records into `outputDirectory` through a stub
+/// recorder (which writes a small file where AVAudioRecorder would), with
+/// plenty of free disk. The duration cap is reached when `autoStopGate` opens;
+/// without a gate the real 2-hour sleep applies, i.e. never in a test.
+@MainActor
+func makeStubRecordingService(
+    outputDirectory: URL,
+    autoStopGate: TestGate? = nil
+) -> LongRecordingService {
+    let disk = StubDiskSpaceChecker(freeBytes: 10 * 1024 * 1024 * 1024)
+    let factory: (URL, [String: Any]) throws -> AVRecorderBridging = { url, _ in
+        FileManager.default.createFile(atPath: url.path, contents: Data("recorded".utf8))
+        return MockAVRecorderBridge()
+    }
+    guard let autoStopGate else {
+        return LongRecordingService(
+            outputDirectory: outputDirectory, diskChecker: disk, recorderFactory: factory
+        )
+    }
+    return LongRecordingService(
+        outputDirectory: outputDirectory,
+        diskChecker: disk,
+        recorderFactory: factory,
+        autoStopSleep: { _ in await autoStopGate.wait() }
+    )
+}
+
+/// Drives the model's real record → stop flow and returns the recording it
+/// offers for transcription. The model must use a stub recording service.
+@MainActor
+func recordOwnAudio(with model: TranscriptionWindowModel) async throws -> URL {
+    model.startRecording()
+    await drainMainActor()
+    model.stopRecording()
+    await drainMainActor()
+    guard case .recordingConfirm(_, _, let url) = model.windowState else {
+        XCTFail("Expected .recordingConfirm after record → stop but got \(model.windowState)")
+        throw CancellationError()
+    }
+    return url
 }
 
 // MARK: - Helpers

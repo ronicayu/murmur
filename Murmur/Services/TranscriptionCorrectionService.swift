@@ -14,10 +14,7 @@ import FoundationModels
 /// (English technical terms inside Chinese speech, etc.) must stay
 /// code-switched.
 ///
-/// Runs BEFORE `TranscriptionCleanup` in the coordinator pipeline:
-///   `transcribe → correction → cleanup → inject`
-/// Cleanup is a deterministic safety net for when correction is off or times
-/// out; when correction runs and adds its own punctuation, cleanup is a no-op.
+/// Runs in the coordinator pipeline: `transcribe → correction → inject`.
 ///
 /// Implementations MUST be safe to time out: the coordinator enforces a hard
 /// deadline and falls back to the raw text on any throw. The concrete Apple
@@ -258,17 +255,18 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
         // Debug log — symmetric with OpenAICompatibleCorrector. Confirms
         // language + glossary made it into the user message. View with
         // `log stream --predicate 'subsystem == "com.murmur.app" AND
-        // category == "correction"' --level debug`.
+        // category == "correction"' --level debug`. Transcript, glossary
+        // and prompt are user content: `.private`, never public.
         let trimmedPreview = String(trimmed.prefix(200))
         let systemPreview = String(CorrectionPrompts.current.prefix(120))
             + (CorrectionPrompts.current.count > 120 ? "…" : "")
         Self.log.debug("""
         correction[apple] outgoing → on-device
           language=\(language, privacy: .public)
-          glossary=[\(glossaryLine, privacy: .public)]
-          rawIn=\"\(trimmedPreview, privacy: .public)\" (len=\(trimmed.count, privacy: .public))
-          system=\"\(systemPreview, privacy: .public)\"
-          user=\"\(prompt, privacy: .public)\"
+          glossary=[\(glossaryLine, privacy: .private)]
+          rawIn=\"\(trimmedPreview, privacy: .private)\" (len=\(trimmed.count, privacy: .public))
+          system=\"\(systemPreview, privacy: .private)\"
+          user=\"\(prompt, privacy: .private)\"
         """)
         let options = GenerationOptions(
             sampling: .greedy,
@@ -280,10 +278,10 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
         let candidate = response.content
         let validated = CorrectionSafetyRails.validate(candidate: candidate, raw: trimmed)
 
-        // Diagnostic logging — promoted to .public so `log stream --predicate
-        // 'subsystem == "com.murmur.app" AND category == "correction"'` shows
-        // the full pipeline. Previews are capped at 120 chars to keep Console
-        // readable; longer payloads are fine in the debugger.
+        // Diagnostic logging for `log stream --predicate 'subsystem ==
+        // "com.murmur.app" AND category == "correction"'`. The outcome and
+        // lengths are public; the text previews (capped at 120 chars) are
+        // `.private`.
         let rawPreview = String(trimmed.prefix(120))
         let candidatePreview = String(candidate.prefix(120))
         let validatedPreview = String(validated.prefix(120))
@@ -300,16 +298,16 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
         }
         Self.log.info("""
         correction [\(outcome, privacy: .public)] \
-        raw=\"\(rawPreview, privacy: .public)\" \
-        candidate=\"\(candidatePreview, privacy: .public)\" \
-        final=\"\(validatedPreview, privacy: .public)\" \
+        raw=\"\(rawPreview, privacy: .private)\" \
+        candidate=\"\(candidatePreview, privacy: .private)\" \
+        final=\"\(validatedPreview, privacy: .private)\" \
         rawLen=\(trimmed.count, privacy: .public) \
         candLen=\(candidate.count, privacy: .public) \
         finalLen=\(validated.count, privacy: .public)
         """)
 
         // Preserve the original leading/trailing whitespace so downstream
-        // cleanup sees a shape consistent with the raw input.
+        // steps see a shape consistent with the raw input.
         if trimmed != text {
             // Find leading and trailing whitespace from the original.
             let leading = text.prefix { $0.isWhitespace || $0.isNewline }

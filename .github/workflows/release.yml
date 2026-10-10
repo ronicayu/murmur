@@ -12,65 +12,35 @@ jobs:
   build:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v5
+      # Third-party actions are pinned to a commit: this job can write
+      # releases, and a tag can be moved to different code.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: echo "VERSION=${TAG_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve SPM dependencies
         working-directory: Murmur
         run: swift package resolve
 
-      - name: Build release binary
+      # Same light-tier suite as ci.yml; a tag can point at a commit CI never saw.
+      - name: Run tests
         working-directory: Murmur
-        run: swift build -c release
+        run: swift test
 
-      - name: Assemble app bundle
+      # The script builds, assembles, signs and packages; it is the same one
+      # used for local release builds.
+      - name: Build app bundle and DMG
         working-directory: Murmur
-        run: |
-          APP="dist/Murmur.app"
-          mkdir -p "$APP/Contents/MacOS"
-          mkdir -p "$APP/Contents/Resources"
-
-          # Find binary
-          BINARY=".build/arm64-apple-macosx/release/Murmur"
-          [ -f "$BINARY" ] || BINARY=".build/release/Murmur"
-          cp "$BINARY" "$APP/Contents/MacOS/Murmur"
-
-          # Info.plist with version from tag
-          cp Info.plist "$APP/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP/Contents/Info.plist" 2>/dev/null || true
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ steps.version.outputs.VERSION }}" "$APP/Contents/Info.plist"
-
-          # Resources
-          cp Resources/AppIcon.icns "$APP/Contents/Resources/"
-
-          # SPM resource bundle
-          BUNDLE=".build/arm64-apple-macosx/release/Murmur_Murmur.bundle"
-          [ -d "$BUNDLE" ] && cp -R "$BUNDLE" "$APP/Contents/Resources/" || true
-
-          # Ad-hoc sign with entitlements
-          codesign --force --deep --sign - --entitlements Murmur.entitlements "$APP"
-
-      - name: Create DMG with Applications shortcut
-        working-directory: Murmur
-        run: |
-          # Create a staging folder with the app and an Applications symlink
-          DMG_STAGE="dist/dmg-stage"
-          rm -rf "$DMG_STAGE"
-          mkdir -p "$DMG_STAGE"
-          cp -R dist/Murmur.app "$DMG_STAGE/"
-          ln -s /Applications "$DMG_STAGE/Applications"
-
-          hdiutil create -volname "Murmur" -srcfolder "$DMG_STAGE" \
-            -ov -format UDZO "dist/Murmur-${{ steps.version.outputs.VERSION }}.dmg"
-          rm -rf "$DMG_STAGE"
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: ./Scripts/build-release.sh "$VERSION"
 
       - name: Create GitHub Release
-        # softprops/action-gh-release v2 series has been updated to Node 24
-        # compatibility; keep @v2 pinned and revisit if upstream issues a v3.
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: Murmur/dist/Murmur-${{ steps.version.outputs.VERSION }}.dmg
           generate_release_notes: true

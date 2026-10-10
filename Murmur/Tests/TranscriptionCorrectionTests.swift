@@ -176,7 +176,6 @@ final class CoordinatorCorrectionTests: XCTestCase {
         coordinator.correction = spyCorrection
         coordinator.skipAccessibilityCheck = true
         // Isolate correction from cleanup by defaulting cleanup off.
-        UserDefaults.standard.set(false, forKey: "cleanupTranscription")
     }
 
     override func tearDown() {
@@ -185,7 +184,6 @@ final class CoordinatorCorrectionTests: XCTestCase {
         spyPill = nil
         spyTranscription = nil
         UserDefaults.standard.removeObject(forKey: "correctTranscription")
-        UserDefaults.standard.removeObject(forKey: "cleanupTranscription")
         super.tearDown()
     }
 

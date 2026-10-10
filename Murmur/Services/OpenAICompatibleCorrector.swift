@@ -23,9 +23,14 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
     ///   - baseURL: the endpoint root (e.g. `http://localhost:11434/v1`).
     ///     `chat/completions` is appended by this class.
     ///   - modelName: the model identifier the server recognises.
-    ///   - apiKey: nil for local servers; set for hosted OpenAI-compatible providers.
+    ///   - apiKey: optional bearer token. nil for keyless local servers.
     ///   - session: injectable for tests; defaults to `.shared`.
-    init(baseURL: URL, modelName: String, apiKey: String? = nil, session: URLSession = .shared) {
+    init(
+        baseURL: URL,
+        modelName: String,
+        apiKey: String? = nil,
+        session: URLSession = .shared
+    ) {
         self.baseURL = baseURL
         self.modelName = modelName
         self.apiKey = apiKey
@@ -52,9 +57,9 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
         // Debug log of the outgoing request — useful for verifying that the
         // glossary actually reaches the server and the prompt looks right.
         // Stream with: `log stream --predicate 'subsystem == "com.murmur.app"
-        // AND category == "correction"' --level debug`. Body previews are
-        // capped to keep Console readable; switch to .debug level so default
-        // Console output is unaffected.
+        // AND category == "correction"' --level debug`. The transcript,
+        // glossary and prompt are user content and are logged `.private`:
+        // they show as <private> unless private logging is enabled on the Mac.
         Self.logOutgoingRequest(request: request, language: language, glossary: glossary, trimmed: trimmed)
 
         let (data, response) = try await session.data(for: request)
@@ -62,8 +67,11 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
             throw MurmurError.transcriptionFailed("Local LLM: non-HTTP response")
         }
         guard http.statusCode == 200 else {
+            // The body can echo the request, so it stays out of the thrown
+            // error (the coordinator logs that publicly).
             let bodySnippet = String(data: data.prefix(200), encoding: .utf8) ?? ""
-            throw MurmurError.transcriptionFailed("Local LLM HTTP \(http.statusCode): \(bodySnippet)")
+            Self.log.error("correction[local] HTTP \(http.statusCode, privacy: .public): \(bodySnippet, privacy: .private)")
+            throw MurmurError.transcriptionFailed("Local LLM HTTP \(http.statusCode)")
         }
 
         let candidate = try Self.parseChatResponse(data: data)
@@ -103,6 +111,11 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let apiKey, !apiKey.isEmpty {
+            guard allowsAPIKey(over: baseURL) else {
+                throw MurmurError.transcriptionFailed(
+                    "Local LLM: refusing to send the API key over an unencrypted connection. Use an https:// base URL."
+                )
+            }
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
 
@@ -140,6 +153,24 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
         return request
     }
 
+    /// Whether a bearer token may be sent to `baseURL`: only over https, or
+    /// over plain http to this machine (the documented Ollama / LM Studio
+    /// setup). Anything else would put the key on the network in clear text.
+    static func allowsAPIKey(over baseURL: URL) -> Bool {
+        switch baseURL.scheme?.lowercased() {
+        case "https":
+            return true
+        case "http":
+            // `URL.host` reports an IPv6 literal with or without brackets
+            // depending on the OS version.
+            let host = (baseURL.host ?? "").lowercased()
+                .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            return ["localhost", "127.0.0.1", "::1"].contains(host)
+        default:
+            return false
+        }
+    }
+
     /// Parse an OpenAI-compatible non-streaming chat completion response.
     static func parseChatResponse(data: Data) throws -> String {
         struct Response: Decodable {
@@ -163,7 +194,8 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
     /// Prints the outgoing chat-completion payload at `.debug` level so power
     /// users can verify the system prompt and glossary line. Truncates the
     /// system prompt preview because users typically only want to confirm
-    /// length / overall shape, not re-read the full body each time.
+    /// length / overall shape, not re-read the full body each time. Only
+    /// lengths and the language code are public.
     private static func logOutgoingRequest(
         request: URLRequest,
         language: String,
@@ -190,12 +222,12 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
         }
 
         log.debug("""
-        correction[local] outgoing → \(endpoint, privacy: .public)
+        correction[local] outgoing → \(endpoint, privacy: .private)
           language=\(language, privacy: .public)
-          glossary=[\(glossaryPreview, privacy: .public)]
-          rawIn=\"\(trimmedPreview, privacy: .public)\" (len=\(trimmed.count, privacy: .public))
-          system=\"\(systemPreview, privacy: .public)\"
-          user=\"\(userPreview, privacy: .public)\"
+          glossary=[\(glossaryPreview, privacy: .private)]
+          rawIn=\"\(trimmedPreview, privacy: .private)\" (len=\(trimmed.count, privacy: .public))
+          system=\"\(systemPreview, privacy: .private)\"
+          user=\"\(userPreview, privacy: .private)\"
         """)
     }
 
@@ -215,9 +247,9 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
         let finalPreview = String(final.prefix(120))
         log.info("""
         correction[local] [\(outcome, privacy: .public)] \
-        raw=\"\(rawPreview, privacy: .public)\" \
-        candidate=\"\(candidatePreview, privacy: .public)\" \
-        final=\"\(finalPreview, privacy: .public)\" \
+        raw=\"\(rawPreview, privacy: .private)\" \
+        candidate=\"\(candidatePreview, privacy: .private)\" \
+        final=\"\(finalPreview, privacy: .private)\" \
         rawLen=\(raw.count, privacy: .public) \
         candLen=\(candidate.count, privacy: .public) \
         finalLen=\(final.count, privacy: .public)

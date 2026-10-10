@@ -46,8 +46,6 @@ struct MurmurApp: App {
         }
 
 
-        // v0.3.0: rule-based cleanup service — always available, no download gate.
-        coord.cleanup = PunctuationCleanupService()
 
         // Wire the ASR-error correction engine chosen by Settings. Supports
         // swapping between Apple on-device and a local Ollama server — see

@@ -4,10 +4,9 @@ import os
 /// Collects AVAudioPCMBuffer fragments from an audio engine tap and fires a callback
 /// when enough samples have accumulated for one streaming chunk.
 ///
-/// Thread-safety: `append()` and `flush()` are guarded by an NSLock.
+/// Thread-safety: all state, including `onChunkReady`, is guarded by an NSLock.
 /// The `onChunkReady` callback is invoked synchronously on the caller's thread
-/// (the AVAudioEngine tap thread). Callers must not call back into the accumulator
-/// from within `onChunkReady` — doing so would deadlock.
+/// (the AVAudioEngine tap thread), outside the lock.
 ///
 /// Usage:
 /// ```swift
@@ -30,38 +29,38 @@ final class AudioBufferAccumulator: @unchecked Sendable {
     // MARK: - Public interface
 
     /// Called with a full-chunk PCM buffer each time `samplesPerChunk` frames accumulate.
-    /// Invoked synchronously on the thread that called `append(_:)`.
-    var onChunkReady: ((AVAudioPCMBuffer) -> Void)?
+    /// Invoked synchronously on the thread that called `append(_:)`. It is set
+    /// from the main actor and read on the audio tap thread, hence the lock.
+    var onChunkReady: ((AVAudioPCMBuffer) -> Void)? {
+        get {
+            lock.lock(); defer { lock.unlock() }
+            return chunkHandler
+        }
+        set {
+            lock.lock(); defer { lock.unlock() }
+            chunkHandler = newValue
+        }
+    }
 
     // MARK: - Private state
 
     private let samplesPerChunk: Int
     private let sampleRate: Double
     private var pendingFrames: [Float] = []
+    private var chunkHandler: ((AVAudioPCMBuffer) -> Void)?
     private let lock = NSLock()
     private let logger = Logger(subsystem: "com.murmur.app", category: "accumulator")
-
-    /// Optional VAD detector. When non-nil, chunk boundaries follow Silero
-    /// speech segments instead of fixed sample counts — `samplesPerChunk`
-    /// is ignored on the active path. When nil, the legacy fixed-size
-    /// behaviour is preserved for tests and for the cold-start case where
-    /// the Silero model isn't on disk.
-    private let vad: VadService?
 
     // MARK: - Init
 
     /// - Parameters:
     ///   - samplesPerChunk: Number of audio frames per chunk (e.g. 48000
-    ///     for 3 s at 16 kHz). Ignored when `vad` is non-nil — kept as a
-    ///     parameter for the fallback path and existing test fixtures.
+    ///     for 3 s at 16 kHz).
     ///   - sampleRate: Sample rate of the audio stream (Hz). Used when
     ///     constructing flush buffers.
-    ///   - vad: Optional shared VAD detector. When provided, chunks are
-    ///     emitted on detected speech-segment boundaries.
-    init(samplesPerChunk: Int, sampleRate: Double, vad: VadService? = nil) {
+    init(samplesPerChunk: Int, sampleRate: Double) {
         self.samplesPerChunk = samplesPerChunk
         self.sampleRate = sampleRate
-        self.vad = vad
         self.pendingFrames.reserveCapacity(samplesPerChunk * 2)
     }
 
@@ -80,18 +79,6 @@ final class AudioBufferAccumulator: @unchecked Sendable {
         let frameCount = Int(buffer.frameLength)
         let newSamples = Array(UnsafeBufferPointer(start: channelData[0], count: frameCount))
 
-        if let vad {
-            // VAD-driven mode: feed and emit one chunk per detected
-            // speech segment. We don't keep a `pendingFrames` buffer
-            // here — VAD owns the audio, and the segment struct carries
-            // its samples back to us.
-            vad.feed(newSamples)
-            for segment in vad.popSegments() {
-                deliverChunk(samples: segment.samples)
-            }
-            return
-        }
-
         lock.lock()
         pendingFrames.append(contentsOf: newSamples)
 
@@ -99,9 +86,10 @@ final class AudioBufferAccumulator: @unchecked Sendable {
         while pendingFrames.count >= samplesPerChunk {
             let chunkSamples = Array(pendingFrames.prefix(samplesPerChunk))
             pendingFrames.removeFirst(samplesPerChunk)
+            let handler = chunkHandler
             lock.unlock()
 
-            deliverChunk(samples: chunkSamples)
+            deliverChunk(samples: chunkSamples, to: handler)
 
             lock.lock()
         }
@@ -116,18 +104,6 @@ final class AudioBufferAccumulator: @unchecked Sendable {
     ///
     /// Call this when recording stops to ensure the tail audio is not silently discarded.
     func flush() -> AVAudioPCMBuffer? {
-        if let vad {
-            // VAD-driven mode: ask Silero to close any in-progress segment
-            // and emit each remaining one via the regular callback path.
-            // Returning nil keeps the existing caller pattern
-            // (`if let partial = flush() { handleChunkReady(partial) }`)
-            // safe — no double delivery.
-            for segment in vad.endOfStream() {
-                deliverChunk(samples: segment.samples)
-            }
-            return nil
-        }
-
         lock.lock()
         let remaining = pendingFrames
         pendingFrames.removeAll(keepingCapacity: true)
@@ -140,12 +116,13 @@ final class AudioBufferAccumulator: @unchecked Sendable {
 
     // MARK: - Private helpers
 
-    private func deliverChunk(samples: [Float]) {
+    private func deliverChunk(samples: [Float], to handler: ((AVAudioPCMBuffer) -> Void)?) {
+        guard let handler else { return }
         guard let buffer = makePCMBuffer(samples: samples) else {
             logger.error("AudioBufferAccumulator: failed to allocate chunk buffer (\(samples.count) samples)")
             return
         }
-        onChunkReady?(buffer)
+        handler(buffer)
     }
 
     private func makePCMBuffer(samples: [Float]) -> AVAudioPCMBuffer? {

@@ -22,6 +22,6 @@ Update procedure:
    module name expected).
 5. Replace Murmur/Services/Vendor/SherpaOnnx.swift from the matching tag and
    re-add `import SherpaOnnxC` at the top if the upstream copy omits it.
-6. swift test --filter FireRedTranscriptionServiceTests
+6. swift test --filter Qwen3TranscriptionServiceTests
 
 License: Apache-2.0 (see Murmur/vendor/sherpa-onnx-LICENSE.txt)

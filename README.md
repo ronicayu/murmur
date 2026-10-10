@@ -203,7 +203,7 @@ Murmur unloads the model when your Mac sleeps to free memory, and reloads it whe
 
 - **Qwen3TranscriptionService** — the one speech engine. Loads the model lazily, retries when a decode comes back corrupt, and splits long audio at pauses.
 - **StreamingTranscriptionCoordinator** — re-transcribes the growing audio window every second and shows the words two consecutive passes agree on (`StablePrefixAggregator`).
-- **ModelManager** — downloads the model files from Hugging Face with the system `curl` (no Python), verifies them against a manifest.
+- **ModelManager** — downloads the model files from a pinned revision on Hugging Face with the system `curl` (no Python), and checks every file's SHA-256 against that revision's listing before the model is marked ready.
 - Model preloads on launch and after wake for instant first transcription.
 
 ## Project Structure
@@ -226,8 +226,8 @@ Murmur/
 │   ├── LongRecordingService.swift           # Long audio recording for transcription
 │   ├── TranscriptionHistoryService.swift    # Persistent transcription history
 │   ├── TranscriptionCorrectionService.swift # Optional LLM correction
-│   ├── PunctuationCleanupService.swift      # Rule-based punctuation clean-up
 │   ├── ModelManager.swift                   # Model download, verification
+│   ├── HFDownload.swift                     # Download decisions: listing, paths, hashes, curl arguments
 │   ├── PermissionsService.swift             # Mic + accessibility checks
 │   ├── AudioFeedbackService.swift           # System sounds
 │   └── Vendor/SherpaOnnx.swift              # sherpa-onnx Swift wrapper

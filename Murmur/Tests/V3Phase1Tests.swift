@@ -14,9 +14,13 @@ import AppKit
 //   6. AppState streaming case — statusText + equality
 //   7. CPULoadMonitor — callback fires on sustained high load (unit-level)
 //   8. InjectedRangeTracker — offset accounting
+//  18. Session identity — one session's late work never reaches another
 
 // MARK: - 1. AudioBufferAccumulator (production file)
 
+// V3Phase0Tests.swift declares a test-only `AudioBufferAccumulator` prototype in
+// this module, which an unqualified name would pick. Every use in this file is
+// qualified with the module name so that it means the production type.
 final class AudioBufferAccumulatorProductionTests: XCTestCase {
 
     private let sampleRate: Double = 16000
@@ -37,7 +41,7 @@ final class AudioBufferAccumulatorProductionTests: XCTestCase {
     func test_accumulator_firesCallback_whenChunkThresholdReached() {
         // Arrange
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = AudioBufferAccumulator(
+        let accumulator = Murmur.AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -62,7 +66,7 @@ final class AudioBufferAccumulatorProductionTests: XCTestCase {
 
     func test_accumulator_doesNotFire_beforeThreshold() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = AudioBufferAccumulator(
+        let accumulator = Murmur.AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -79,7 +83,7 @@ final class AudioBufferAccumulatorProductionTests: XCTestCase {
 
     func test_accumulator_flush_returnsPartialBuffer_andClearsState() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = AudioBufferAccumulator(
+        let accumulator = Murmur.AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -104,7 +108,7 @@ final class AudioBufferAccumulatorProductionTests: XCTestCase {
 
     func test_accumulator_firesMultipleCallbacks_whenFeedingMultipleChunksAtOnce() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = AudioBufferAccumulator(
+        let accumulator = Murmur.AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -120,7 +124,7 @@ final class AudioBufferAccumulatorProductionTests: XCTestCase {
     // MARK: - Private helpers
 
     private func feedSilence(
-        to accumulator: AudioBufferAccumulator,
+        to accumulator: Murmur.AudioBufferAccumulator,
         totalSamples: Int,
         fragmentSize: Int
     ) {
@@ -243,7 +247,7 @@ final class StreamingCoordinatorStateMachineTests: XCTestCase {
             "Coordinator must reach .done after endSession + full-pass. Got \(finalState)")
     }
 
-    // MARK: 2e — beginSession while not idle is a no-op (returns dummy accumulator)
+    // MARK: 2e — beginSession during a session is a no-op (returns dummy accumulator)
 
     func test_coordinator_beginSession_whileStreaming_isNoOp() async {
         let tempURL = FileManager.default.temporaryDirectory
@@ -260,6 +264,9 @@ final class StreamingCoordinatorStateMachineTests: XCTestCase {
             startOffset: 10, fullWavURL: tempURL
         )
         XCTAssertNotNil(acc2)
+        let state = await coordinator.sessionState
+        XCTAssertEqual(state, .streaming(chunkCount: 0),
+            "The running session must not be disturbed")
 
         await coordinator.cancelSession()
     }
@@ -478,34 +485,142 @@ final class InjectedRangeTrackerTests: XCTestCase {
 
 // MARK: - 8. CPULoadMonitor — callback fires on sustained high load
 
+/// Hands the monitor made-up tick readings: each reading adds `step` to the
+/// one before it, starting from `start` (the "since boot" totals).
+private final class FakeCPUTicks: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ticks: CPUTicks
+    private let step: CPUTicks
+
+    init(start: CPUTicks, step: CPUTicks) {
+        self.ticks = start
+        self.step = step
+    }
+
+    func next() -> CPUTicks? {
+        lock.withLock {
+            let reading = ticks
+            ticks.user &+= step.user
+            ticks.system &+= step.system
+            ticks.idle &+= step.idle
+            ticks.nice &+= step.nice
+            return reading
+        }
+    }
+
+    /// A host that idled for a long time and is fully busy from now on.
+    static func busyNowIdleSinceBoot() -> FakeCPUTicks {
+        FakeCPUTicks(
+            start: CPUTicks(user: 0, system: 0, idle: 1_000_000, nice: 0),
+            step: CPUTicks(user: 80, system: 20, idle: 0, nice: 0)
+        )
+    }
+
+    /// A host that was busy for a long time and is fully idle from now on.
+    static func idleNowBusySinceBoot() -> FakeCPUTicks {
+        FakeCPUTicks(
+            start: CPUTicks(user: 1_000_000, system: 0, idle: 0, nice: 0),
+            step: CPUTicks(user: 0, system: 0, idle: 100, nice: 0)
+        )
+    }
+}
+
 final class CPULoadMonitorTests: XCTestCase {
 
-    func test_cpuMonitor_doesNotFire_onLowLoad() async throws {
-        // Arrange: threshold > 1.0 ensures it never triggers
+    // MARK: 8a — load is measured between two readings, not since boot
+
+    func test_load_isTheBusyShareBetweenTwoReadings() {
+        let before = CPUTicks(user: 1000, system: 500, idle: 90_000, nice: 0)
+        let after = CPUTicks(user: 1060, system: 530, idle: 90_010, nice: 0)
+        // 60 + 30 busy ticks out of 100.
+        XCTAssertEqual(CPULoadMonitor.load(from: before, to: after), 0.9, accuracy: 0.0001)
+    }
+
+    func test_load_ignoresHowBusyTheHostWasBeforeTheFirstReading() {
+        let before = CPUTicks(user: 900_000, system: 90_000, idle: 10_000, nice: 0)
+        let after = CPUTicks(user: 900_000, system: 90_000, idle: 10_100, nice: 0)
+        XCTAssertEqual(CPULoadMonitor.load(from: before, to: after), 0.0, accuracy: 0.0001)
+    }
+
+    func test_load_isZeroWhenNoTimePassed() {
+        let reading = CPUTicks(user: 5, system: 5, idle: 5, nice: 5)
+        XCTAssertEqual(CPULoadMonitor.load(from: reading, to: reading), 0.0)
+    }
+
+    func test_load_survivesACounterWrappingAround() {
+        let before = CPUTicks(user: UInt32.max - 9, system: 0, idle: 100, nice: 0)
+        let after = CPUTicks(user: 40, system: 0, idle: 150, nice: 0)
+        // user advanced by 50 across the wrap, idle by 50.
+        XCTAssertEqual(CPULoadMonitor.load(from: before, to: after), 0.5, accuracy: 0.0001)
+    }
+
+    // MARK: 8b — the monitor acts on current load
+
+    func test_cpuMonitor_fires_whenBusyNow_evenIfIdleSinceBoot() async {
+        let ticks = FakeCPUTicks.busyNowIdleSinceBoot()
         let monitor = CPULoadMonitor(
-            threshold: 2.0,   // impossible to exceed
-            sustainedSeconds: 0.5,
-            pollInterval: 0.1
+            threshold: 0.9,
+            sustainedSeconds: 0.05,
+            pollInterval: 0.02,
+            sampleTicks: { ticks.next() }
         )
         let fires = LockedCounter()
         await MainActor.run {
             monitor.onSustainedHighLoad = { fires.increment() }
         }
         monitor.start()
-        try await Task.sleep(for: .seconds(1))
+        let fired = await pollUntil(timeout: 5) { fires.value >= 1 }
         await MainActor.run { monitor.stop() }
-        let fired = fires.value > 0
 
-        XCTAssertFalse(fired,
-            "Callback must not fire when CPU load never exceeds the threshold")
+        XCTAssertTrue(fired,
+            "Sustained load between readings must fire, whatever the average since boot")
+    }
+
+    func test_cpuMonitor_doesNotFire_whenIdleNow_evenIfBusySinceBoot() async throws {
+        let ticks = FakeCPUTicks.idleNowBusySinceBoot()
+        let monitor = CPULoadMonitor(
+            threshold: 0.9,
+            sustainedSeconds: 0.05,
+            pollInterval: 0.02,
+            sampleTicks: { ticks.next() }
+        )
+        let fires = LockedCounter()
+        await MainActor.run {
+            monitor.onSustainedHighLoad = { fires.increment() }
+        }
+        monitor.start()
+        try await Task.sleep(for: .seconds(0.4))
+        await MainActor.run { monitor.stop() }
+
+        XCTAssertEqual(fires.value, 0,
+            "A host that is idle now must not trigger the fallback because it was busy earlier")
+    }
+
+    func test_cpuMonitor_doesNotFire_whenTheReadingFails() async throws {
+        let monitor = CPULoadMonitor(
+            threshold: 0.0,
+            sustainedSeconds: 0.05,
+            pollInterval: 0.02,
+            sampleTicks: { nil }
+        )
+        let fires = LockedCounter()
+        await MainActor.run {
+            monitor.onSustainedHighLoad = { fires.increment() }
+        }
+        monitor.start()
+        try await Task.sleep(for: .seconds(0.3))
+        await MainActor.run { monitor.stop() }
+
+        XCTAssertEqual(fires.value, 0, "No reading means no load, not full load")
     }
 
     func test_cpuMonitor_stop_preventsSubsequentCallbacks() async throws {
-        // Arrange: threshold 0.0 would always trigger
+        let ticks = FakeCPUTicks.busyNowIdleSinceBoot()
         let monitor = CPULoadMonitor(
-            threshold: 0.0,
+            threshold: 0.9,
             sustainedSeconds: 0.1,
-            pollInterval: 0.05
+            pollInterval: 0.05,
+            sampleTicks: { ticks.next() }
         )
         let fires = LockedCounter()
         await MainActor.run {
@@ -575,19 +690,12 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
             language: "en",
             targetAppPID: getpid(),
             startOffset: 0,
-            fullWavURL: wavURL
+            fullWavURL: wavURL,
+            incrementalSeconds: 3.0
         )
 
         // Feed enough samples to trigger two chunks
-        let sampleRate: Double = 16000
-        let samplesPerChunk = Int(sampleRate * 3.0)
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate, channels: 1, interleaved: false
-        )!
-        let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samplesPerChunk * 2))!
-        buf.frameLength = AVAudioFrameCount(samplesPerChunk * 2)
-        accumulator.append(buf)
+        accumulator.append(makeAudibleBuffer(seconds: 6.0))
 
         // Allow chunk tasks to dispatch
         try await Task.sleep(for: .milliseconds(200))
@@ -648,17 +756,11 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: wavURL) }
 
         let acc = await coordinator.beginSession(
-            language: "zh", targetAppPID: getpid(), startOffset: 0, fullWavURL: wavURL)
+            language: "zh", targetAppPID: getpid(), startOffset: 0, fullWavURL: wavURL,
+            incrementalSeconds: 3.0)
 
-        let sampleRate: Double = 16000
-        let perChunk = Int(sampleRate * 3.0)
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
-            channels: 1, interleaved: false)!
         func feedOneChunk() async throws {
-            let b = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(perChunk))!
-            b.frameLength = AVAudioFrameCount(perChunk)
-            acc.append(b)
+            acc.append(makeAudibleBuffer(seconds: 3.0))
             try await Task.sleep(for: .milliseconds(400))   // let each pass finish, in order
         }
 
@@ -684,39 +786,29 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
     // MARK: 9b — Tracker invalidated mid-session: full-pass skips replacement
 
     func test_pipeline_trackerInvalidated_skipsFullPassReplacement() async throws {
-        // Arrange: chunk returns text; full-pass also returns text (would normally replace).
+        // Arrange: window passes return one text; the full pass (told apart by
+        // its URL) returns another, which would normally replace it.
         // But we simulate cursor movement by invalidating the tracker directly.
-        var callCount = 0
-        mockTranscription.onTranscribe = { _ in
-            callCount += 1
-            if callCount == 1 {
-                return TranscriptionResult(text: "streaming chunk", language: .english, durationMs: 500)
-            }
-            return TranscriptionResult(text: "full pass result different", language: .english, durationMs: 500)
-        }
-
         let wavURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("test_invalidated_\(UUID().uuidString).wav")
         try createMinimalWAV(at: wavURL)
         defer { try? FileManager.default.removeItem(at: wavURL) }
 
+        mockTranscription.onTranscribe = { url in
+            let text = url == wavURL ? "full pass result different" : "streaming chunk"
+            return TranscriptionResult(text: text, language: .english, durationMs: 500)
+        }
+
         let accumulator = await coordinator.beginSession(
             language: "en",
             targetAppPID: getpid(),
             startOffset: 0,
-            fullWavURL: wavURL
+            fullWavURL: wavURL,
+            incrementalSeconds: 3.0
         )
 
         // Feed one chunk worth of audio
-        let sampleRate: Double = 16000
-        let samplesPerChunk = Int(sampleRate * 3.0)
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate, channels: 1, interleaved: false
-        )!
-        let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samplesPerChunk))!
-        buf.frameLength = AVAudioFrameCount(samplesPerChunk)
-        accumulator.append(buf)
+        accumulator.append(makeAudibleBuffer(seconds: 3.0))
         try await Task.sleep(for: .milliseconds(200))
 
         // Simulate cursor moved mid-session: invalidate the tracker
@@ -735,6 +827,8 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
         }
 
         XCTAssertEqual(finalState, .done)
+        XCTAssertEqual(mockInjection.appendedTexts.joined(), "streaming chunk",
+            "Precondition: text was streamed, so only the invalidation stops the replacement")
         XCTAssertTrue(
             mockInjection.replaceRangeCalls.isEmpty,
             "replaceRange must NOT be called when tracker is invalidated (cursor moved mid-session)"
@@ -908,18 +1002,24 @@ final class StreamingCoordinatorExtendedStateMachineTests: XCTestCase {
             "endSession called while idle must leave state as idle")
     }
 
-    // MARK: 12b — cancelSession while idle transitions to cancelled
+    // MARK: 12b — cancelSession while idle is a no-op (stays idle)
 
-    func test_coordinator_cancelSession_whileIdle_transitionsToCancelled() async {
+    func test_coordinator_cancelSession_whileIdle_staysIdle() async {
         await coordinator.cancelSession()
         let state = await coordinator.sessionState
-        XCTAssertEqual(state, .cancelled,
-            "cancelSession must always transition to .cancelled regardless of prior state")
+        XCTAssertEqual(state, .idle,
+            "There is nothing to cancel while idle; a .cancelled state would block the next session")
     }
 
     // MARK: 12c — cancelSession while already cancelled stays cancelled
 
     func test_coordinator_cancelSession_whileAlreadyCancelled_staysCancelled() async {
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_\(UUID().uuidString).wav")
+        _ = await coordinator.beginSession(
+            language: "en", targetAppPID: getpid(),
+            startOffset: 0, fullWavURL: tempURL
+        )
         await coordinator.cancelSession()
         await coordinator.cancelSession()
         let state = await coordinator.sessionState
@@ -953,19 +1053,12 @@ final class StreamingCoordinatorExtendedStateMachineTests: XCTestCase {
             language: "en",
             targetAppPID: getpid(),
             startOffset: 0,
-            fullWavURL: wavURL
+            fullWavURL: wavURL,
+            incrementalSeconds: 3.0
         )
 
         // Feed one full chunk to trigger a streaming transcription (returns sameText)
-        let sampleRate: Double = 16000
-        let samplesPerChunk = Int(sampleRate * 3.0)
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate, channels: 1, interleaved: false
-        )!
-        let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samplesPerChunk))!
-        buf.frameLength = AVAudioFrameCount(samplesPerChunk)
-        accumulator.append(buf)
+        accumulator.append(makeAudibleBuffer(seconds: 3.0))
         try await Task.sleep(for: .milliseconds(200))
 
         // Full-pass will also return sameText — no replacement needed
@@ -990,11 +1083,12 @@ final class StreamingCoordinatorExtendedStateMachineTests: XCTestCase {
     // MARK: 12f — full-pass timeout path: transitions to done without replacement
 
     func test_coordinator_fullPassTimeout_transitionsToDone_withoutReplacement() async throws {
-        // Stub transcription to never return (simulates timeout by taking very long)
-        // We use a custom coordinator with a short timeout to keep the test fast.
-        let slowTranscription = SlowMockTranscriptionService(delaySeconds: 60)
+        // The full pass never returns during the test and, like the real
+        // decode, cannot be cancelled: the timeout must not wait for it.
+        let stuckTranscription = GatedTranscriptionService()
+        defer { stuckTranscription.releaseAll() }
         let fastCoordinator = await StreamingTranscriptionCoordinator(
-            transcription: slowTranscription,
+            transcription: stuckTranscription,
             injection: mockInjection,
             fullPassTimeoutOverride: 0.2   // 200ms — fast timeout for test
         )
@@ -1013,16 +1107,12 @@ final class StreamingCoordinatorExtendedStateMachineTests: XCTestCase {
         await fastCoordinator.updateFullWavURL(wavURL)
         await fastCoordinator.endSession()
 
-        let deadline = Date().addingTimeInterval(3)
-        var finalState = await fastCoordinator.sessionState
-        while Date() < deadline {
-            finalState = await fastCoordinator.sessionState
-            if case .done = finalState { break }
-            try await Task.sleep(for: .milliseconds(50))
-        }
+        let reachedDone = await pollUntil(timeout: 5) { fastCoordinator.sessionState == .done }
 
-        XCTAssertEqual(finalState, .done,
-            "Coordinator must reach .done even when full-pass transcription times out")
+        XCTAssertTrue(reachedDone,
+            "Coordinator must reach .done when the full pass times out, without waiting for the decode")
+        XCTAssertEqual(stuckTranscription.finishedCount, 0,
+            "Precondition: the decode is still running when the session is done")
         XCTAssertTrue(
             mockInjection.replaceRangeCalls.isEmpty,
             "replaceRange must NOT be called when full-pass timed out"
@@ -1227,53 +1317,27 @@ private final class FakeRunningApp: NSRunningApplication {
 
 final class CPULoadMonitorEdgeCaseTests: XCTestCase {
 
-    // MARK: 14a — load normalising resets the high-load timer
-
-    func test_cpuMonitor_loadNormalising_resetsTimer_preventsCallback() async throws {
-        // Use a custom monitor subclass that allows injecting load values.
-        // Since CPULoadMonitor.currentCPULoad() is private, we test via
-        // threshold boundary: set threshold at 0.5. Feed one poll cycle above,
-        // then one poll cycle below. The callback must not fire because the
-        // sustained window was not reached before reset.
-        //
-        // We cannot inject loads directly, so we verify observable behaviour:
-        // with threshold=0.0 (always high), a 3-poll sequence SHOULD fire.
-        // This test already covered by 8b. Here we test the normalise path via
-        // a very high threshold that never triggers.
-        let monitor = CPULoadMonitor(
-            threshold: 1.5,   // impossible — ensures evaluate always takes the else branch
-            sustainedSeconds: 0.1,
-            pollInterval: 0.05
-        )
-        let fires = LockedCounter()
-        await MainActor.run { monitor.onSustainedHighLoad = { fires.increment() } }
-        monitor.start()
-        try await Task.sleep(for: .seconds(0.4))
-        await MainActor.run { monitor.stop() }
-
-        XCTAssertFalse(fires.value > 0,
-            "onSustainedHighLoad must not fire when load never exceeds impossible threshold")
-    }
-
     // MARK: 14b — multiple start/stop cycles do not cause double-firing
 
     func test_cpuMonitor_startStop_multipleCycles_noDoubleFire() async throws {
         let fires = LockedCounter()
+        let ticks = FakeCPUTicks.busyNowIdleSinceBoot()
         let monitor = CPULoadMonitor(
-            threshold: 0.0,
+            threshold: 0.9,
             sustainedSeconds: 0.05,
-            pollInterval: 0.02
+            pollInterval: 0.02,
+            sampleTicks: { ticks.next() }
         )
         await MainActor.run { monitor.onSustainedHighLoad = { fires.increment() } }
 
-        // First cycle: with threshold 0.0 the monitor detects sustained load
-        // and fires exactly once (evaluate() self-stops on fire). Poll for the
+        // First cycle: every reading is fully busy, so the monitor detects sustained
+        // load and fires exactly once (evaluate() self-stops on fire). Poll for the
         // fire rather than sleeping a fixed window — under machine load the
         // detached poller can be starved past any fixed budget.
         monitor.start()
         let firedFirst = await pollUntil { fires.value >= 1 }
         XCTAssertTrue(firedFirst,
-            "With threshold=0.0, callback must fire at least once during start")
+            "With a fully busy host, callback must fire at least once during start")
         let firstCount = fires.value
 
         // After an explicit stop, the count must not advance.
@@ -1389,9 +1453,8 @@ final class ElectronBlocklistTests: XCTestCase {
 // MARK: - 16. Edit distance / ratio — boundary conditions
 
 final class EditDistanceRatioTests: XCTestCase {
-    // These tests exercise StreamingTranscriptionCoordinator's private
-    // computeEditDistanceRatio via a local mirror. The logic is pure and
-    // self-contained, making it safe to mirror here without @testable duplication.
+    // StreamingTranscriptionCoordinator.editDistanceRatio decides whether the
+    // full pass replaces the streamed text.
 
     // MARK: 16a — identical strings → 0.0
 
@@ -1437,30 +1500,8 @@ final class EditDistanceRatioTests: XCTestCase {
             "One-char error in 11-char string must exceed 0.01 threshold")
     }
 
-    // MARK: - Private mirror of computeEditDistanceRatio
-
     private func ratio(_ a: String, _ b: String) -> Double {
-        guard !a.isEmpty || !b.isEmpty else { return 0.0 }
-        let distance = levenshtein(Array(a), Array(b))
-        let maxLen = max(a.count, b.count)
-        return Double(distance) / Double(maxLen)
-    }
-
-    private func levenshtein<T: Equatable>(_ a: [T], _ b: [T]) -> Int {
-        let m = a.count, n = b.count
-        if m == 0 { return n }
-        if n == 0 { return m }
-        var previous = Array(0...n)
-        var current = [Int](repeating: 0, count: n + 1)
-        for i in 1...m {
-            current[0] = i
-            for j in 1...n {
-                let cost = a[i - 1] == b[j - 1] ? 0 : 1
-                current[j] = Swift.min(current[j-1]+1, previous[j]+1, previous[j-1]+cost)
-            }
-            swap(&previous, &current)
-        }
-        return previous[n]
+        StreamingTranscriptionCoordinator.editDistanceRatio(a, b)
     }
 }
 
@@ -1485,7 +1526,7 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
 
     func test_accumulator_appendZeroLengthBuffer_isNoOp() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = AudioBufferAccumulator(
+        let accumulator = Murmur.AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -1503,7 +1544,7 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
     // MARK: 17b — flush on empty accumulator returns nil
 
     func test_accumulator_flush_onEmpty_returnsNil() {
-        let accumulator = AudioBufferAccumulator(
+        let accumulator = Murmur.AudioBufferAccumulator(
             samplesPerChunk: Int(sampleRate * 3.0),
             sampleRate: sampleRate
         )
@@ -1515,7 +1556,7 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
 
     func test_accumulator_feedTwoChunksPlusRemainder_flushesRemainder() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = AudioBufferAccumulator(
+        let accumulator = Murmur.AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -1545,7 +1586,7 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
 
     func test_accumulator_replacingOnChunkReady_midAccumulation() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = AudioBufferAccumulator(
+        let accumulator = Murmur.AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -1578,7 +1619,7 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
 
     func test_accumulator_nilOnChunkReady_suppressesDelivery() {
         let samplesPerChunk = Int(sampleRate * 3.0)
-        let accumulator = AudioBufferAccumulator(
+        let accumulator = Murmur.AudioBufferAccumulator(
             samplesPerChunk: samplesPerChunk,
             sampleRate: sampleRate
         )
@@ -1593,23 +1634,461 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
         XCTAssertFalse(fired,
             "Setting onChunkReady to nil must suppress chunk delivery")
     }
+
+    // MARK: 17f — the callback can be changed while the audio thread appends
+
+    func test_accumulator_changingOnChunkReady_whileAppending_isSafe() {
+        let accumulator = Murmur.AudioBufferAccumulator(samplesPerChunk: 160, sampleRate: sampleRate)
+        let delivered = LockedCounter()
+        let format = self.format!
+        let rounds = 2000
+
+        DispatchQueue.concurrentPerform(iterations: 2) { worker in
+            for round in 0..<rounds {
+                if worker == 0 {
+                    let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 160)!
+                    buf.frameLength = 160
+                    accumulator.append(buf)
+                } else {
+                    let handler: ((AVAudioPCMBuffer) -> Void)? =
+                        round.isMultiple(of: 2) ? { _ in delivered.increment() } : nil
+                    accumulator.onChunkReady = handler
+                }
+            }
+        }
+
+        XCTAssertLessThanOrEqual(delivered.value, rounds,
+            "Each appended chunk is delivered at most once, to whichever callback was set")
+    }
+}
+
+// MARK: - 18. Sessions do not leak into each other
+
+@MainActor
+final class StreamingCoordinatorSessionIdentityTests: XCTestCase {
+
+    private var injection: MockTextInjectionService!
+    private var wavURL: URL!
+
+    override func setUp() async throws {
+        try await super.setUp()
+        injection = MockTextInjectionService()
+        wavURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_session_\(UUID().uuidString).wav")
+        try makeAudibleWAV(at: wavURL)
+    }
+
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: wavURL)
+        try await super.tearDown()
+    }
+
+    private func makeCoordinator(
+        _ transcription: TranscriptionServiceProtocol,
+        fullPassTimeout: TimeInterval? = nil
+    ) -> StreamingTranscriptionCoordinator {
+        StreamingTranscriptionCoordinator(
+            transcription: transcription,
+            injection: injection,
+            fullPassTimeoutOverride: fullPassTimeout,
+            // No real cursor to read: the mock injection types nothing.
+            cursorOffsetProvider: { nil }
+        )
+    }
+
+    private func begin(
+        _ coordinator: StreamingTranscriptionCoordinator,
+        incrementalSeconds: Double = 1.0,
+        onPreviewText: ((String) -> Void)? = nil
+    ) -> Murmur.AudioBufferAccumulator {
+        coordinator.beginSession(
+            language: "en", targetAppPID: getpid(), startOffset: 0, fullWavURL: wavURL,
+            incrementalSeconds: incrementalSeconds, onPreviewText: onPreviewText
+        )
+    }
+
+    /// Gives main-actor work that is already queued the chance to run.
+    private func letQueuedWorkRun() async throws {
+        try await Task.sleep(for: .milliseconds(100))
+    }
+
+    // MARK: 18a — a start that failed must not poison the next session (S1)
+
+    func test_beginSession_afterACancelWhileIdle_startsALiveSession() async {
+        let transcription = GatedTranscriptionService()
+        defer { transcription.releaseAll() }
+        let coordinator = makeCoordinator(transcription)
+
+        // What the owner does when starting the recording fails: cancel a
+        // session that never began.
+        coordinator.cancelSession()
+        XCTAssertEqual(coordinator.sessionState, .idle)
+
+        let accumulator = begin(coordinator)
+        XCTAssertEqual(coordinator.sessionState, .streaming(chunkCount: 0))
+
+        accumulator.append(makeAudibleBuffer(seconds: 1.0))
+        let transcribed = await pollUntil { transcription.startedCount == 1 }
+        XCTAssertTrue(transcribed, "The returned accumulator must feed the session")
+    }
+
+    func test_beginSession_fromATerminalState_startsALiveSession() async {
+        let transcription = GatedTranscriptionService()
+        defer { transcription.releaseAll() }
+        let coordinator = makeCoordinator(transcription)
+
+        _ = begin(coordinator)
+        coordinator.cancellationReason = .backstopTimeout
+        coordinator.cancelSession()
+        XCTAssertEqual(coordinator.sessionState, .cancelled)
+
+        // No resetToIdle() in between.
+        let accumulator = begin(coordinator)
+        XCTAssertEqual(coordinator.sessionState, .streaming(chunkCount: 0))
+        XCTAssertNil(coordinator.cancellationReason,
+            "The previous session's cancellation must not be reported for this one")
+
+        accumulator.append(makeAudibleBuffer(seconds: 1.0))
+        let transcribed = await pollUntil { transcription.startedCount == 1 }
+        XCTAssertTrue(transcribed, "The returned accumulator must feed the session")
+    }
+
+    func test_previousSessionsResults_areCleared_byBeginAndByReset() async {
+        let transcription = MockTranscriptionService()
+        transcription.stubbedResult = TranscriptionResult(text: "first session", language: .english, durationMs: 1)
+        let coordinator = makeCoordinator(transcription)
+
+        _ = begin(coordinator, onPreviewText: { _ in })
+        coordinator.endSession()
+        let done = await pollUntil(timeout: 5) { coordinator.sessionState == .done }
+        XCTAssertTrue(done)
+        XCTAssertEqual(coordinator.finalResult?.text, "first session")
+        XCTAssertNotNil(coordinator.finalizingStartedAt)
+
+        // A new session straight from .done.
+        _ = begin(coordinator, onPreviewText: { _ in })
+        XCTAssertNil(coordinator.finalResult, "The previous session's text must not be delivered again")
+        XCTAssertNil(coordinator.finalizingStartedAt)
+        XCTAssertNil(coordinator.lastEditDistanceRatio)
+
+        coordinator.endSession()
+        let doneAgain = await pollUntil(timeout: 5) { coordinator.sessionState == .done }
+        XCTAssertTrue(doneAgain)
+        XCTAssertNotNil(coordinator.finalResult)
+
+        coordinator.resetToIdle()
+        XCTAssertEqual(coordinator.sessionState, .idle)
+        XCTAssertNil(coordinator.finalResult)
+        XCTAssertNil(coordinator.finalizingStartedAt)
+        XCTAssertNil(coordinator.fullPassReplacedText)
+        XCTAssertNil(coordinator.cancellationReason)
+        XCTAssertNil(coordinator.sessionStartedAt)
+    }
+
+    // MARK: 18b — the full-pass timeout is real (S2)
+
+    func test_firstResult_returnsTheValue_whenTheOperationFinishesInTime() async {
+        let value = await StreamingTranscriptionCoordinator.firstResult(within: 30) { "text" }
+        XCTAssertEqual(value, "text")
+    }
+
+    func test_firstResult_returnsNil_withoutWaitingForAnOperationThatCannotBeCancelled() async {
+        let gate = GatedTranscriptionService()
+        defer { gate.releaseAll() }
+        let url = wavURL!
+        let timedOut = LockedCounter()
+        Task {
+            let value = await StreamingTranscriptionCoordinator.firstResult(within: 0.1) {
+                try? await gate.transcribe(audioURL: url, language: "en").text
+            }
+            if value == nil { timedOut.increment() }
+        }
+
+        let returned = await pollUntil(timeout: 5) { timedOut.value == 1 }
+
+        XCTAssertTrue(returned, "The timeout must return while the operation is still blocked")
+        XCTAssertEqual(gate.finishedCount, 0)
+    }
+
+    func test_previewSession_fullPassTimeout_endsWithTheStreamedText() async throws {
+        let transcription = GatedTranscriptionService()
+        defer { transcription.releaseAll() }
+        transcription.textForCall = { _ in "hello world" }
+        let coordinator = makeCoordinator(transcription, fullPassTimeout: 0.2)
+
+        var previews: [String] = []
+
+        // Two window passes that agree, so there is streamed text to fall back on.
+        let accumulator = begin(coordinator, onPreviewText: { previews.append($0) })
+        accumulator.append(makeAudibleBuffer(seconds: 1.0))
+        accumulator.append(makeAudibleBuffer(seconds: 1.0))
+        transcription.releaseOne()
+        transcription.releaseOne()
+        let streamed = await pollUntil(timeout: 5) { previews.last == "hello world" }
+        XCTAssertTrue(streamed)
+
+        // The full pass (the third call) is never released.
+        coordinator.endSession()
+        let done = await pollUntil(timeout: 5) { coordinator.sessionState == .done }
+
+        XCTAssertTrue(done, "The session must end at the timeout although the decode still runs")
+        XCTAssertEqual(transcription.finishedCount, 2, "Precondition: the full pass is still blocked")
+        XCTAssertEqual(coordinator.finalResult?.text, "hello world",
+            "The streamed text is what the owner gets")
+    }
+
+    // MARK: 18c — work that outlives its session reaches no other session (S2)
+
+    func test_fullPassOfACancelledSession_changesNothing_whenItFinishesWhileIdle() async throws {
+        let transcription = GatedTranscriptionService()
+        defer { transcription.releaseAll() }
+        let coordinator = makeCoordinator(transcription)
+        var previews: [String] = []
+
+        _ = begin(coordinator, onPreviewText: { previews.append($0) })
+        coordinator.endSession()
+        let fullPassStarted = await pollUntil { transcription.startedCount == 1 }
+        XCTAssertTrue(fullPassStarted)
+
+        // The owner's backstop gives up on the session.
+        coordinator.cancellationReason = .backstopTimeout
+        coordinator.cancelSession()
+        coordinator.resetToIdle()
+
+        transcription.releaseOne()
+        let fullPassFinished = await pollUntil { transcription.finishedCount == 1 }
+        XCTAssertTrue(fullPassFinished)
+        try await letQueuedWorkRun()
+
+        XCTAssertEqual(coordinator.sessionState, .idle)
+        XCTAssertNil(coordinator.finalResult)
+        XCTAssertTrue(previews.isEmpty)
+    }
+
+    func test_fullPassOfACancelledSession_doesNotFinishTheNextSession() async throws {
+        let transcription = GatedTranscriptionService()
+        defer { transcription.releaseAll() }
+        transcription.textForCall = { _ in "stale text" }
+        let coordinator = makeCoordinator(transcription)
+        var firstPreviews: [String] = []
+        var secondPreviews: [String] = []
+
+        _ = begin(coordinator, onPreviewText: { firstPreviews.append($0) })
+        coordinator.endSession()
+        let fullPassStarted = await pollUntil { transcription.startedCount == 1 }
+        XCTAssertTrue(fullPassStarted)
+        coordinator.cancelSession()
+        coordinator.resetToIdle()
+
+        _ = begin(coordinator, onPreviewText: { secondPreviews.append($0) })
+
+        // The first session's full pass comes back now, into the second session.
+        transcription.releaseOne()
+        let fullPassFinished = await pollUntil { transcription.finishedCount == 1 }
+        XCTAssertTrue(fullPassFinished)
+        try await letQueuedWorkRun()
+
+        XCTAssertEqual(coordinator.sessionState, .streaming(chunkCount: 0),
+            "A result from the previous session must not end this one")
+        XCTAssertNil(coordinator.finalResult)
+        XCTAssertTrue(firstPreviews.isEmpty)
+        XCTAssertTrue(secondPreviews.isEmpty)
+    }
+
+    func test_windowPassOfACancelledSession_isNotCountedAsAPassOfTheNextSession() async throws {
+        let transcription = GatedTranscriptionService()
+        defer { transcription.releaseAll() }
+        transcription.textForCall = { _ in "alpha beta" }
+        let coordinator = makeCoordinator(transcription)
+
+        let first = begin(coordinator)
+        first.append(makeAudibleBuffer(seconds: 1.0))
+        let firstPassStarted = await pollUntil { transcription.startedCount == 1 }
+        XCTAssertTrue(firstPassStarted)
+        coordinator.cancelSession()
+        coordinator.resetToIdle()
+
+        let second = begin(coordinator)
+        second.append(makeAudibleBuffer(seconds: 1.0))
+        let secondPassStarted = await pollUntil { transcription.startedCount == 2 }
+        XCTAssertTrue(secondPassStarted, "A pass left over from the last session must not hold this one up")
+
+        // Both passes return the same words. Text needs two passes *of one
+        // session* to agree; the stale one must not be the second vote.
+        transcription.releaseOne()
+        transcription.releaseOne()
+        let bothFinished = await pollUntil { transcription.finishedCount == 2 }
+        XCTAssertTrue(bothFinished)
+        try await letQueuedWorkRun()
+
+        XCTAssertEqual(coordinator.chunkCount, 0)
+        XCTAssertTrue(injection.appendedTexts.isEmpty,
+            "Nothing is confirmed after a single pass of the new session")
+    }
+
+    // MARK: 18d — a window reset keeps audio the pass never heard (S4)
+
+    func test_windowReset_keepsAudioCapturedWhileThePassWasRunning() async throws {
+        let transcription = GatedTranscriptionService()
+        defer { transcription.releaseAll() }
+        let coordinator = makeCoordinator(transcription)
+        let sixSeconds = 6 * 16_000
+
+        // Two 6 s chunks: the first starts a pass, the second arrives while
+        // that pass is running and takes the window to the 12 s cap.
+        let accumulator = begin(coordinator, incrementalSeconds: 6.0)
+        accumulator.append(makeAudibleBuffer(seconds: 6.0))
+        accumulator.append(makeAudibleBuffer(seconds: 6.0))
+        let firstPassStarted = await pollUntil { transcription.startedCount == 1 }
+        XCTAssertTrue(firstPassStarted)
+        XCTAssertEqual(transcription.framesOfCall(0), sixSeconds)
+        try await letQueuedWorkRun()
+
+        // The pass returns: the window is at the cap and is reset.
+        transcription.releaseOne()
+
+        let secondPassStarted = await pollUntil { transcription.startedCount == 2 }
+        XCTAssertTrue(secondPassStarted, "The second chunk must still be transcribed after the reset")
+        XCTAssertEqual(transcription.framesOfCall(1), sixSeconds,
+            "The next window must hold exactly the audio the first pass did not cover")
+    }
+
+    // MARK: 18e — stopping starts no pass whose result is thrown away (S7)
+
+    func test_endSession_preview_transcribesOnlyTheFullRecording() async {
+        let transcription = MockTranscriptionService()
+        let windowPasses = LockedCounter()
+        let fullURL = wavURL!
+        transcription.onTranscribe = { url in
+            if url != fullURL { windowPasses.increment() }
+            return TranscriptionResult(text: "full text", language: .english, durationMs: 1)
+        }
+        let coordinator = makeCoordinator(transcription)
+
+        let accumulator = begin(coordinator, onPreviewText: { _ in })
+        // Less than one chunk: it is still in the accumulator at stop time.
+        accumulator.append(makeAudibleBuffer(seconds: 0.5))
+        coordinator.endSession()
+        let done = await pollUntil(timeout: 5) { coordinator.sessionState == .done }
+
+        XCTAssertTrue(done)
+        XCTAssertEqual(coordinator.finalResult?.text, "full text")
+        XCTAssertEqual(windowPasses.value, 0,
+            "The tail must not get a window pass of its own in front of the full pass")
+    }
+
+    func test_endSession_typing_transcribesTheTailOnce_andTypesIt() async {
+        let transcription = MockTranscriptionService()
+        let windowPasses = LockedCounter()
+        let fullURL = wavURL!
+        transcription.onTranscribe = { url in
+            if url != fullURL { windowPasses.increment() }
+            return TranscriptionResult(text: "tail words", language: .english, durationMs: 1)
+        }
+        let coordinator = makeCoordinator(transcription)
+
+        let accumulator = begin(coordinator)
+        accumulator.append(makeAudibleBuffer(seconds: 0.5))
+        coordinator.endSession()
+        let done = await pollUntil(timeout: 5) { coordinator.sessionState == .done }
+
+        XCTAssertTrue(done)
+        XCTAssertEqual(windowPasses.value, 1, "The final window is transcribed once, not twice")
+        XCTAssertEqual(injection.appendedTexts.joined(), "tail words")
+    }
+}
+
+// MARK: - Audio fixtures
+
+/// A mono 16 kHz buffer loud enough that the coordinator does not treat it as silence.
+private func makeAudibleBuffer(seconds: Double) -> AVAudioPCMBuffer {
+    let format = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: 16000, channels: 1, interleaved: false
+    )!
+    let frames = Int(16000 * seconds)
+    let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))!
+    buffer.frameLength = AVAudioFrameCount(frames)
+    let samples = buffer.floatChannelData![0]
+    for i in 0..<frames { samples[i] = i.isMultiple(of: 2) ? 0.1 : -0.1 }
+    return buffer
+}
+
+private func makeAudibleWAV(at url: URL) throws {
+    let buffer = makeAudibleBuffer(seconds: 0.01)
+    let file = try AVAudioFile(forWriting: url, settings: buffer.format.settings)
+    try file.write(from: buffer)
 }
 
 // MARK: - Mock / Spy Helpers
 
-// MARK: SlowMockTranscriptionService
+// MARK: GatedTranscriptionService
 
-/// A transcription service that sleeps for `delaySeconds` before returning.
-/// Used to test full-pass timeout behaviour without waiting for the real 30s timeout.
-final class SlowMockTranscriptionService: TranscriptionServiceProtocol, @unchecked Sendable {
-    private let delaySeconds: TimeInterval
-    init(delaySeconds: TimeInterval) { self.delaySeconds = delaySeconds }
+/// A transcription service whose calls block until the test lets them go.
+/// Like the real decode, a blocked call does not react to task cancellation.
+final class GatedTranscriptionService: TranscriptionServiceProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var permits = 0
+    private var framesByCall: [Int] = []
+    private var finished = 0
 
+    /// The text call number `index` (0-based, in start order) returns.
+    var textForCall: (Int) -> String = { _ in "gated text" }
     var isModelLoaded: Bool = false
 
+    /// Calls that have begun, blocked or not.
+    var startedCount: Int { lock.withLock { framesByCall.count } }
+    /// Calls that have returned.
+    var finishedCount: Int { lock.withLock { finished } }
+
+    /// Length, in frames, of the audio handed to call number `index`.
+    func framesOfCall(_ index: Int) -> Int? {
+        lock.withLock { framesByCall.indices.contains(index) ? framesByCall[index] : nil }
+    }
+
+    /// Lets the longest-blocked call return, or the next call if none is blocked.
+    func releaseOne() {
+        let waiter: CheckedContinuation<Void, Never>? = lock.withLock {
+            if waiters.isEmpty {
+                permits += 1
+                return nil
+            }
+            return waiters.removeFirst()
+        }
+        waiter?.resume()
+    }
+
+    /// Lets every blocked and every future call return.
+    func releaseAll() {
+        let blocked: [CheckedContinuation<Void, Never>] = lock.withLock {
+            permits = Int.max / 2
+            defer { waiters = [] }
+            return waiters
+        }
+        blocked.forEach { $0.resume() }
+    }
+
     func transcribe(audioURL: URL, language: String) async throws -> TranscriptionResult {
-        try await Task.sleep(for: .seconds(delaySeconds))
-        return TranscriptionResult(text: "slow result", language: .english, durationMs: 0)
+        let frames = (try? AVAudioFile(forReading: audioURL)).map { Int($0.length) } ?? -1
+        let index: Int = lock.withLock {
+            framesByCall.append(frames)
+            return framesByCall.count - 1
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let goNow: Bool = lock.withLock {
+                if permits > 0 {
+                    permits -= 1
+                    return true
+                }
+                waiters.append(continuation)
+                return false
+            }
+            if goNow { continuation.resume() }
+        }
+        let text = textForCall(index)
+        lock.withLock { finished += 1 }
+        return TranscriptionResult(text: text, language: .english, durationMs: 0)
     }
 
     func transcribeLong(
@@ -1617,8 +2096,7 @@ final class SlowMockTranscriptionService: TranscriptionServiceProtocol, @uncheck
         language: String,
         onProgress: @escaping (TranscriptionProgress) -> Void
     ) async throws -> TranscriptionResult {
-        try await Task.sleep(for: .seconds(delaySeconds))
-        return TranscriptionResult(text: "slow result", language: .english, durationMs: 0)
+        try await transcribe(audioURL: audioURL, language: language)
     }
 
     func preloadModel() async throws {}

@@ -260,4 +260,65 @@ final class TranscriptionHistoryServiceTests: XCTestCase {
             m4aPath: m4aPath
         )
     }
+
+    // MARK: - Audio kept for a failed entry goes away with the entry
+
+    private func makeEntry(m4aPath: String?) -> TranscriptionEntry {
+        TranscriptionEntry(id: UUID(), date: Date(), audioDuration: 1, text: "",
+                           language: "auto", status: .failed, m4aPath: m4aPath)
+    }
+
+    /// A recording inside the service's own Recordings directory.
+    private func makeOwnRecording() throws -> URL {
+        let dir = storeURL.deletingLastPathComponent().appendingPathComponent("Recordings", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("\(UUID().uuidString).m4a")
+        try Data("audio".utf8).write(to: url)
+        return url
+    }
+
+    func test_delete_removesTheEntrysOwnRecording() throws {
+        let recording = try makeOwnRecording()
+        let entry = makeEntry(m4aPath: recording.path)
+        try sut.add(entry)
+
+        try sut.delete(id: entry.id)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recording.path))
+    }
+
+    func test_clearAll_removesOwnRecordings() throws {
+        let recording = try makeOwnRecording()
+        try sut.add(makeEntry(m4aPath: recording.path))
+
+        try sut.clearAll()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recording.path))
+    }
+
+    func test_delete_neverRemovesAFileOutsideTheRecordingsDirectory() throws {
+        // A path that is not one of Murmur's recordings must survive, even if
+        // an entry somehow points at it.
+        let outside = storeURL.deletingLastPathComponent().appendingPathComponent("users-file.m4a")
+        try FileManager.default.createDirectory(at: outside.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("precious".utf8).write(to: outside)
+        let entry = makeEntry(m4aPath: outside.path)
+        try sut.add(entry)
+
+        try sut.delete(id: entry.id)
+        try sut.clearAll()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path))
+    }
+
+    func test_pruningBeyondTheLimit_removesThePrunedEntrysOwnRecording() throws {
+        let recording = try makeOwnRecording()
+        try sut.add(makeEntry(m4aPath: recording.path))
+        for _ in 0..<TranscriptionHistoryService.maxEntryCount {
+            try sut.add(makeEntry(m4aPath: nil))
+        }
+
+        XCTAssertEqual(sut.getAll().count, TranscriptionHistoryService.maxEntryCount)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recording.path))
+    }
 }

@@ -54,7 +54,39 @@ final class TranscriptionWindowModel: ObservableObject {
     /// Provide a test double in unit tests to avoid loading the real speech model.
     private let injectedTranscriptionService: (any TranscriptionServiceProtocol)?
     private var transcriptionTask: Task<Void, Never>?
-    private var activeEntryID: UUID?
+
+    /// Where the audio of a transcription came from. Murmur may delete only
+    /// `.ownRecording` audio; a `.userFile` is the user's own and is never
+    /// deleted, nor recorded as `m4aPath` in history.
+    private enum AudioSource {
+        case ownRecording
+        case userFile
+    }
+
+    /// A recording made by this model, and its history entry.
+    private struct OwnRecording {
+        let url: URL
+        let entryID: UUID
+    }
+
+    /// One transcription run. `generation` tells the current run from one
+    /// that `cancelTranscription()` has superseded.
+    private struct TranscriptionSession {
+        let generation: Int
+        let entryID: UUID
+        let audioURL: URL
+        let source: AudioSource
+    }
+
+    /// The recording in progress or waiting in the confirm screen: not yet
+    /// transcribed or discarded.
+    private var pendingRecording: OwnRecording?
+    /// The transcription the window currently shows. nil once it finished or was cancelled.
+    private var activeTranscription: TranscriptionSession?
+    private var nextGeneration = 0
+    /// Transcription tasks that have not unwound yet, including cancelled ones.
+    /// Voice input stays paused until this reaches zero.
+    private var inFlightTranscriptions = 0
     private static let log = Logger(subsystem: "com.murmur.app", category: "window-model")
 
     /// The effective transcription service: injected fake in tests, real service in production.
@@ -83,6 +115,9 @@ final class TranscriptionWindowModel: ObservableObject {
         self.diskChecker = diskChecker
         self.filePicker = filePicker ?? SystemFilePickerService()
         self.injectedTranscriptionService = transcriptionService
+        self.recordingService.onAutoStop = { [weak self] url in
+            self?.recordingDidAutoStop(url: url)
+        }
     }
 
     func onAppear() {
@@ -98,6 +133,13 @@ final class TranscriptionWindowModel: ObservableObject {
     // MARK: - Idle
 
     func transitionToIdle() {
+        // Leaving the confirm screen without Start or Discard would otherwise
+        // strand the recording: its entry would stay "in progress" for ever.
+        // Keep the audio and mark the entry failed, like any unfinished one.
+        if case .recordingConfirm = windowState, let recording = pendingRecording {
+            pendingRecording = nil
+            try? historyService.updateStatus(id: recording.entryID, status: .failed)
+        }
         windowState = .idle
     }
 
@@ -120,7 +162,7 @@ final class TranscriptionWindowModel: ObservableObject {
                     status: .inProgress,
                     m4aPath: outputURL.path
                 )
-                activeEntryID = entry.id
+                pendingRecording = OwnRecording(url: outputURL, entryID: entry.id)
                 try? historyService.add(entry)
 
             } catch LongRecordingError.insufficientDiskSpace {
@@ -138,41 +180,76 @@ final class TranscriptionWindowModel: ObservableObject {
         Task {
             do {
                 let url = try await recordingService.stopRecording()
-                let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-                let size = (attrs?[.size] as? Int64) ?? 0
-
-                // Estimate duration from file size (will be replaced with actual AVAsset duration)
-                let estimatedDuration: TimeInterval
-                if let avDur = await audioDuration(of: url) {
-                    estimatedDuration = avDur
-                } else {
-                    estimatedDuration = 0
-                }
-
-                // Update the history entry with the actual duration now that recording is done
-                if let id = activeEntryID, estimatedDuration > 0 {
-                    try? historyService.updateDuration(id: id, duration: estimatedDuration)
-                }
-
-                windowState = .recordingConfirm(
-                    duration: estimatedDuration,
-                    fileSizeBytes: size,
-                    outputURL: url
-                )
+                await presentRecordingConfirm(url: url)
             } catch {
                 Self.log.error("Stop recording failed: \(error)")
-                windowState = .idle
+                // The 2-hour auto-stop may have finished this recording already
+                // and be showing its confirm screen — do not replace that.
+                if case .recording = windowState {
+                    windowState = .idle
+                }
             }
         }
     }
 
+    /// The service stopped the recording at the 2-hour cap. Finalise it the same
+    /// way as a manual stop, so the user is offered the transcription.
+    private func recordingDidAutoStop(url: URL) {
+        Task {
+            switch windowState {
+            case .transcribing, .cancelConfirm:
+                // The window is busy with another transcription and cannot show
+                // the confirm screen. Close the history entry; the m4a is kept.
+                if let recording = takePendingRecording(at: url) {
+                    try? historyService.updateStatus(id: recording.entryID, status: .failed)
+                }
+            default:
+                await presentRecordingConfirm(url: url)
+            }
+        }
+    }
+
+    private func presentRecordingConfirm(url: URL) async {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attrs?[.size] as? Int64) ?? 0
+        let duration = await audioDuration(of: url) ?? 0
+
+        // Update the history entry with the actual duration now that recording is done
+        if let recording = pendingRecording, duration > 0 {
+            try? historyService.updateDuration(id: recording.entryID, duration: duration)
+        }
+
+        windowState = .recordingConfirm(
+            duration: duration,
+            fileSizeBytes: size,
+            outputURL: url
+        )
+    }
+
     func discardRecording(url: URL) {
-        try? FileManager.default.removeItem(at: url)
-        if let id = activeEntryID {
-            try? historyService.delete(id: id)
-            activeEntryID = nil
+        if let recording = takePendingRecording(at: url) {
+            deleteAudio(at: url, source: .ownRecording)
+            try? historyService.delete(id: recording.entryID)
         }
         windowState = .idle
+    }
+
+    // MARK: - Audio ownership
+
+    /// Returns and clears the pending recording if `url` is that recording.
+    /// This is the only way audio becomes `.ownRecording`.
+    private func takePendingRecording(at url: URL) -> OwnRecording? {
+        guard let recording = pendingRecording,
+              recording.url.standardizedFileURL == url.standardizedFileURL else { return nil }
+        pendingRecording = nil
+        return recording
+    }
+
+    /// The only place this model deletes audio. Deletes nothing unless the
+    /// audio is Murmur's own recording AND lies in the recordings directory.
+    private func deleteAudio(at url: URL, source: AudioSource) {
+        guard source == .ownRecording, recordingService.ownsRecording(at: url) else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 
     // MARK: - Upload
@@ -222,6 +299,17 @@ final class TranscriptionWindowModel: ObservableObject {
     // MARK: - Transcription
 
     func beginTranscription(audioURL: URL) {
+        // Only one transcription is tracked at a time. Starting another one
+        // supersedes the earlier task, but that is not the user discarding it:
+        // its entry is marked failed and its audio is kept, as for any
+        // transcription that did not finish.
+        if let superseded = activeTranscription {
+            transcriptionTask?.cancel()
+            transcriptionTask = nil
+            activeTranscription = nil
+            try? historyService.updateStatus(id: superseded.entryID, status: .failed)
+        }
+
         // The model detects the language; the user's "Languages you speak"
         // only tell it which scripts to expect.
         let hint = SpokenLanguages.hint(for: SpokenLanguages.current())
@@ -233,35 +321,50 @@ final class TranscriptionWindowModel: ObservableObject {
         // only here at transcription-start.
         coordinator.beginWindowTranscription()
 
-        // Create history entry if we don't have one yet (upload mode)
-        if activeEntryID == nil {
-            let entry = TranscriptionEntry(
-                id: UUID(),
+        let source: AudioSource
+        let entryID: UUID
+        if let recording = takePendingRecording(at: audioURL) {
+            source = .ownRecording
+            entryID = recording.entryID
+        } else {
+            // Upload mode: create the history entry now. m4aPath stays nil —
+            // history must never hold a path to a file Murmur does not own.
+            source = .userFile
+            entryID = UUID()
+            try? historyService.add(TranscriptionEntry(
+                id: entryID,
                 date: Date(),
                 audioDuration: 0,
                 text: "",
                 language: "auto",
                 status: .inProgress,
-                m4aPath: audioURL.path
-            )
-            activeEntryID = entry.id
-            try? historyService.add(entry)
+                m4aPath: nil
+            ))
         }
 
-        let entryID = activeEntryID!
+        let session = TranscriptionSession(
+            generation: nextGeneration,
+            entryID: entryID,
+            audioURL: audioURL,
+            source: source
+        )
+        nextGeneration += 1
+        activeTranscription = session
+        inFlightTranscriptions += 1
 
         // C2: persist partial text every N chunks so a crash during transcription
         // leaves a recoverable inProgress entry with accumulated text rather than empty.
         let progressPersistInterval = 5
 
         transcriptionTask = Task {
+            let outcome: Result<(TranscriptionResult, TimeInterval), Error>
             do {
                 let result = try await transcriptionService.transcribeLong(
                     audioURL: audioURL,
                     language: hint,
                     onProgress: { [weak self] progress in
                         Task { @MainActor [weak self] in
-                            guard let self else { return }
+                            guard let self, self.isCurrent(session) else { return }
                             self.windowState = .transcribing(progress: progress)
                             // Persist partial text every N chunks to reduce crash data loss
                             if progress.currentChunk % progressPersistInterval == 0,
@@ -274,51 +377,72 @@ final class TranscriptionWindowModel: ObservableObject {
                         }
                     }
                 )
-
-                // Complete the history entry
                 let dur = await audioDuration(of: audioURL) ?? 0
-                // Build completed entry
-                let completedEntry = TranscriptionEntry(
-                    id: entryID,
-                    date: Date(),
-                    audioDuration: dur,
-                    text: result.text,
-                    language: result.language.rawValue,
-                    status: .completed,
-                    m4aPath: nil
-                )
-                try? historyService.completeEntry(id: entryID, text: result.text, language: result.language.rawValue, audioDuration: dur)
-
-                // Delete the m4a after successful transcription
-                if FileManager.default.fileExists(atPath: audioURL.path) {
-                    try? FileManager.default.removeItem(at: audioURL)
-                }
-
-                activeEntryID = nil
-                // P0 fix: resume voice input on success
-                coordinator.endWindowTranscription()
-                windowState = .result(entry: completedEntry)
-
-            } catch is CancellationError {
-                // Silent cleanup — cancellation is intentional, not a failure
-                if let id = self.activeEntryID {
-                    try? historyService.delete(id: id)
-                    activeEntryID = nil
-                }
-                // P0 fix: resume voice input on cancel
-                coordinator.endWindowTranscription()
-                windowState = .idle
+                outcome = .success((result, dur))
             } catch {
-                Self.log.error("Transcription failed: \(error)")
-                if let id = self.activeEntryID {
-                    try? historyService.updateStatus(id: id, status: .failed)
-                    activeEntryID = nil
-                }
-                // P0 fix: resume voice input on error
-                coordinator.endWindowTranscription()
-                windowState = .idle
+                outcome = .failure(error)
             }
+            finishTranscription(session, outcome: outcome)
         }
+    }
+
+    private func isCurrent(_ session: TranscriptionSession) -> Bool {
+        activeTranscription?.generation == session.generation
+    }
+
+    /// Runs once per transcription task, after its last suspension point.
+    private func finishTranscription(
+        _ session: TranscriptionSession,
+        outcome: Result<(TranscriptionResult, TimeInterval), Error>
+    ) {
+        // P0 fix: resume voice input on success, cancel and error — but only
+        // when no other transcription task is still running.
+        inFlightTranscriptions -= 1
+        if inFlightTranscriptions == 0 {
+            coordinator.endWindowTranscription()
+        }
+
+        // A superseded task touches nothing else: cancelTranscription() already
+        // cleaned up its entry, and the window may belong to a newer session.
+        guard isCurrent(session) else { return }
+        activeTranscription = nil
+        transcriptionTask = nil
+
+        switch outcome {
+        case .success(let (result, dur)):
+            let completedEntry = TranscriptionEntry(
+                id: session.entryID,
+                date: Date(),
+                audioDuration: dur,
+                text: result.text,
+                language: result.language.rawValue,
+                status: .completed,
+                m4aPath: nil
+            )
+            try? historyService.completeEntry(id: session.entryID, text: result.text, language: result.language.rawValue, audioDuration: dur)
+
+            // Murmur's own recording is no longer needed once transcribed
+            deleteAudio(at: session.audioURL, source: session.source)
+            windowState = .result(entry: completedEntry)
+
+        case .failure(let error) where error is CancellationError:
+            // Silent cleanup — cancellation is intentional, not a failure
+            discard(session)
+            windowState = .idle
+
+        case .failure(let error):
+            // Murmur's own recording is kept (entry.m4aPath) so it can be retried
+            Self.log.error("Transcription failed: \(error)")
+            try? historyService.updateStatus(id: session.entryID, status: .failed)
+            windowState = .idle
+        }
+    }
+
+    /// Removes the history entry of a cancelled session, and its audio if
+    /// that is Murmur's own recording.
+    private func discard(_ session: TranscriptionSession) {
+        try? historyService.delete(id: session.entryID)
+        deleteAudio(at: session.audioURL, source: session.source)
     }
 
     func resumeAfterCancelConfirm() {
@@ -330,9 +454,11 @@ final class TranscriptionWindowModel: ObservableObject {
         transcriptionTask?.cancel()
         transcriptionTask = nil
 
-        if let id = activeEntryID {
-            try? historyService.delete(id: id)
-            activeEntryID = nil
+        // Clearing activeTranscription supersedes the task: when it unwinds it
+        // only releases the voice-input pause.
+        if let session = activeTranscription {
+            activeTranscription = nil
+            discard(session)
         }
         windowState = .idle
     }

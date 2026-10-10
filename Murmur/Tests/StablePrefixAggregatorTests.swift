@@ -170,3 +170,99 @@ final class StablePrefixAggregatorPunctuationTests: XCTestCase {
         XCTAssertEqual(agg.flushAndReset(), "")
     }
 }
+
+/// The model changes its mind about the last word it already had confirmed.
+/// The stream must carry on after that word, and never repeat emitted text.
+final class StablePrefixAggregatorRevisionTests: XCTestCase {
+
+    func test_lastEmittedWordRevised_english_streamContinuesAfterIt() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("I think their")
+        XCTAssertEqual(agg.ingest("I think their"), "I think their")
+        // With more audio the model changes its mind about the last word.
+        XCTAssertEqual(agg.ingest("I think there are many"), "",
+                       "the revised word stands where one was already emitted")
+        XCTAssertEqual(agg.ingest("I think there are many people"), " are many")
+        XCTAssertEqual(agg.ingest("I think there are many people here"), " people")
+        XCTAssertEqual(agg.confirmedText, "I think their are many people")
+        XCTAssertEqual(agg.flushAndReset(), " here")
+    }
+
+    func test_lastEmittedWordRevised_chinese_streamContinuesAfterIt() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("我们今天")
+        XCTAssertEqual(agg.ingest("我们今天"), "我们今天")
+        XCTAssertEqual(agg.ingest("我们今田去公园"), "")
+        XCTAssertEqual(agg.ingest("我们今田去公园玩"), "去公园")
+        XCTAssertEqual(agg.confirmedText, "我们今天去公园",
+                       "nothing already emitted may be emitted again")
+    }
+
+    func test_lastEmittedWordRevised_flushReturnsTheRest() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("我们今天")
+        _ = agg.ingest("我们今天")
+        _ = agg.ingest("我们今田去公园")
+        XCTAssertEqual(agg.flushAndReset(), "去公园")
+    }
+
+    func test_lastTwoEmittedWordsRevised_streamContinuesAfterThem() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("a b c d")
+        _ = agg.ingest("a b c d")
+        _ = agg.ingest("a b x y e f")
+        XCTAssertEqual(agg.ingest("a b x y e f g"), " e f")
+    }
+
+    func test_onlyEmittedWordRevised_continuesAtTheCountPosition() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("their")
+        XCTAssertEqual(agg.ingest("their"), "their")
+        _ = agg.ingest("there are")
+        XCTAssertEqual(agg.ingest("there are many"), " are")
+    }
+
+    func test_oneWordConfirmedAfterTheRevisedOne_streamStillContinues() {
+        // "their are" is in no later hypothesis either; the run before the
+        // revised word is what lines the next pass up.
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("I think their")
+        _ = agg.ingest("I think their")
+        _ = agg.ingest("I think there are")
+        XCTAssertEqual(agg.ingest("I think there are"), " are")
+        _ = agg.ingest("I think there are many")
+        XCTAssertEqual(agg.ingest("I think there are many"), " many")
+    }
+
+    func test_hypothesisThatEndsInsideTheEmittedWords_thenGrowsBack_repeatsNothing() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("a b a b")
+        XCTAssertEqual(agg.ingest("a b a b"), "a b a b")
+        XCTAssertEqual(agg.ingest("a b a"), "")
+        XCTAssertEqual(agg.ingest("a b a b c d"), "")
+        XCTAssertEqual(agg.ingest("a b a b c d"), " c d")
+    }
+
+    // MARK: - A word inserted before the last emitted word
+
+    private func streamed(_ hypotheses: [String]) -> String {
+        var agg = StablePrefixAggregator()
+        var text = ""
+        for hypothesis in hypotheses { text += agg.ingest(hypothesis) }
+        return text + agg.flushAndReset()
+    }
+
+    func test_wordInsertedBeforeTheLastEmittedWord_doesNotRepeatThatWord_english() {
+        let text = streamed([
+            "the quick brown fox", "the quick brown fox",
+            "the quick brown red fox jumps",
+            "the quick brown red fox jumps over", "the quick brown red fox jumps over",
+        ])
+        XCTAssertEqual(text, "the quick brown fox jumps over")
+    }
+
+    func test_wordInsertedBeforeTheLastEmittedWord_doesNotRepeatThatWord_chinese() {
+        let text = streamed(["我们今天去", "我们今天去", "我们今天要去公园", "我们今天要去公园玩", "我们今天要去公园玩"])
+        XCTAssertEqual(text, "我们今天去公园玩")
+    }
+}

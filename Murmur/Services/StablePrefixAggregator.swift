@@ -116,34 +116,71 @@ struct StablePrefixAggregator {
         return tail
     }
 
+    /// How many of the last emitted words may be missing from a new hypothesis
+    /// before it is treated as unrelated to what was emitted.
+    private static let maxRevisedWords = 2
+
     /// Index in `tokens` of the first word after the already-emitted ones, found
     /// by locating the last few emitted words in `tokens`. Tries a shorter run
     /// when the full one is absent (the model revised one of those words), and
     /// prefers the match nearest to where the emitted words would end by count.
-    /// Returns nil when no run of at least two emitted words can be found.
+    ///
+    /// When the model revised the *last* emitted word ("their" -> "there"), no
+    /// run that ends with it can match again. The run just before it is then
+    /// searched for, and the word that replaced it is stepped over: it stands
+    /// where a word was already emitted, so emitting it would repeat that word.
+    /// Up to `maxRevisedWords` trailing words are given up this way. If those
+    /// words turn out to be present after all, a little further on (the model
+    /// inserted a word before them), the continuation starts after them.
+    ///
+    /// Returns nil when the hypothesis shares no such run with the emitted words.
     private func continuationStart(in tokens: [Token]) -> Int? {
-        if confirmedValues.isEmpty { return 0 }
-        let longest = min(Self.anchorLength, confirmedValues.count)
-        let shortest = min(2, confirmedValues.count)
-        var length = longest
-        while length >= shortest {
-            let needle = confirmedValues.suffix(length)
-            let expected = confirmedValues.count - length
-            var best: Int?
-            if tokens.count >= length {
-                for start in 0...(tokens.count - length) {
-                    var matches = true
-                    for (offset, value) in needle.enumerated() where tokens[start + offset].value != value {
-                        matches = false
-                        break
-                    }
-                    if matches, best == nil || abs(start - expected) < abs(best! - expected) {
-                        best = start
+        for revised in 0...Self.maxRevisedWords where revised <= confirmedValues.count {
+            let anchorWords = confirmedValues.dropLast(revised)
+            // Every emitted word was revised: nothing is left to search for,
+            // so the only position to go by is the count of emitted words.
+            if anchorWords.isEmpty { return min(revised, tokens.count) }
+            let longest = min(Self.anchorLength, anchorWords.count)
+            let shortest = min(2, anchorWords.count)
+            var length = longest
+            while length >= shortest {
+                let needle = anchorWords.suffix(length)
+                let expected = anchorWords.count - length
+                var best: Int?
+                if tokens.count >= length {
+                    for start in 0...(tokens.count - length) {
+                        var matches = true
+                        for (offset, value) in needle.enumerated() where tokens[start + offset].value != value {
+                            matches = false
+                            break
+                        }
+                        if matches, best == nil || abs(start - expected) < abs(best! - expected) {
+                            best = start
+                        }
                     }
                 }
+                if let best {
+                    let afterAnchor = best + length
+                    // The given-up words may not have been revised at all: the
+                    // model may have inserted a word in front of them ("brown
+                    // fox" -> "brown red fox"). If they still follow the anchor
+                    // within a few words, continue after them. Stepping over a
+                    // fixed count instead would land on "fox" and emit it twice.
+                    if revised > 0 {
+                        let dropped = Array(confirmedValues.suffix(revised))
+                        let lastStart = min(afterAnchor + 2, tokens.count - revised)
+                        if lastStart >= afterAnchor {
+                            for start in afterAnchor...lastStart
+                            where zip(dropped, tokens[start..<(start + revised)]).allSatisfy({ $0 == $1.value }) {
+                                return start + revised
+                            }
+                        }
+                    }
+                    // A hypothesis that ends inside the revised words has nothing new.
+                    return min(afterAnchor + revised, tokens.count)
+                }
+                length -= 1
             }
-            if let best { return best + length }
-            length -= 1
         }
         return nil
     }

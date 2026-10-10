@@ -59,6 +59,74 @@ final class OpenAICompatibleCorrectorTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer sk-test-123")
     }
 
+    // MARK: - API key transport rule
+
+    func test_allowsAPIKey_overHTTPS() {
+        XCTAssertTrue(OpenAICompatibleCorrector.allowsAPIKey(over: URL(string: "https://api.example.com/v1")!))
+        XCTAssertTrue(OpenAICompatibleCorrector.allowsAPIKey(over: URL(string: "HTTPS://api.example.com/v1")!))
+    }
+
+    func test_allowsAPIKey_overLoopbackHTTP() {
+        for base in ["http://localhost:11434/v1", "http://LOCALHOST:1234/v1",
+                     "http://127.0.0.1:11434/v1", "http://[::1]:11434/v1"] {
+            XCTAssertTrue(OpenAICompatibleCorrector.allowsAPIKey(over: URL(string: base)!), base)
+        }
+    }
+
+    func test_allowsAPIKey_refusesNonLoopbackHTTP() {
+        for base in ["http://api.example.com/v1", "http://192.168.1.20:11434/v1",
+                     "http://localhost.example.com/v1", "http://127.0.0.1.example.com/v1"] {
+            XCTAssertFalse(OpenAICompatibleCorrector.allowsAPIKey(over: URL(string: base)!), base)
+        }
+    }
+
+    func test_allowsAPIKey_refusesOtherSchemes() {
+        XCTAssertFalse(OpenAICompatibleCorrector.allowsAPIKey(over: URL(string: "ftp://localhost/v1")!))
+        XCTAssertFalse(OpenAICompatibleCorrector.allowsAPIKey(over: URL(string: "localhost:11434/v1")!))
+    }
+
+    func test_makeRequest_throws_whenApiKeyWouldCrossNetworkInClearText() {
+        XCTAssertThrowsError(try OpenAICompatibleCorrector.makeRequest(
+            baseURL: URL(string: "http://api.example.com/v1")!,
+            modelName: "m",
+            apiKey: "sk-test-123",
+            language: "en",
+            glossary: [],
+            trimmed: "hello"
+        )) { error in
+            guard case MurmurError.transcriptionFailed(let message) = error else {
+                return XCTFail("Expected transcriptionFailed, got \(error)")
+            }
+            XCTAssertTrue(message.contains("https"), "The error must tell the user what to change")
+            XCTAssertFalse(message.contains("sk-test-123"), "The error must not carry the key")
+        }
+    }
+
+    func test_makeRequest_setsBearerAuth_overLoopbackHTTP() throws {
+        let request = try OpenAICompatibleCorrector.makeRequest(
+            baseURL: URL(string: "http://localhost:11434/v1")!,
+            modelName: "m",
+            apiKey: "sk-test-123",
+            language: "en",
+            glossary: [],
+            trimmed: "hello"
+        )
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer sk-test-123")
+    }
+
+    func test_makeRequest_keylessNonLoopbackHTTP_isStillAllowed() throws {
+        // A keyless LAN server (Ollama on another machine) has no secret to leak.
+        let request = try OpenAICompatibleCorrector.makeRequest(
+            baseURL: URL(string: "http://192.168.1.20:11434/v1")!,
+            modelName: "m",
+            apiKey: nil,
+            language: "en",
+            glossary: [],
+            trimmed: "hello"
+        )
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+    }
+
     func test_makeRequest_bodyContainsSystemAndUserMessages() throws {
         let request = try OpenAICompatibleCorrector.makeRequest(
             baseURL: URL(string: "http://localhost:11434/v1")!,
@@ -217,4 +285,84 @@ final class OpenAICompatibleCorrectorTests: XCTestCase {
         let body = #"{"choices": [{"index": 0}]}"#.data(using: .utf8)!
         XCTAssertThrowsError(try OpenAICompatibleCorrector.parseChatResponse(data: body))
     }
+
+    // MARK: - correct(): bearer token and error text
+
+    func test_correct_sendsTheExplicitKeyAsABearerToken() async throws {
+        StubURLProtocol.respond(status: 200, body: Self.chatBody("Hello, world."))
+        let corrector = OpenAICompatibleCorrector(
+            baseURL: URL(string: "https://llm.invalid/v1")!,
+            modelName: "m",
+            apiKey: "sk-explicit",
+            session: StubURLProtocol.makeSession()
+        )
+        _ = try await corrector.correct("hello world", language: "en")
+        XCTAssertEqual(StubURLProtocol.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer sk-explicit")
+    }
+
+    func test_correct_httpError_doesNotCarryResponseBody() async {
+        // Servers echo request content in error bodies; the thrown error is
+        // logged publicly by the coordinator, so the body must stay out of it.
+        StubURLProtocol.respond(status: 500, body: Data("echo: my private dictation".utf8))
+        let corrector = OpenAICompatibleCorrector(
+            baseURL: URL(string: "https://llm.invalid/v1")!,
+            modelName: "m",
+            session: StubURLProtocol.makeSession()
+        )
+        do {
+            _ = try await corrector.correct("hello world", language: "en")
+            XCTFail("Expected an error for HTTP 500")
+        } catch {
+            let described = String(describing: error)
+            XCTAssertTrue(described.contains("500"))
+            XCTAssertFalse(described.contains("private dictation"))
+        }
+    }
+
+    private static func chatBody(_ content: String) -> Data {
+        try! JSONSerialization.data(withJSONObject: [
+            "choices": [["message": ["role": "assistant", "content": content]]]
+        ])
+    }
+}
+
+/// Answers every request made through `makeSession()` with a canned
+/// response and records the request, so `correct` runs without a server.
+private final class StubURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var canned: (status: Int, body: Data) = (200, Data())
+    nonisolated(unsafe) private static var recorded: URLRequest?
+
+    static var lastRequest: URLRequest? {
+        lock.lock(); defer { lock.unlock() }
+        return recorded
+    }
+
+    static func respond(status: Int, body: Data) {
+        lock.lock(); defer { lock.unlock() }
+        canned = (status, body)
+        recorded = nil
+    }
+
+    static func makeSession() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubURLProtocol.self]
+        return URLSession(configuration: config)
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.lock()
+        Self.recorded = request
+        let (status, body) = Self.canned
+        Self.lock.unlock()
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }

@@ -19,7 +19,6 @@ struct SettingsView: View {
     @AppStorage("correctionEngine") private var correctionEngine: String = "apple"
     @AppStorage("localLLMBaseURL") private var localLLMBaseURL: String = "http://localhost:11434/v1"
     @AppStorage("localLLMModel") private var localLLMModel: String = "qwen2.5:3b-instruct"
-    @AppStorage("localLLMAPIKey") private var localLLMAPIKey: String = ""
     @AppStorage(CorrectionPrompts.glossaryKey) private var correctionGlossary: String = ""
     @AppStorage(CorrectionPrompts.systemPromptKey) private var correctionSystemPrompt: String = ""
 
@@ -27,8 +26,11 @@ struct SettingsView: View {
     @State private var showDeleteConfirmation = false
     @State private var legacyDataBytes: Int64 = 0
     @State private var showCancelDownloadConfirmation = false
-    @State private var hotkeyKey: Key = .space
-    @State private var hotkeyModifiers: NSEvent.ModifierFlags = .command
+    @State private var showRedownloadConfirmation = false
+    @State private var showRemoveLegacyConfirmation = false
+    @State private var hotkeyKey: Key = HotkeyPreference.defaultCustomKey
+    @State private var hotkeyModifiers: NSEvent.ModifierFlags = HotkeyPreference.defaultCustomModifiers
+    @AppStorage("localLLMAPIKey") private var localLLMAPIKey: String = ""
 
     /// Minimum downloaded bytes before the cancel confirmation dialog is shown.
     /// Below this threshold a single click is fine — very little data would be lost.
@@ -74,12 +76,9 @@ struct SettingsView: View {
                         .onChange(of: useRightCommand) { _, newValue in
                             if newValue {
                                 coordinator.hotkey.register(trigger: .rightCommand)
-                                UserDefaults.standard.removeObject(forKey: "hotkeyKeyCode")
-                                UserDefaults.standard.removeObject(forKey: "hotkeyModifiers")
-                                UserDefaults.standard.set(true, forKey: "useRightCommand")
+                                HotkeyPreference.save(.rightCommand)
                             } else {
                                 applyHotkey()
-                                UserDefaults.standard.set(false, forKey: "useRightCommand")
                             }
                         }
                 }
@@ -316,7 +315,18 @@ struct SettingsView: View {
 
                     if modelManager.state == .ready || modelManager.state == .corrupt {
                         Button("Re-download") {
-                            Task { try? modelManager.delete(); try? await modelManager.download() }
+                            // A corrupt model has nothing worth keeping.
+                            if modelManager.state == .ready {
+                                showRedownloadConfirmation = true
+                            } else {
+                                redownloadModel()
+                            }
+                        }
+                        .alert("Re-download Model?", isPresented: $showRedownloadConfirmation) {
+                            Button("Re-download", role: .destructive) { redownloadModel() }
+                            Button("Cancel", role: .cancel) { }
+                        } message: {
+                            Text("The working \(modelManager.activeBackend.shortName) model (\(modelManager.activeBackend.sizeDescription)) will be deleted and downloaded again. Dictation is unavailable until the download finishes.")
                         }
                     }
                 }
@@ -337,8 +347,16 @@ struct SettingsView: View {
                         }
                         Spacer()
                         Button("Remove", role: .destructive) {
-                            modelManager.deleteLegacyData()
-                            legacyDataBytes = modelManager.legacyDataSize()
+                            showRemoveLegacyConfirmation = true
+                        }
+                        .alert("Remove Old Models?", isPresented: $showRemoveLegacyConfirmation) {
+                            Button("Remove", role: .destructive) {
+                                modelManager.deleteLegacyData()
+                                legacyDataBytes = modelManager.legacyDataSize()
+                            }
+                            Button("Cancel", role: .cancel) { }
+                        } message: {
+                            Text("\(Self.formatBytes(legacyDataBytes)) of models from earlier versions of Murmur will be permanently deleted.")
                         }
                     }
                 }
@@ -504,6 +522,15 @@ struct SettingsView: View {
                     .onSubmit { coordinator.reconfigureCorrectionEngine() }
             }
 
+            if !localLLMAPIKey.isEmpty,
+               let url = URL(string: localLLMBaseURL),
+               !OpenAICompatibleCorrector.allowsAPIKey(over: url) {
+                Text("The API key is not sent over plain http:// to another machine, so correction is off for this server. Use an https:// URL, or clear the API key.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             LabeledContent("Model") {
                 TextField("qwen2.5:3b-instruct", text: $localLLMModel)
                     .textFieldStyle(.roundedBorder)
@@ -614,18 +641,28 @@ struct SettingsView: View {
 
     // MARK: - Helpers
 
+    /// Registers the custom shortcut and persists it, so the next launch
+    /// registers the same one.
     private func applyHotkey() {
-        coordinator.hotkey.register(key: hotkeyKey, modifiers: hotkeyModifiers)
+        let trigger = HotkeyTrigger.keyCombo(key: hotkeyKey, modifiers: hotkeyModifiers)
+        coordinator.hotkey.register(trigger: trigger)
+        HotkeyPreference.save(trigger)
     }
 
+    private func redownloadModel() {
+        Task { try? modelManager.delete(); try? await modelManager.download() }
+    }
+
+    /// Mirrors what the app registered at launch, so the toggle never shows
+    /// "off" while Right Command is the live trigger.
     private func loadSavedHotkey() {
-        useRightCommand = UserDefaults.standard.object(forKey: "useRightCommand") as? Bool ?? true
-        if let keyCode = UserDefaults.standard.object(forKey: "hotkeyKeyCode") as? Int,
-           let key = Key(carbonKeyCode: UInt32(keyCode)) {
+        switch HotkeyPreference.load() {
+        case .rightCommand:
+            useRightCommand = true
+        case .keyCombo(let key, let modifiers):
             hotkeyKey = key
-        }
-        if let modsRaw = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? UInt {
-            hotkeyModifiers = NSEvent.ModifierFlags(rawValue: modsRaw)
+            hotkeyModifiers = modifiers
+            useRightCommand = false
         }
     }
 
