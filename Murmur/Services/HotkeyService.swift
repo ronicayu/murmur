@@ -59,10 +59,13 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
 
     /// Sync the hotkey's internal `isRecording` flag back to false when a
     /// recording ends through a non-hotkey path (hands-free auto-stop or
-    /// max-duration timeout). Without this, the next hotkey press toggles
-    /// `isRecording` from true → false and emits `.stopRecording` (a
-    /// no-op at the coordinator), so the user has to press the hotkey
-    /// twice to start the next recording.
+    /// max-duration timeout) or never started (model or permission missing,
+    /// the audio engine failed). This service flips the flag and captures
+    /// Escape on the key press, before the coordinator has decided anything.
+    /// Without this, the next hotkey press toggles `isRecording` from
+    /// true → false and emits `.stopRecording` (a no-op at the coordinator),
+    /// so the user has to press the hotkey twice to start the next recording,
+    /// and Escape stays captured system-wide until then.
     func notifyRecordingStopped() {
         lock.lock()
         isRecording = false
@@ -183,7 +186,8 @@ final class HotkeyService: HotkeyServiceProtocol, @unchecked Sendable {
 
     // MARK: - Shared handlers
 
-    private func handleKeyDown() {
+    /// Internal rather than private so tests can press the hotkey.
+    func handleKeyDown() {
         lock.lock()
         let currentMode = mode
         let wasRecording = isRecording
