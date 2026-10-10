@@ -345,6 +345,15 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     private var windowDirty = false
     /// After a window force-reset, the next Latin-leading delta gets a separating space.
     private var pendingWindowSeparator = false
+    /// Preview sessions: receives the full streamed text each time it grows,
+    /// instead of the text being typed into the target app. Nothing is injected
+    /// by the coordinator; the owner inserts `finalResult` once the session is done.
+    private var onPreviewText: ((String) -> Void)?
+    /// Preview sessions only: the text to insert once the session reaches `.done` —
+    /// the full-pass transcription, or the streamed text if the full pass failed.
+    private(set) var finalResult: TranscriptionResult?
+    var isPreviewSession: Bool { onPreviewText != nil }
+
     /// Text confirmed but not yet pasted. Pastes run one at a time: each goes
     /// through the clipboard and a synthetic Cmd+V, so two overlapping pastes
     /// would both insert whichever text reached the clipboard last — one delta
@@ -422,13 +431,17 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     ///     sentence-end pause, and no speech onset is lost to VAD segmentation.
     ///     Pass it only for an engine that transcribes a full window well within
     ///     the interval and stays silent on silence; nil keeps segment-driven passes.
+    ///   - onPreviewText: When set, streamed text is reported here (for a preview
+    ///     UI) and never typed into the target app. The caller inserts
+    ///     `finalResult` after the session is done.
     /// - Returns: The configured `AudioBufferAccumulator` to attach to the audio tap.
     func beginSession(
         language: String,
         targetAppPID: pid_t,
         startOffset: Int,
         fullWavURL: URL,
-        incrementalSeconds: Double? = nil
+        incrementalSeconds: Double? = nil,
+        onPreviewText: ((String) -> Void)? = nil
     ) -> AudioBufferAccumulator {
         guard case .idle = sessionState else {
             logger.warning("beginSession called while not idle — ignoring")
@@ -455,6 +468,8 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         self.pendingWindowSeparator = false
         self.incrementalMode = incrementalSeconds != nil
         self.pendingInjections = []
+        self.onPreviewText = onPreviewText
+        self.finalResult = nil
 
         // Build a fresh per-session VAD if a model is configured.
         // minSilenceDurationSeconds: 0.8 — Silero's 0.25 s default closes
@@ -498,7 +513,11 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         }
         self.accumulator = acc
 
-        setupFocusGuard(targetAppPID: targetAppPID)
+        // A preview session types nothing until the end, so there is no
+        // mid-session insertion point for a focus change to disturb.
+        if onPreviewText == nil {
+            setupFocusGuard(targetAppPID: targetAppPID)
+        }
         setupCPUMonitor()
         transition(to: .streaming(chunkCount: 0))
         logger.info("StreamingCoordinator: session started (lang=\(language), pid=\(targetAppPID))")
@@ -530,7 +549,11 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         logger.info("StreamingCoordinator: session ending, starting full-pass")
 
         Task { @MainActor [weak self] in
-            await self?.finishStreamedText()
+            // A preview session inserts the full-pass text, so the streamed
+            // text only needs finishing if that pass fails (see runFullPass).
+            if self?.isPreviewSession == false {
+                await self?.finishStreamedText()
+            }
             await self?.runFullPass()
         }
     }
@@ -731,6 +754,11 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
             transition(to: .streaming(chunkCount: chunkCount))
         }
 
+        if let onPreviewText {
+            onPreviewText(streamingChunks.joined())
+            return
+        }
+
         pendingInjections.append(textToInject)
         drainInjectionsIfIdle()
     }
@@ -808,8 +836,16 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     /// After this many seconds, the pill should show a "still refining" warning.
     static let fullPassWarningSeconds: TimeInterval = 15.0
 
+    /// Preview sessions: the full pass was unavailable, so fall back to the
+    /// streamed text, completed up to the end of the recording.
+    private func finishPreviewWithStreamedText() async {
+        await finishStreamedText()
+        finalResult = TranscriptionResult(text: streamingChunks.joined(), language: .unknown, durationMs: 0)
+    }
+
     private func runFullPass() async {
         guard let wavURL = fullWavURL else {
+            if isPreviewSession { await finishPreviewWithStreamedText() }
             transition(to: .done)
             return
         }
@@ -850,14 +886,26 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         switch passResult {
         case .timedOut:
             logger.warning("StreamingCoordinator: full-pass exceeded \(Int(timeoutSeconds))s — keeping streaming version")
+            if isPreviewSession { await finishPreviewWithStreamedText() }
             transition(to: .done)
             return
         case .failed:
             logger.warning("StreamingCoordinator: full-pass transcription failed — keeping streaming version")
+            if isPreviewSession { await finishPreviewWithStreamedText() }
             transition(to: .done)
             return
         case .transcribed(let r):
             result = r
+        }
+
+        if isPreviewSession {
+            // Nothing was typed, so there is nothing to replace: hand the
+            // full-pass text to the owner to insert in one go.
+            finalResult = result
+            onPreviewText?(result.text)
+            logger.info("StreamingCoordinator: full-pass complete (preview session)")
+            transition(to: .done)
+            return
         }
 
         let fullText = result.text

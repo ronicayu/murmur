@@ -236,6 +236,15 @@ final class AppCoordinator: ObservableObject {
         UserDefaults.standard.bool(forKey: "streamingInputEnabled")
     }
 
+    /// When on (the default), streamed text is shown in a floating bubble and
+    /// only the final text is inserted, once, after recording stops. When off,
+    /// streamed text is typed into the target app as it arrives.
+    private var isStreamingPreviewEnabled: Bool {
+        UserDefaults.standard.object(forKey: "streamingPreviewBubble") as? Bool ?? true
+    }
+
+    private let streamingPreview = StreamingPreviewController()
+
     /// When true, skips accessibility check (for onboarding test where we show text in-app, not inject)
     var skipAccessibilityCheck = false
 
@@ -583,6 +592,7 @@ final class AppCoordinator: ObservableObject {
             audio.detachStreamingAccumulator()
             streamingCoordinator?.cancelSession()
             streamingCoordinator?.resetToIdle()
+            streamingPreview.hide()
             audio.cancelRecording()
             // No sound: user just pressed Escape; pill.hide() is the confirmation.
             pill.hide()
@@ -702,7 +712,10 @@ final class AppCoordinator: ObservableObject {
                 targetAppPID: targetPID,
                 startOffset: startOffset,
                 fullWavURL: wavURL,
-                incrementalSeconds: streamingIncrementalSeconds(language: lang)
+                incrementalSeconds: streamingIncrementalSeconds(language: lang),
+                onPreviewText: isStreamingPreviewEnabled
+                    ? { [weak self] text in self?.streamingPreview.update(text) }
+                    : nil
             )
             streamingAccumulator = acc
 
@@ -712,6 +725,7 @@ final class AppCoordinator: ObservableObject {
             audioLevelTask?.cancel()
             audio.onAutoStop = nil
             streamingCoordinator?.cancelSession()
+            streamingPreview.hide()
             audioFeedback.playError()
             transition(to: .error(mapError(error)))
         }
@@ -741,9 +755,26 @@ final class AppCoordinator: ObservableObject {
 
             // Wait for coordinator to reach done/cancelled/failed
             await waitForStreamingDone()
+            streamingPreview.hide()
 
             // Check how the session ended and show appropriate feedback.
-            if let reason = streamingCoordinator?.cancellationReason {
+            if streamingCoordinator?.cancellationReason == nil,
+               let final = streamingCoordinator?.finalResult {
+                // Preview session: nothing has been typed yet. Run the same
+                // post-processing as V1 and insert the final text once.
+                if final.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    transition(to: .idle)
+                    pill.hide(after: 0.5)
+                } else {
+                    let initialLang = resolveTranscriptionLanguage()
+                    let language = final.language == .unknown
+                        ? Self.detectLanguageFromText(final.text) : final.language
+                    try await deliverTranscription(
+                        TranscriptionResult(text: final.text, language: language, durationMs: final.durationMs),
+                        initialLang: initialLang
+                    )
+                }
+            } else if let reason = streamingCoordinator?.cancellationReason {
                 switch reason {
                 case .focusAbandoned:
                     // UT-P1: Notify user that session was abandoned due to app switch.
@@ -779,6 +810,7 @@ final class AppCoordinator: ObservableObject {
 
         } catch {
             streamingCoordinator?.cancelSession()
+            streamingPreview.hide()
             handleError(mapError(error))
         }
 
@@ -895,51 +927,10 @@ final class AppCoordinator: ObservableObject {
             // language for the output text — see transcribeWithAutoDetectIfNeeded.
             let initialLang = resolveTranscriptionLanguage()
             let result = try await transcribeWithAutoDetectIfNeeded(wav: wav, initialLang: initialLang)
-            // The "actual" language used for this transcription, post-retry.
-            let lang = Self.cohereCode(for: result.language) ?? initialLang
-
-            // Pipeline: transcribe → ASR-punc (CT-Transformer, ~1 ms) → correction (LLM, 2.5 s cap)
-            // → cleanup (rules, 250 ms cap) → inject. Each step silently falls back to its input on
-            // timeout or error.
-            let rawTranscribed = result.text
-            let punctuated = await applyASRPunctuationIfEnabled(text: rawTranscribed, language: lang)
-            let corrected = await applyCorrectionIfEnabled(text: punctuated, language: lang)
-            let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
-
-            transition(to: .injecting)
-            pill.show(state: .injecting)
-
-            let method = try await withTimeout(seconds: 5, operation: "text injection") {
-                try await self.injection.inject(text: textToInject)
-            }
-
-            lastTranscription = textToInject
-            lastLanguage = result.language
-            // History records the injected (final) text. `rawText` captures
-            // the pre-pipeline transcription whenever ANY post-processing
-            // step (LLM correction OR rule-based cleanup) changed the text.
-            // Comparing against the final injected text — not just the
-            // correction step — means cleanup-only diffs (e.g. just adding
-            // a terminal `。`) also surface in Recent, so the user can
-            // always tell whether the pipeline did anything to their words.
-            let rawForHistory: String? = (textToInject != rawTranscribed) ? rawTranscribed : nil
-            transcriptionHistory.insert((text: textToInject, rawText: rawForHistory, language: result.language, date: Date()), at: 0)
-            if transcriptionHistory.count > maxHistoryCount {
-                transcriptionHistory.removeLast()
-            }
+            try await deliverTranscription(result, initialLang: initialLang)
 
             // Increment V1 usage counter for discovery badge
             V1UsageCounter.increment()
-
-            let undoableState = AppState.undoable(text: textToInject, method: method)
-            transition(to: undoableState)
-            // No success chime: user can see the text appear in their editor
-            // and the "Inserted" pill confirms it. A sound is redundant. Error
-            // path still plays error sound because failures have no visual
-            // equivalent.
-            pill.show(state: undoableState)
-            pill.hide(after: 2)
-            // Undo timer + Cmd+Z monitor set up automatically by transition(to: .undoable)
         } catch {
             handleError(mapError(error))
         }
@@ -949,6 +940,54 @@ final class AppCoordinator: ObservableObject {
             pendingRecording = false
             await startRecordingFlow()
         }
+    }
+
+    /// Post-process a finished transcription, insert it at the cursor, record
+    /// it in history and show the "Inserted" pill. Shared by the V1 full-pass
+    /// path and streaming preview sessions, which both insert the text once.
+    private func deliverTranscription(_ result: TranscriptionResult, initialLang: String) async throws {
+        // The "actual" language used for this transcription, post-retry.
+        let lang = Self.cohereCode(for: result.language) ?? initialLang
+
+        // Pipeline: transcribe → ASR-punc (CT-Transformer, ~1 ms) → correction (LLM, 2.5 s cap)
+        // → cleanup (rules, 250 ms cap) → inject. Each step silently falls back to its input on
+        // timeout or error.
+        let rawTranscribed = result.text
+        let punctuated = await applyASRPunctuationIfEnabled(text: rawTranscribed, language: lang)
+        let corrected = await applyCorrectionIfEnabled(text: punctuated, language: lang)
+        let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
+
+        transition(to: .injecting)
+        pill.show(state: .injecting)
+
+        let method = try await withTimeout(seconds: 5, operation: "text injection") {
+            try await self.injection.inject(text: textToInject)
+        }
+
+        lastTranscription = textToInject
+        lastLanguage = result.language
+        // History records the injected (final) text. `rawText` captures
+        // the pre-pipeline transcription whenever ANY post-processing
+        // step (LLM correction OR rule-based cleanup) changed the text.
+        // Comparing against the final injected text — not just the
+        // correction step — means cleanup-only diffs (e.g. just adding
+        // a terminal `。`) also surface in Recent, so the user can
+        // always tell whether the pipeline did anything to their words.
+        let rawForHistory: String? = (textToInject != rawTranscribed) ? rawTranscribed : nil
+        transcriptionHistory.insert((text: textToInject, rawText: rawForHistory, language: result.language, date: Date()), at: 0)
+        if transcriptionHistory.count > maxHistoryCount {
+            transcriptionHistory.removeLast()
+        }
+
+        let undoableState = AppState.undoable(text: textToInject, method: method)
+        transition(to: undoableState)
+        // No success chime: user can see the text appear in their editor
+        // and the "Inserted" pill confirms it. A sound is redundant. Error
+        // path still plays error sound because failures have no visual
+        // equivalent.
+        pill.show(state: undoableState)
+        pill.hide(after: 2)
+        // Undo timer + Cmd+Z monitor set up automatically by transition(to: .undoable)
     }
 
     /// Runs the CT-Transformer punctuation model on the bare ASR transcript

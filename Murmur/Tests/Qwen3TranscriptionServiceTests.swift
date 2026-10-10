@@ -85,4 +85,63 @@ final class Qwen3TranscriptionServiceTests: XCTestCase {
 
         XCTAssertTrue(text.contains("你好"), "Expected '你好' in Qwen3 output, got: \(text)")
     }
+
+    // MARK: - Output cleaning and corruption checks (no model needed)
+
+    func test_cleaned_stripsTemplateScaffolding() {
+        XCTAssertEqual(Qwen3TranscriptionService.cleaned("language Chinese<asr_text>你好。"), "你好。")
+        XCTAssertEqual(Qwen3TranscriptionService.cleaned("<asr_text>system没有诊断修复。"), "没有诊断修复。")
+        XCTAssertEqual(Qwen3TranscriptionService.cleaned("会有更多。<|endoftext|>Human Rights Watch"), "会有更多。")
+    }
+
+    func test_cleaned_keepsOrdinaryTextThatStartsWithARoleWord() {
+        XCTAssertEqual(Qwen3TranscriptionService.cleaned("  system design 很重要 "), "system design 很重要")
+    }
+
+    func test_looksCorrupt_flagsDebrisWrongScriptAndNearEmptyOutput() {
+        // Undecodable bytes left over from leaked template text.
+        XCTAssertTrue(Qwen3TranscriptionService.looksCorrupt(raw: "\u{FFFD}斯系统", cleaned: "\u{FFFD}斯系统", speechSeconds: 30))
+        // A script this engine is never routed.
+        XCTAssertTrue(Qwen3TranscriptionService.looksCorrupt(raw: "สั่งฟรี", cleaned: "สั่งฟรี", speechSeconds: 2))
+        // Four characters for thirty seconds of speech.
+        XCTAssertTrue(Qwen3TranscriptionService.looksCorrupt(raw: "好的好的", cleaned: "好的好的", speechSeconds: 30))
+    }
+
+    func test_looksCorrupt_acceptsNormalAndShortUtterances() {
+        XCTAssertFalse(Qwen3TranscriptionService.looksCorrupt(
+            raw: "所有，只要处理data，不管你是做machine learning。",
+            cleaned: "所有，只要处理data，不管你是做machine learning。", speechSeconds: 8))
+        // A one-word reply is short, but so is its audio.
+        XCTAssertFalse(Qwen3TranscriptionService.looksCorrupt(raw: "好。", cleaned: "好。", speechSeconds: 0.6))
+        // Silence legitimately transcribes to nothing.
+        XCTAssertFalse(Qwen3TranscriptionService.looksCorrupt(raw: "", cleaned: "", speechSeconds: 0))
+    }
+
+    func test_segmentRanges_shortAudioIsOneRange() {
+        let samples = [Float](repeating: 0.1, count: 16000 * 20)
+        XCTAssertEqual(Qwen3TranscriptionService.segmentRanges(samples: samples, sampleRate: 16000), [0..<samples.count])
+    }
+
+    func test_segmentRanges_longAudioIsCutAtThePause() {
+        // 100 s of "speech" with one 1 s pause at 35–36 s.
+        var samples = [Float](repeating: 0.1, count: 16000 * 100)
+        for i in (16000 * 35)..<(16000 * 36) { samples[i] = 0 }
+        let ranges = Qwen3TranscriptionService.segmentRanges(samples: samples, sampleRate: 16000)
+
+        XCTAssertEqual(ranges.first?.lowerBound, 0)
+        XCTAssertEqual(ranges.last?.upperBound, samples.count)
+        for (a, b) in zip(ranges, ranges.dropFirst()) {
+            XCTAssertEqual(a.upperBound, b.lowerBound, "ranges must tile the audio with no gap or overlap")
+        }
+        let limit = Int(Qwen3TranscriptionService.maxSegmentSeconds * 16000)
+        XCTAssertTrue(ranges.allSatisfy { $0.count <= limit })
+        let firstCut = ranges[0].upperBound
+        XCTAssertTrue((16000 * 35...16000 * 36).contains(firstCut), "first cut should land inside the pause, got \(firstCut)")
+    }
+
+    func test_joined_spacesOnlyBetweenLatinWords() {
+        XCTAssertEqual(Qwen3TranscriptionService.joined(["你好。", "现在可以了吗？"]), "你好。现在可以了吗？")
+        XCTAssertEqual(Qwen3TranscriptionService.joined(["Hello there.", "How are you?"]), "Hello there. How are you?")
+        XCTAssertEqual(Qwen3TranscriptionService.joined(["我们用", "Python"]), "我们用Python")
+    }
 }
