@@ -108,11 +108,17 @@ Before transcription starts, you can select the language (auto-detect, Chinese, 
 
 ### Language
 
-The speech model works out the language you are speaking by itself, so there is nothing you have to set. The language setting is a hint: with **Auto** it follows your macOS input method (Pinyin or Wubi means Chinese, ABC or US means English), and it is used to reject the occasional misfire (for example Chinese speech answered in another script) and to pick the punctuation clean-up rules.
+There is no language to select. The speech model works out what you are speaking for each recording, so you can switch between languages freely.
 
-You can pin the hint manually via the menu bar dropdown or Settings. The menu bar shows quick-switch capsule buttons: **Auto | EN | 中文 | 日 | 한**
+**Settings → General → Languages you speak** lists the 19 languages Murmur supports and starts with all of them turned on. If you turn off the languages you never speak, Murmur double-checks any result that comes back in a writing system none of your languages uses: it listens again, and keeps the text only if the second pass agrees. Speaking a language you turned off still works; it takes a moment longer.
 
-Chinese, English and mixed Chinese-English speech are what Murmur is tested on. The model accepts other languages too, but they are untested here.
+The model accepts 30 languages, but how well each one works differs a lot, so Murmur offers only the first two groups below. Measured with Murmur's own engine on 30 read-speech clips per language from the FLEURS validation set (lower is better; clips with numerals excluded, because the model writes digits where the reference spells numbers out):
+
+| Works well (error ≤ ~11%) | Usable (12–26%) | Poor (over 40%) — not offered |
+|---|---|---|
+| Chinese 2.3 · Korean 3.3 · English 3.8 · Cantonese 4.8 · Spanish 5.9 · German 6.1 · Portuguese 6.7 · Thai 7.3 · French 8.9 · Japanese 10.5 · Italian 10.6 | Vietnamese 12.4 · Indonesian 13.4 · Russian 14.2 · Hindi 15.9 · Dutch 21.0 · Turkish 23.0 · Arabic 23.7 · Malay 26.3 | Filipino 42 · Polish 43 · Swedish 44 · Greek 57 · Czech 58 · Romanian 58 · Finnish 59 · Hungarian 61 · Danish 62 · Persian 62 · Macedonian 75 |
+
+Character error rate for Chinese, Cantonese, Japanese, Korean and Thai; word error rate for the rest. Thirty clips is a small sample, so read these as tiers, not precise scores. In the "poor" group the output is often a phonetic approximation, and sometimes in a neighbouring language (Danish written as Swedish, Macedonian in Latin letters). The model still transcribes those languages if you speak them; Murmur just does not list them.
 
 ### How text insertion works
 
@@ -136,7 +142,6 @@ If clipboard paste fails, Murmur falls back to CGEvent keystrokes (character-by-
 Click the Murmur icon in your menu bar to see:
 
 - **Status** — Ready, Recording, Transcribing, or Error
-- **Language switcher** — Capsule buttons to change language quickly
 - **Recent transcriptions** — Last 20 results with detected language badges (click to copy)
 - **Hotkey** — Shows current shortcut (click to open Settings)
 - **Settings / Quit**
@@ -157,7 +162,7 @@ Open Settings from the menu bar dropdown.
 **General tab:**
 - Hotkey trigger (Right Command or custom shortcut)
 - Recording mode (Toggle or Hold-to-talk)
-- Transcription language
+- Languages you speak
 - Sound effects on/off
 - Undo after transcription (off by default)
 - Launch at login
@@ -268,7 +273,7 @@ open .build/debug/Murmur.app   # Launch
 
 **No text appears after transcription** — Make sure Accessibility is enabled for Murmur in System Settings > Privacy & Security > Accessibility
 
-**Transcription is wrong language** — Set the language manually in the menu bar instead of Auto, or switch your macOS input method. For audio transcription, select the language in the confirm dialog before starting.
+**Text comes out in the wrong language or script** — The model picks the language from the audio and cannot be forced to one. Add the languages you speak in Settings → General → Languages you speak so odd results get a second pass. Short or unclear clips are the usual cause.
 
 **Streaming not working** — Enable streaming in Settings > Experimental. If it was previously enabled but stopped working, try toggling it off and on.
 

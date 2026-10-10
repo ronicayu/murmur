@@ -47,9 +47,9 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
         await unloadModel()
     }
 
-    /// Transcribe one recording. `language` is a hint only — the model detects
-    /// the spoken language itself — used to judge whether the output is
-    /// plausible (see `hasDebris`).
+    /// Transcribe one recording. `language` is the user's spoken languages as
+    /// produced by `SpokenLanguages.hint(for:)`. The model detects the spoken
+    /// language itself; the hint only says which scripts to expect (see `judge`).
     func transcribe(audioURL: URL, language: String) async throws -> TranscriptionResult {
         let start = CFAbsoluteTimeGetCurrent()
         let samples = try Self.loadAudio(url: audioURL)
@@ -200,38 +200,139 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
         return text
     }
 
-    /// Start offsets (in samples) tried in turn when a decode looks corrupt.
+    /// Start offsets (in samples) tried in turn when a decode is not accepted.
     private static let retryOffsets = [0, 160, 320, 480]
 
-    /// Decode one segment, retrying from a slightly later start if the output
-    /// looks corrupt.
+    /// Decode one segment, decoding again from a slightly later start when the
+    /// result cannot be trusted as it stands.
     ///
-    /// The int8 model has a rare failure where a clip of ordinary speech comes
-    /// back as a few characters of chat-template debris (`�斯系统`,
-    /// `<asr_text>system…`) or in an unrelated script. It is deterministic for
-    /// a given input but chaotic — moving the start by a single sample gives a
-    /// correct transcript — so shifting by 10 ms and decoding again recovers it.
+    /// Two different things can be wrong with a result (see `judge`):
+    ///
+    /// - **Corrupt.** The int8 model has a rare failure where a clip of
+    ///   ordinary speech comes back as a few characters of chat-template debris
+    ///   (`�斯系统`, `<asr_text>system…`). It is deterministic for a given
+    ///   input but chaotic — moving the start by a single sample gives a
+    ///   correct transcript — so decoding again 10 ms later recovers it.
+    /// - **Unexpected script.** Text in a writing system none of the user's
+    ///   languages uses. That is either a misfire or the user speaking a
+    ///   language they have not listed, and a second decode tells them apart:
+    ///   real speech comes back in the same script with nearly the same
+    ///   words, a misfire does not. When two attempts agree, the transcript is
+    ///   accepted — the user's speech is never dropped for being unexpected.
     private func decodeWithRetry(
         _ samples: [Float], sampleRate: Int, language: String, recognizer: SherpaOnnxOfflineRecognizer
     ) -> String {
         let speechSeconds = Self.speechSeconds(samples, sampleRate: sampleRate)
-        let checkScript = Self.expectsChineseOrEnglish(language)
-        var fallback = ""
+        let expected = SpokenLanguages.expectedScripts(forHint: language)
+        var attempts: [DecodeAttempt] = []
         for offset in Self.retryOffsets where offset < samples.count {
             let clip = offset == 0 ? samples : Array(samples[offset...])
             let raw = recognizer.decode(samples: clip, sampleRate: sampleRate).text
             let text = Self.cleaned(raw)
-            if !Self.looksCorrupt(raw: raw, cleaned: text, speechSeconds: speechSeconds, checkScript: checkScript) {
-                if offset > 0 { logger.info("Qwen3 decode recovered after retry at +\(offset) samples") }
-                return text
+            let judgement = Self.judge(raw: raw, cleaned: text, speechSeconds: speechSeconds, expected: expected)
+            attempts.append(DecodeAttempt(text: text, judgement: judgement))
+            if let settled = Self.settledText(attempts) {
+                if offset > 0 { logger.info("Qwen3 decode settled after retry at +\(offset) samples") }
+                return settled
             }
-            logger.warning("Qwen3 decode looks corrupt at +\(offset) samples: \(raw.prefix(60), privacy: .public)")
-            // Never fall back to template debris or a wrong-script transcript;
-            // a merely short result is still the best guess if every retry fails.
-            if !Self.hasDebris(raw: raw, cleaned: text, checkScript: checkScript),
-               text.count > fallback.count { fallback = text }
+            logger.warning("Qwen3 decode not accepted at +\(offset) samples (\(String(describing: judgement), privacy: .public)): \(raw.prefix(60), privacy: .public)")
         }
-        return fallback
+        return Self.lastResort(attempts)
+    }
+
+    // MARK: - Judging a decode
+
+    enum DecodeJudgement: Equatable, Sendable {
+        /// Usable as it stands.
+        case accepted
+        /// Template markers or undecodable bytes: never usable.
+        case debris
+        /// Almost no text for several seconds of audible speech.
+        case tooShort
+        /// Clean text, but mostly in a script the user's languages do not use.
+        case unexpectedScript(WritingScript)
+    }
+
+    struct DecodeAttempt: Equatable, Sendable {
+        let text: String
+        let judgement: DecodeJudgement
+    }
+
+    /// Classifies one decode.
+    ///
+    /// - Parameters:
+    ///   - speechSeconds: how much of the audio was audible (see `speechSeconds`).
+    ///     Normal speech runs at 3–5 characters per second; under 0.5 for four
+    ///     seconds or more means the model gave up.
+    ///   - expected: scripts of the user's languages.
+    nonisolated static func judge(
+        raw: String, cleaned: String, speechSeconds: Double, expected: Set<WritingScript>
+    ) -> DecodeJudgement {
+        if raw.contains("<asr_text>") || raw.contains("<|") || raw.contains("\u{FFFD}") { return .debris }
+        if speechSeconds >= 4 && Double(cleaned.count) < speechSeconds * 0.5 { return .tooShort }
+
+        // A transcript is "in" an unexpected script when letters outside the
+        // expected scripts outnumber the letters inside them. A stray foreign
+        // word in an otherwise expected transcript is not a reason to distrust it.
+        let counts = WritingScript.counts(in: cleaned)
+        let inside = counts.filter { expected.contains($0.key) }.reduce(0) { $0 + $1.value }
+        let outside = counts.filter { !expected.contains($0.key) }
+        let outsideTotal = outside.reduce(0) { $0 + $1.value }
+        if outsideTotal > inside, let dominant = outside.max(by: { $0.value < $1.value })?.key {
+            return .unexpectedScript(dominant)
+        }
+        return .accepted
+    }
+
+    /// How alike two transcripts must be (character edit distance over the
+    /// longer length) to count as the same speech heard twice. Genuine speech
+    /// re-decoded from 10 ms later differs by a word or two at most.
+    static let agreementMaxEditRatio = 0.4
+
+    /// The text to return given the attempts so far, or nil to decode again.
+    ///
+    /// - An accepted attempt settles it.
+    /// - Two attempts in the same unexpected script with nearly the same text
+    ///   settle it too: that is the user speaking an unlisted language.
+    nonisolated static func settledText(_ attempts: [DecodeAttempt]) -> String? {
+        guard let latest = attempts.last else { return nil }
+        if latest.judgement == .accepted { return latest.text }
+        guard case .unexpectedScript(let script) = latest.judgement else { return nil }
+        for earlier in attempts.dropLast() {
+            if case .unexpectedScript(script) = earlier.judgement,
+               editRatio(earlier.text, latest.text) <= agreementMaxEditRatio {
+                return earlier.text
+            }
+        }
+        return nil
+    }
+
+    /// What to return when no attempt settled. A transcript that is merely
+    /// short is still the best guess; debris and an unconfirmed foreign script
+    /// are not worth typing, so the result may be empty.
+    nonisolated static func lastResort(_ attempts: [DecodeAttempt]) -> String {
+        attempts
+            .filter { $0.judgement == .tooShort }
+            .map(\.text)
+            .max { $0.count < $1.count } ?? ""
+    }
+
+    /// Character edit distance divided by the longer length (0 = identical).
+    nonisolated static func editRatio(_ a: String, _ b: String) -> Double {
+        let x = Array(a), y = Array(b)
+        guard !x.isEmpty || !y.isEmpty else { return 0 }
+        if x.isEmpty || y.isEmpty { return 1 }
+        var previous = Array(0...y.count)
+        var current = [Int](repeating: 0, count: y.count + 1)
+        for i in 1...x.count {
+            current[0] = i
+            for j in 1...y.count {
+                let cost = x[i - 1] == y[j - 1] ? 0 : 1
+                current[j] = min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + cost)
+            }
+            swap(&previous, &current)
+        }
+        return Double(previous[y.count]) / Double(max(x.count, y.count))
     }
 
     /// Seconds of `samples` whose 100 ms frames reach whisper level (≈ −50 dBFS).
@@ -247,48 +348,6 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
             start = end
         }
         return Double(loud) / 10
-    }
-
-    /// Whether the language hint says the speaker uses Chinese or English, in
-    /// which case text in any other script is a misfire. An empty or "auto"
-    /// hint counts too: nothing more specific is known, and Chinese/English is
-    /// what the model is used for by default.
-    nonisolated static func expectsChineseOrEnglish(_ language: String) -> Bool {
-        ["zh", "en", "auto", ""].contains(language.lowercased())
-    }
-
-    /// Template markers or undecodable bytes; and, when `checkScript` is set,
-    /// text in a script other than Chinese or Latin (the model occasionally
-    /// answers Chinese speech in Thai, for instance).
-    nonisolated static func hasDebris(raw: String, cleaned: String, checkScript: Bool = true) -> Bool {
-        if raw.contains("<asr_text>") || raw.contains("<|") || raw.contains("\u{FFFD}") { return true }
-        guard checkScript else { return false }
-        return cleaned.unicodeScalars.contains { scalar in
-            switch scalar.value {
-            case 0x0000...0x024F,   // ASCII, Latin-1, Latin Extended
-                 0x2000...0x206F,   // general punctuation
-                 0x20A0...0x20CF,   // currency
-                 0x2100...0x214F,   // letterlike (℃, №)
-                 0x3000...0x303F,   // CJK punctuation
-                 0x3400...0x4DBF,   // CJK extension A
-                 0x4E00...0x9FFF,   // CJK unified
-                 0xFF00...0xFFEF:   // full-width forms
-                return false
-            default:
-                return true
-            }
-        }
-    }
-
-    /// True when a decode should not be trusted: it contains debris, or it
-    /// produced almost no text for several seconds of audible speech (normal
-    /// speech runs at 3–5 characters per second; under 0.5 means the model
-    /// gave up).
-    nonisolated static func looksCorrupt(
-        raw: String, cleaned: String, speechSeconds: Double, checkScript: Bool = true
-    ) -> Bool {
-        if hasDebris(raw: raw, cleaned: cleaned, checkScript: checkScript) { return true }
-        return speechSeconds >= 4 && Double(cleaned.count) < speechSeconds * 0.5
     }
 
     /// Longest stretch decoded in one go.
@@ -471,6 +530,10 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
         }
         let total = chinese + latinWords + other
         guard total > 0 else { return .unknown }
+        // Japanese is written with many of the same characters as Chinese, but
+        // always alongside kana; do not let those characters claim it.
+        let scripts = WritingScript.counts(in: text)
+        if scripts[.kana, default: 0] + scripts[.hangul, default: 0] > 0 { return .unknown }
         if Double(chinese) / Double(total) > 0.3 { return .chinese }
         return other > latinWords ? .unknown : .english
     }

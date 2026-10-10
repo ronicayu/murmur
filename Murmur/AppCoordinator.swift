@@ -141,8 +141,7 @@ final class AppCoordinator: ObservableObject {
     }
 
     /// Language code for the post-processing rules, from the language the
-    /// transcript is actually written in. Returns nil for `.unknown` — the
-    /// caller then falls back to the language hint.
+    /// transcript is actually written in. Returns nil for `.unknown`.
     private static func languageCode(for detected: DetectedLanguage) -> String? {
         switch detected {
         case .english: return "en"
@@ -233,11 +232,6 @@ final class AppCoordinator: ObservableObject {
     private var hotkeyTask: Task<Void, Never>?
     private var audioLevelTask: Task<Void, Never>?
     private var undoMonitor: Any?
-    // Exposed as internal(set) so tests can assert the badge value without
-    // needing to spy on the full stopAndTranscribeV1 call path (which requires
-    // live audio infrastructure).
-    internal(set) var activeBadge: String? = nil
-    private static let transcriptionLanguageKey = "transcriptionLanguage"
     private static let log = Logger(subsystem: "com.murmur.app", category: "coordinator")
 
     init(
@@ -369,10 +363,7 @@ final class AppCoordinator: ObservableObject {
             self.transition(to: .transcribing)
             self.pill.show(state: .transcribing)
 
-            // For long uploads we keep things simple: trust the IME / picker
-            // language. Auto-detect-by-retry would mean transcribing the whole
-            // file twice on a mismatch, which is too costly for long audio.
-            let lang = self.resolveTranscriptionLanguage()
+            let lang = self.spokenLanguagesHint()
 
             do {
                 let result = try await self.transcription.transcribeLong(
@@ -490,14 +481,10 @@ final class AppCoordinator: ObservableObject {
 
     private func startV1RecordingFlow() async {
         do {
-            let resolvedLang = resolveTranscriptionLanguage()
-            let storedSetting = UserDefaults.standard.string(forKey: Self.transcriptionLanguageKey) ?? "auto"
-            activeBadge = LanguageBadge.badgeText(resolvedCode: resolvedLang, storedSetting: storedSetting)
-
             transition(to: .recording)
             audioFeedback.playStartRecording()
             let cancelHandler: () -> Void = { [weak self] in self?.hotkey.emit(.cancelRecording) }
-            pill.show(state: .recording, audioLevel: 0, languageBadge: activeBadge, onCancel: cancelHandler)
+            pill.show(state: .recording, audioLevel: 0, onCancel: cancelHandler)
 
             // Monitor audio levels for the pill
             audioLevelTask?.cancel()
@@ -505,7 +492,7 @@ final class AppCoordinator: ObservableObject {
                 guard let self else { return }
                 for await level in self.audio.audioLevel {
                     self.currentAudioLevel = level
-                    self.pill.show(state: .recording, audioLevel: level, languageBadge: self.activeBadge, onCancel: cancelHandler)
+                    self.pill.show(state: .recording, audioLevel: level, onCancel: cancelHandler)
                 }
             }
 
@@ -543,15 +530,12 @@ final class AppCoordinator: ObservableObject {
 
     private func startStreamingRecordingFlow() async {
         do {
-            // Resolve badge before showing pill — mirrors V1 flow
-            let lang = resolveTranscriptionLanguage()
-            let storedSetting = UserDefaults.standard.string(forKey: Self.transcriptionLanguageKey) ?? "auto"
-            activeBadge = LanguageBadge.badgeText(resolvedCode: lang, storedSetting: storedSetting)
+            let lang = spokenLanguagesHint()
 
             transition(to: .recording)
             audioFeedback.playStartRecording()
             let cancelHandler: () -> Void = { [weak self] in self?.hotkey.emit(.cancelRecording) }
-            pill.show(state: .streaming(chunkCount: 0), audioLevel: 0, languageBadge: activeBadge, onCancel: cancelHandler)
+            pill.show(state: .streaming(chunkCount: 0), audioLevel: 0, onCancel: cancelHandler)
 
             audioLevelTask?.cancel()
             audioLevelTask = Task { @MainActor [weak self] in
@@ -560,7 +544,7 @@ final class AppCoordinator: ObservableObject {
                     self.currentAudioLevel = level
                     // Pill update happens via streamingCoordinator published state
                     if case .streaming(let n) = self.streamingCoordinator?.sessionState {
-                        self.pill.show(state: .streaming(chunkCount: n), audioLevel: level, languageBadge: self.activeBadge, onCancel: cancelHandler)
+                        self.pill.show(state: .streaming(chunkCount: n), audioLevel: level, onCancel: cancelHandler)
                     }
                 }
             }
@@ -646,12 +630,10 @@ final class AppCoordinator: ObservableObject {
                     transition(to: .idle)
                     pill.hide(after: 0.5)
                 } else {
-                    let initialLang = resolveTranscriptionLanguage()
                     let language = final.language == .unknown
                         ? Qwen3TranscriptionService.detectLanguage(final.text) : final.language
                     try await deliverTranscription(
-                        TranscriptionResult(text: final.text, language: language, durationMs: final.durationMs),
-                        initialLang: initialLang
+                        TranscriptionResult(text: final.text, language: language, durationMs: final.durationMs)
                     )
                 }
             } else if let reason = streamingCoordinator?.cancellationReason {
@@ -807,13 +789,13 @@ final class AppCoordinator: ObservableObject {
             let wav = try await withTimeout(seconds: 5, operation: "stop recording") {
                 try await self.audio.stopRecording()
             }
-            // Language hint from the IME / Settings picker. The model detects the
-            // spoken language itself; the hint only helps it reject misfires.
-            let initialLang = resolveTranscriptionLanguage()
+            // The model detects the spoken language itself; the user's
+            // "Languages you speak" only tell it which scripts to expect.
+            let hint = spokenLanguagesHint()
             let result = try await withTimeout(seconds: 120, operation: "transcription") {
-                try await self.transcription.transcribe(audioURL: wav, language: initialLang)
+                try await self.transcription.transcribe(audioURL: wav, language: hint)
             }
-            try await deliverTranscription(result, initialLang: initialLang)
+            try await deliverTranscription(result)
 
             // Increment V1 usage counter for discovery badge
             V1UsageCounter.increment()
@@ -822,7 +804,7 @@ final class AppCoordinator: ObservableObject {
                 date: Date(),
                 mode: .v1FullPass,
                 outcome: .injected,
-                language: Self.languageCode(for: result.language) ?? initialLang,
+                language: Self.metricsLanguage(for: result.language),
                 stopToFinalTextMs: Self.elapsedMs(since: stopRequestedAt)
             ))
         } catch {
@@ -830,7 +812,7 @@ final class AppCoordinator: ObservableObject {
                 date: Date(),
                 mode: .v1FullPass,
                 outcome: Self.failureOutcome(for: error),
-                language: resolveTranscriptionLanguage(),
+                language: Self.metricsLanguage(for: nil),
                 stopToFinalTextMs: Self.elapsedMs(since: stopRequestedAt)
             ))
             handleError(mapError(error))
@@ -869,7 +851,7 @@ final class AppCoordinator: ObservableObject {
             date: Date(),
             mode: .v3Streaming,
             outcome: outcome,
-            language: resolveTranscriptionLanguage(),
+            language: Self.metricsLanguage(for: coord?.finalResult?.language),
             stopToFinalTextMs: Self.elapsedMs(since: stopRequestedAt),
             timeToFirstWordMs: coord?.timeToFirstWordMs,
             finalizeLatencyMs: coord?.finalizingStartedAt.map(Self.elapsedMs(since:)),
@@ -895,9 +877,11 @@ final class AppCoordinator: ObservableObject {
     /// Post-process a finished transcription, insert it at the cursor, record
     /// it in history and show the "Inserted" pill. Shared by the V1 full-pass
     /// path and streaming preview sessions, which both insert the text once.
-    private func deliverTranscription(_ result: TranscriptionResult, initialLang: String) async throws {
-        // The "actual" language used for this transcription, post-retry.
-        let lang = Self.languageCode(for: result.language) ?? initialLang
+    private func deliverTranscription(_ result: TranscriptionResult) async throws {
+        // Post-processing rules exist for Chinese and English only, and are
+        // chosen by what the transcript is actually written in. Any other
+        // language gets a code the rules do not know, so they leave it alone.
+        let lang = Self.languageCode(for: result.language) ?? "und"
 
         // Pipeline: transcribe → correction (LLM, 2.5 s cap) → cleanup (rules, 250 ms cap) → inject. Each step silently falls back to its input on
         // timeout or error.
@@ -1167,33 +1151,15 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    /// When language is "auto", resolve to the active input method's language.
-    /// e.g., Pinyin/Wubi → "zh", ABC/US → "en", Kotoeri → "ja"
-    private func resolveTranscriptionLanguage() -> String {
-        let stored = UserDefaults.standard.string(forKey: Self.transcriptionLanguageKey) ?? "auto"
-        guard stored == "auto" else { return stored }
+    /// The user's "Languages you speak" as the engine's language hint.
+    private func spokenLanguagesHint() -> String {
+        SpokenLanguages.hint(for: SpokenLanguages.current())
+    }
 
-        if let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
-           let ptr = TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages),
-           let languages = Unmanaged<CFArray>.fromOpaque(ptr).takeUnretainedValue() as? [String],
-           let primary = languages.first {
-            // Map input source language codes to our supported codes
-            let prefix = String(primary.prefix(2))
-            switch prefix {
-            case "zh": return "zh"
-            case "ja": return "ja"
-            case "ko": return "ko"
-            case "fr": return "fr"
-            case "de": return "de"
-            case "es": return "es"
-            case "pt": return "pt"
-            case "it": return "it"
-            case "vi": return "vi"
-            case "ar": return "ar"
-            default: return "en"
-            }
-        }
-        return "en"
+    /// Language recorded with a session's metrics: what the transcript was
+    /// written in when that is known, "und" otherwise.
+    private static func metricsLanguage(for detected: DetectedLanguage?) -> String {
+        detected.flatMap(languageCode(for:)) ?? "und"
     }
 
     private func mapError(_ error: Error) -> MurmurError {
