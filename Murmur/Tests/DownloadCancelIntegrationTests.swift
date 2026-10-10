@@ -117,13 +117,12 @@ final class DownloadCancelIntegrationTests: XCTestCase {
         )
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
 
-        // Configure a fresh manager and redirect its model directory for .onnx.
-        UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
+        // Configure a fresh manager and redirect its model directory for .qwen3.
+        UserDefaults.standard.set(ModelBackend.qwen3.rawValue, forKey: "modelBackend")
         manager = ModelManager()
-        _ = manager.setActiveBackend(.onnx)
 
         // Redirect file ops to the temp dir.
-        manager.__testing_setModelDirectory(tempDir, for: .onnx)
+        manager.__testing_setModelDirectory(tempDir, for: .qwen3)
 
         // Start in .downloading so cancelDownload() has something to cancel.
         manager.__testing_setState(.downloading(progress: 0.1, bytesPerSec: 0))

@@ -1,0 +1,477 @@
+import AVFoundation
+import Foundation
+import os
+
+/// Murmur's speech engine: Qwen3-ASR-0.6B int8, run through the vendored
+/// sherpa-onnx Swift API on 16 kHz mono Float32 audio.
+///
+/// Thread-safety: actor-isolated. The underlying `SherpaOnnxOfflineRecognizer` C
+/// session is not thread-safe, so all transcribe calls serialise here.
+///
+/// Lifetime: the recognizer is created on first use (or `preloadModel`) and
+/// kept until `unloadModel`. Loading the three ONNX graphs takes ~1 s on a Mac
+/// M-series, so it is not reloaded per request.
+actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
+
+    private let logger = Logger(subsystem: "com.murmur.app", category: "qwen3")
+    private let modelDirectory: URL
+    private var recognizer: SherpaOnnxOfflineRecognizer?
+
+    /// A silence this long becomes a paragraph break in `transcribeLong` output.
+    static let paragraphBreakGapSeconds: Double = 2.0
+
+    // Conservative: callers always go through `preloadModel`, which is a
+    // no-op once the recognizer exists.
+    nonisolated var isModelLoaded: Bool { false }
+
+    /// - Parameter modelDirectory: directory containing `conv_frontend.onnx`,
+    ///   `encoder.int8.onnx`, `decoder.int8.onnx`, and `tokenizer/` from the
+    ///   `csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25` HF repo. It
+    ///   does not need to exist yet; loading fails with `modelNotFound` until
+    ///   the model has been downloaded.
+    init(modelDirectory: URL) {
+        self.modelDirectory = modelDirectory
+    }
+
+    // MARK: - TranscriptionServiceProtocol
+
+    func preloadModel() async throws {
+        _ = try loadedRecognizer()
+    }
+
+    func unloadModel() async {
+        recognizer = nil
+    }
+
+    func killProcess() async {
+        await unloadModel()
+    }
+
+    /// Transcribe one recording. `language` is a hint only — the model detects
+    /// the spoken language itself — used to judge whether the output is
+    /// plausible (see `hasDebris`).
+    func transcribe(audioURL: URL, language: String) async throws -> TranscriptionResult {
+        let start = CFAbsoluteTimeGetCurrent()
+        let samples = try Self.loadAudio(url: audioURL)
+        let text = try decode(samples: samples, language: language)
+        let elapsedMs = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+        return TranscriptionResult(text: text, language: Self.detectLanguage(text), durationMs: elapsedMs)
+    }
+
+    /// Transcribe a long file, reporting progress after each piece. Long
+    /// silences are skipped and become paragraph breaks.
+    func transcribeLong(
+        audioURL: URL,
+        language: String,
+        onProgress: @escaping (TranscriptionProgress) -> Void
+    ) async throws -> TranscriptionResult {
+        let start = CFAbsoluteTimeGetCurrent()
+        let recognizer = try loadedRecognizer()
+        let samples = try Self.loadAudio(url: audioURL)
+        let sampleRate = 16_000
+
+        // Paragraphs first (split at long silences), then each paragraph into
+        // pieces short enough for one decode.
+        let paragraphs = Self.paragraphRanges(samples: samples, sampleRate: sampleRate).map { paragraph in
+            Self.segmentRanges(samples: Array(samples[paragraph]), sampleRate: sampleRate)
+                .map { (paragraph.lowerBound + $0.lowerBound)..<(paragraph.lowerBound + $0.upperBound) }
+        }
+        let totalPieces = paragraphs.reduce(0) { $0 + $1.count }
+
+        var paragraphTexts: [String] = []
+        var done = 0
+        for pieces in paragraphs {
+            var texts: [String] = []
+            for range in pieces {
+                try Task.checkCancellation()
+                let piece = decodeWithRetry(Array(samples[range]), sampleRate: sampleRate, language: language, recognizer: recognizer)
+                if !piece.isEmpty { texts.append(piece) }
+                done += 1
+                let partial = (paragraphTexts + [Self.joined(texts)]).filter { !$0.isEmpty }.joined(separator: "\n\n")
+                onProgress(TranscriptionProgress(currentChunk: done, totalChunks: totalPieces, partialText: partial))
+            }
+            let paragraphText = Self.joined(texts)
+            if !paragraphText.isEmpty { paragraphTexts.append(paragraphText) }
+        }
+
+        let fullText = paragraphTexts.joined(separator: "\n\n")
+        let elapsedMs = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+        return TranscriptionResult(text: fullText, language: Self.detectLanguage(fullText), durationMs: elapsedMs)
+    }
+
+    /// Transcribe samples already in memory (16 kHz mono).
+    func transcribe(samples: [Float], sampleRate: Int, language: String = "") async throws -> String {
+        precondition(sampleRate == 16000,
+                     "Qwen3TranscriptionService requires 16 kHz audio; got \(sampleRate)")
+        return try decode(samples: samples, language: language)
+    }
+
+    // MARK: - Loading
+
+    private func loadedRecognizer() throws -> SherpaOnnxOfflineRecognizer {
+        if let recognizer { return recognizer }
+
+        let fm = FileManager.default
+        let allPresent = ModelBackend.qwen3.requiredFiles.allSatisfy {
+            fm.fileExists(atPath: modelDirectory.appendingPathComponent($0).path)
+        }
+        guard allPresent else {
+            throw MurmurError.modelNotFound
+        }
+
+        // maxTotalLen caps prompt + audio + generated tokens; the audio encoder
+        // emits ~13 tokens per second, so 2048 leaves ample room for the 40 s
+        // pieces `segmentRanges` produces. Hotwords are deliberately left
+        // empty: in benchmarking, a fixed term list made mixed zh-en output
+        // worse and occasionally sent the decoder into a repetition loop.
+        let qwen3Asr = sherpaOnnxOfflineQwen3ASRModelConfig(
+            convFrontend: modelDirectory.appendingPathComponent("conv_frontend.onnx").path,
+            encoder: modelDirectory.appendingPathComponent("encoder.int8.onnx").path,
+            decoder: modelDirectory.appendingPathComponent("decoder.int8.onnx").path,
+            tokenizer: modelDirectory.appendingPathComponent("tokenizer").path,
+            maxTotalLen: 2048,
+            maxNewTokens: 512
+        )
+        let modelConfig = sherpaOnnxOfflineModelConfig(
+            tokens: "",
+            numThreads: 4,
+            provider: "cpu",
+            debug: 0,
+            qwen3Asr: qwen3Asr
+        )
+        let featConfig = sherpaOnnxFeatureConfig(sampleRate: 16000, featureDim: 128)
+        var config = sherpaOnnxOfflineRecognizerConfig(
+            featConfig: featConfig, modelConfig: modelConfig
+        )
+        let loaded = SherpaOnnxOfflineRecognizer(config: &config)
+        recognizer = loaded
+        logger.info("Qwen3-ASR model loaded from \(self.modelDirectory.path, privacy: .public)")
+        return loaded
+    }
+
+    // MARK: - Decoding
+
+    private func decode(samples: [Float], language: String) throws -> String {
+        let recognizer = try loadedRecognizer()
+        // One decode is bounded by `maxTotalLen`; a long recording would be
+        // cut off part-way. Decode it in pieces split at quiet points instead.
+        var pieces: [String] = []
+        for range in Self.segmentRanges(samples: samples, sampleRate: 16000) {
+            let piece = decodeWithRetry(Array(samples[range]), sampleRate: 16000, language: language, recognizer: recognizer)
+            if !piece.isEmpty { pieces.append(piece) }
+        }
+        let text = Self.joined(pieces)
+        logger.info("Qwen3 text: \(text.prefix(200), privacy: .public)")
+        return text
+    }
+
+    /// Strips chat-template debris from raw model output.
+    ///
+    /// Qwen3-ASR is a language model that answers in the form
+    /// `language Chinese<asr_text>…text…<|im_end|>`. sherpa-onnx normally returns
+    /// only the text, but on some clips the scaffolding leaks through — e.g.
+    /// `<asr_text>system没有…` — and would be typed at the cursor.
+    nonisolated static func cleaned(_ raw: String) -> String {
+        var text = raw
+        // Generation past an end marker is the model continuing on its own.
+        for endMarker in ["<|im_end|>", "<|endoftext|>"] {
+            if let range = text.range(of: endMarker) {
+                text = String(text[..<range.lowerBound])
+            }
+        }
+        var sawScaffolding = false
+        if let range = text.range(of: "<asr_text>", options: .backwards) {
+            text = String(text[range.upperBound...])
+            sawScaffolding = true
+        }
+        let tagPattern = "<\\|[^|>]*\\|>|</?asr_text>"
+        if text.range(of: tagPattern, options: .regularExpression) != nil {
+            text = text.replacingOccurrences(of: tagPattern, with: "", options: .regularExpression)
+            sawScaffolding = true
+        }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A chat role name left stranded where a marker was removed.
+        if sawScaffolding {
+            for role in ["system", "assistant", "user"] where text.hasPrefix(role) {
+                text = String(text.dropFirst(role.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                break
+            }
+        }
+        return text
+    }
+
+    /// Start offsets (in samples) tried in turn when a decode looks corrupt.
+    private static let retryOffsets = [0, 160, 320, 480]
+
+    /// Decode one segment, retrying from a slightly later start if the output
+    /// looks corrupt.
+    ///
+    /// The int8 model has a rare failure where a clip of ordinary speech comes
+    /// back as a few characters of chat-template debris (`�斯系统`,
+    /// `<asr_text>system…`) or in an unrelated script. It is deterministic for
+    /// a given input but chaotic — moving the start by a single sample gives a
+    /// correct transcript — so shifting by 10 ms and decoding again recovers it.
+    private func decodeWithRetry(
+        _ samples: [Float], sampleRate: Int, language: String, recognizer: SherpaOnnxOfflineRecognizer
+    ) -> String {
+        let speechSeconds = Self.speechSeconds(samples, sampleRate: sampleRate)
+        let checkScript = Self.expectsChineseOrEnglish(language)
+        var fallback = ""
+        for offset in Self.retryOffsets where offset < samples.count {
+            let clip = offset == 0 ? samples : Array(samples[offset...])
+            let raw = recognizer.decode(samples: clip, sampleRate: sampleRate).text
+            let text = Self.cleaned(raw)
+            if !Self.looksCorrupt(raw: raw, cleaned: text, speechSeconds: speechSeconds, checkScript: checkScript) {
+                if offset > 0 { logger.info("Qwen3 decode recovered after retry at +\(offset) samples") }
+                return text
+            }
+            logger.warning("Qwen3 decode looks corrupt at +\(offset) samples: \(raw.prefix(60), privacy: .public)")
+            // Never fall back to template debris or a wrong-script transcript;
+            // a merely short result is still the best guess if every retry fails.
+            if !Self.hasDebris(raw: raw, cleaned: text, checkScript: checkScript),
+               text.count > fallback.count { fallback = text }
+        }
+        return fallback
+    }
+
+    /// Seconds of `samples` whose 100 ms frames reach whisper level (≈ −50 dBFS).
+    nonisolated static func speechSeconds(_ samples: [Float], sampleRate: Int) -> Double {
+        let frame = max(1, sampleRate / 10)
+        var loud = 0
+        var start = 0
+        while start < samples.count {
+            let end = min(start + frame, samples.count)
+            var sum: Float = 0
+            for i in start..<end { sum += samples[i] * samples[i] }
+            if (sum / Float(end - start)).squareRoot() >= 0.00316 { loud += 1 }
+            start = end
+        }
+        return Double(loud) / 10
+    }
+
+    /// Whether the language hint says the speaker uses Chinese or English, in
+    /// which case text in any other script is a misfire. An empty or "auto"
+    /// hint counts too: nothing more specific is known, and Chinese/English is
+    /// what the model is used for by default.
+    nonisolated static func expectsChineseOrEnglish(_ language: String) -> Bool {
+        ["zh", "en", "auto", ""].contains(language.lowercased())
+    }
+
+    /// Template markers or undecodable bytes; and, when `checkScript` is set,
+    /// text in a script other than Chinese or Latin (the model occasionally
+    /// answers Chinese speech in Thai, for instance).
+    nonisolated static func hasDebris(raw: String, cleaned: String, checkScript: Bool = true) -> Bool {
+        if raw.contains("<asr_text>") || raw.contains("<|") || raw.contains("\u{FFFD}") { return true }
+        guard checkScript else { return false }
+        return cleaned.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x0000...0x024F,   // ASCII, Latin-1, Latin Extended
+                 0x2000...0x206F,   // general punctuation
+                 0x20A0...0x20CF,   // currency
+                 0x2100...0x214F,   // letterlike (℃, №)
+                 0x3000...0x303F,   // CJK punctuation
+                 0x3400...0x4DBF,   // CJK extension A
+                 0x4E00...0x9FFF,   // CJK unified
+                 0xFF00...0xFFEF:   // full-width forms
+                return false
+            default:
+                return true
+            }
+        }
+    }
+
+    /// True when a decode should not be trusted: it contains debris, or it
+    /// produced almost no text for several seconds of audible speech (normal
+    /// speech runs at 3–5 characters per second; under 0.5 means the model
+    /// gave up).
+    nonisolated static func looksCorrupt(
+        raw: String, cleaned: String, speechSeconds: Double, checkScript: Bool = true
+    ) -> Bool {
+        if hasDebris(raw: raw, cleaned: cleaned, checkScript: checkScript) { return true }
+        return speechSeconds >= 4 && Double(cleaned.count) < speechSeconds * 0.5
+    }
+
+    /// Longest stretch decoded in one go.
+    static let maxSegmentSeconds = 40.0
+    /// How far back from that limit to look for a quiet point to cut at.
+    static let splitSearchSeconds = 10.0
+
+    /// Splits `samples` into ranges of at most `maxSegmentSeconds`, each cut at
+    /// the quietest 0.3 s within the last `splitSearchSeconds` of the limit so
+    /// a cut lands in a pause rather than through a word. Audio that already
+    /// fits is returned as a single range.
+    nonisolated static func segmentRanges(samples: [Float], sampleRate: Int) -> [Range<Int>] {
+        let maxLength = Int(maxSegmentSeconds * Double(sampleRate))
+        guard samples.count > maxLength else { return [0..<samples.count] }
+
+        let search = Int(splitSearchSeconds * Double(sampleRate))
+        let frame = max(1, sampleRate * 3 / 10)
+        let hop = max(1, frame / 3)
+        var ranges: [Range<Int>] = []
+        var start = 0
+        while samples.count - start > maxLength {
+            let limit = start + maxLength
+            var bestCut = limit
+            var bestEnergy = Float.greatestFiniteMagnitude
+            var position = limit - search
+            while position + frame <= limit {
+                var energy: Float = 0
+                for i in position..<(position + frame) { energy += samples[i] * samples[i] }
+                if energy < bestEnergy {
+                    bestEnergy = energy
+                    bestCut = position + frame / 2
+                }
+                position += hop
+            }
+            ranges.append(start..<bestCut)
+            start = bestCut
+        }
+        ranges.append(start..<samples.count)
+        return ranges
+    }
+
+    /// Joins per-segment transcripts. A space is added only between two Latin
+    /// words; CJK text and punctuation need none.
+    nonisolated static func joined(_ pieces: [String]) -> String {
+        var text = ""
+        for piece in pieces {
+            if let last = text.last, let first = piece.first,
+               last.isASCII, first.isASCII,
+               last.isLetter || last.isNumber || ".,!?".contains(last),
+               first.isLetter || first.isNumber {
+                text += " "
+            }
+            text += piece
+        }
+        return text
+    }
+
+    // MARK: - Long audio
+
+    /// Splits a recording into paragraphs at silences of at least
+    /// `paragraphBreakGapSeconds`, dropping the silence itself (a short margin
+    /// is kept on each side so no word edge is clipped). Audio with no such
+    /// silence comes back as one range; all-silent audio as none.
+    nonisolated static func paragraphRanges(samples: [Float], sampleRate: Int) -> [Range<Int>] {
+        let frame = max(1, sampleRate / 10)
+        let frameCount = (samples.count + frame - 1) / frame
+        var loud = [Bool](repeating: false, count: frameCount)
+        for index in 0..<frameCount {
+            let start = index * frame
+            let end = min(start + frame, samples.count)
+            var sum: Float = 0
+            for i in start..<end { sum += samples[i] * samples[i] }
+            loud[index] = (sum / Float(end - start)).squareRoot() >= 0.00316
+        }
+
+        let gapFrames = Int(paragraphBreakGapSeconds * 10)
+        let margin = 3  // 0.3 s of the silence kept around speech
+        var ranges: [Range<Int>] = []
+        var blockStart: Int?
+        var lastLoud = -1
+        for index in 0..<frameCount where loud[index] {
+            if let start = blockStart, index - lastLoud > gapFrames {
+                ranges.append(start..<(lastLoud + 1))
+                blockStart = index
+            } else if blockStart == nil {
+                blockStart = index
+            }
+            lastLoud = index
+        }
+        if let start = blockStart { ranges.append(start..<(lastLoud + 1)) }
+
+        return ranges.map { frames in
+            let start = max(0, frames.lowerBound - margin) * frame
+            let end = min(samples.count, (frames.upperBound + margin) * frame)
+            return start..<end
+        }
+    }
+
+    // MARK: - Audio loading and language tagging
+
+    /// Load an audio file as 16 kHz mono Float32 samples, converting if needed.
+    nonisolated static func loadAudio(url: URL) throws -> [Float] {
+        let audioFile = try AVAudioFile(forReading: url)
+        let srcFormat = audioFile.processingFormat
+        let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+
+        if srcFormat.sampleRate == 16000 && srcFormat.channelCount == 1
+            && srcFormat.commonFormat == .pcmFormatFloat32 {
+            guard let buffer = AVAudioPCMBuffer(
+                pcmFormat: srcFormat, frameCapacity: AVAudioFrameCount(audioFile.length)
+            ) else {
+                throw MurmurError.transcriptionFailed("Failed to create audio buffer")
+            }
+            try audioFile.read(into: buffer)
+            guard let data = buffer.floatChannelData?[0] else {
+                throw MurmurError.transcriptionFailed("No audio data")
+            }
+            return Array(UnsafeBufferPointer(start: data, count: Int(buffer.frameLength)))
+        }
+
+        guard let converter = AVAudioConverter(from: srcFormat, to: targetFormat) else {
+            throw MurmurError.transcriptionFailed("Cannot create audio converter")
+        }
+        let inputBuffer = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: 4096)!
+        var allSamples = [Float]()
+        var convertError: NSError?
+        let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+            do {
+                inputBuffer.frameLength = 0
+                try audioFile.read(into: inputBuffer)
+                if inputBuffer.frameLength == 0 {
+                    outStatus.pointee = .endOfStream
+                    return nil
+                }
+                outStatus.pointee = .haveData
+                return inputBuffer
+            } catch {
+                outStatus.pointee = .endOfStream
+                return nil
+            }
+        }
+        var status: AVAudioConverterOutputStatus
+        repeat {
+            let chunk = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: 4096)!
+            status = converter.convert(to: chunk, error: &convertError, withInputFrom: inputBlock)
+            if let data = chunk.floatChannelData?[0], chunk.frameLength > 0 {
+                allSamples.append(contentsOf: UnsafeBufferPointer(start: data, count: Int(chunk.frameLength)))
+            }
+        } while status == .haveData
+
+        if allSamples.isEmpty {
+            throw MurmurError.transcriptionFailed("No audio data after conversion")
+        }
+        return allSamples
+    }
+
+    /// Tags a transcript by content, since the model does not report a language.
+    /// Counts Chinese characters against Latin *words* (a word is many letters,
+    /// so counting letters would call "我们用 Python 写 machine learning 的代码"
+    /// English): Chinese when its characters are over 30% of those units,
+    /// English when the rest is Latin, and unknown for any other script.
+    nonisolated static func detectLanguage(_ text: String) -> DetectedLanguage {
+        var chinese = 0, latinWords = 0, other = 0
+        var inLatinWord = false
+        for scalar in text.unicodeScalars {
+            let isLetter = CharacterSet.letters.contains(scalar)
+            let isLatin = isLetter && scalar.value <= 0x024F
+            if isLatin {
+                if !inLatinWord { latinWords += 1 }
+                inLatinWord = true
+                continue
+            }
+            inLatinWord = false
+            guard isLetter else { continue }
+            switch scalar.value {
+            case 0x3400...0x4DBF, 0x4E00...0x9FFF: chinese += 1
+            default: other += 1
+            }
+        }
+        let total = chinese + latinWords + other
+        guard total > 0 else { return .unknown }
+        if Double(chinese) / Double(total) > 0.3 { return .chinese }
+        return other > latinWords ? .unknown : .english
+    }
+}

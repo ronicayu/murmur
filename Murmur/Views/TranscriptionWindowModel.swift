@@ -51,7 +51,7 @@ final class TranscriptionWindowModel: ObservableObject {
     private let diskChecker: DiskSpaceChecking
     private let filePicker: FilePickerService
     /// Injected transcription service — if nil, falls through to coordinator.transcription.
-    /// Provide a test double in unit tests to avoid spawning a real Python process.
+    /// Provide a test double in unit tests to avoid loading the real speech model.
     private let injectedTranscriptionService: (any TranscriptionServiceProtocol)?
     private var transcriptionTask: Task<Void, Never>?
     private var activeEntryID: UUID?

@@ -409,7 +409,7 @@ final class AudioService: AudioServiceProtocol {
                 // quick "yes" / "好" / "ok" can fly under the radar even
                 // though there's clearly a word in there. If the
                 // recording is short (≤ 2 s) and peak RMS is at or above
-                // whisper level, transcribe anyway and let Cohere decide.
+                // whisper level, transcribe anyway and let the speech model decide.
                 // Long recordings with no VAD segment really are empty.
                 let shortUtteranceMaxDuration: TimeInterval = 2.0
                 let speechFloorDB: Float = -50

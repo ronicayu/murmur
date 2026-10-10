@@ -487,15 +487,16 @@ final class CPULoadMonitorTests: XCTestCase {
             sustainedSeconds: 0.5,
             pollInterval: 0.1
         )
-        var callbackFired = false
+        let fires = LockedCounter()
         await MainActor.run {
-            monitor.onSustainedHighLoad = { callbackFired = true }
+            monitor.onSustainedHighLoad = { fires.increment() }
         }
         monitor.start()
         try await Task.sleep(for: .seconds(1))
         await MainActor.run { monitor.stop() }
+        let fired = fires.value > 0
 
-        XCTAssertFalse(callbackFired,
+        XCTAssertFalse(fired,
             "Callback must not fire when CPU load never exceeds the threshold")
     }
 
@@ -506,20 +507,21 @@ final class CPULoadMonitorTests: XCTestCase {
             sustainedSeconds: 0.1,
             pollInterval: 0.05
         )
-        var callbackCount = 0
+        let fires = LockedCounter()
         await MainActor.run {
-            monitor.onSustainedHighLoad = { callbackCount += 1 }
+            monitor.onSustainedHighLoad = { fires.increment() }
         }
         monitor.start()
         try await Task.sleep(for: .seconds(0.5))
-        let countAtStop = await MainActor.run { () -> Int in
-            monitor.stop()
-            return callbackCount
-        }
+        await MainActor.run { monitor.stop() }
+        // Let a callback that was already in flight when stop() ran land
+        // before taking the baseline.
+        try await Task.sleep(for: .seconds(0.1))
+        let countAtStop = fires.value
         try await Task.sleep(for: .seconds(0.3))
 
         // After stop, count must not increase
-        let finalCount = callbackCount
+        let finalCount = fires.value
         XCTAssertEqual(finalCount, countAtStop,
             "stop() must prevent further callbacks")
     }
@@ -539,29 +541,34 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
         mockInjection = MockTextInjectionService()
         coordinator = await StreamingTranscriptionCoordinator(
             transcription: mockTranscription,
-            injection: mockInjection
+            injection: mockInjection,
+            // No real cursor to read: the mock injection types nothing.
+            cursorOffsetProvider: { nil }
         )
     }
 
     // MARK: 9a — Normal 2-chunk session: chunks injected + full-pass replaces when different
 
     func test_pipeline_twoChunkSession_fullPassReplaces_whenTextDiffers() async throws {
-        // Arrange: chunk transcriptions return two chunks; full-pass returns a cleaner version.
-        var transcribeCallURLs: [URL] = []
-        mockTranscription.onTranscribe = { url in
-            transcribeCallURLs.append(url)
-            // First two calls are chunk transcriptions; third is full-pass.
-            switch transcribeCallURLs.count {
-            case 1: return TranscriptionResult(text: "hello wurld", language: .english, durationMs: 500)
-            case 2: return TranscriptionResult(text: "how are you", language: .english, durationMs: 500)
-            default: return TranscriptionResult(text: "hello world how are you", language: .english, durationMs: 1000)
-            }
-        }
-
+        // Arrange: streaming passes over the growing window mis-hear one word;
+        // the full pass over the complete recording gets it right. The mock
+        // tells the two apart by URL — the full pass reads the session's WAV,
+        // window passes read temp files — not by call order, which depends on
+        // how many window passes the coordinator chooses to run.
         let wavURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("test_integration_\(UUID().uuidString).wav")
         try createMinimalWAV(at: wavURL)
         defer { try? FileManager.default.removeItem(at: wavURL) }
+
+        let windowPasses = LockedCounter()
+        mockTranscription.onTranscribe = { url in
+            if url == wavURL {
+                return TranscriptionResult(text: "hello world how are you", language: .english, durationMs: 1000)
+            }
+            windowPasses.increment()
+            let text = windowPasses.value == 1 ? "hello wurld" : "hello wurld how are you"
+            return TranscriptionResult(text: text, language: .english, durationMs: 500)
+        }
 
         // Act: begin session and simulate two chunk completions via the accumulator
         let accumulator = await coordinator.beginSession(
@@ -613,6 +620,65 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
             "hello world how are you",
             "replaceRange must use the full-pass transcript"
         )
+    }
+
+    // MARK: 9a-2 — Stable prefix: a one-pass hallucination is never injected
+
+    func test_pipeline_stablePrefix_suppressesOnePassHallucination() async throws {
+        // Growing-window hypotheses: pass 1 carries a phantom English tail ("thank you")
+        // on what is really Chinese speech; pass 2 disagrees, so it must never reach the
+        // cursor. Only text two consecutive passes agree on is injected.
+        // Thread-safe call counter — onTranscribe may be invoked from detached tasks.
+        let lock = NSLock()
+        var call = 0
+        mockTranscription.onTranscribe = { _ in
+            lock.lock(); call += 1; let n = call; lock.unlock()
+            let text: String
+            switch n {
+            case 1: text = "你好 thank you"        // phantom tail on pass 1
+            case 2: text = "你好 现在"             // real continuation; phantom gone
+            default: text = "你好 现在 可以"
+            }
+            return TranscriptionResult(text: text, language: .english, durationMs: 100)
+        }
+
+        let wavURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_stableprefix_\(UUID().uuidString).wav")
+        try createMinimalWAV(at: wavURL)
+        defer { try? FileManager.default.removeItem(at: wavURL) }
+
+        let acc = await coordinator.beginSession(
+            language: "zh", targetAppPID: getpid(), startOffset: 0, fullWavURL: wavURL)
+
+        let sampleRate: Double = 16000
+        let perChunk = Int(sampleRate * 3.0)
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
+            channels: 1, interleaved: false)!
+        func feedOneChunk() async throws {
+            let b = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(perChunk))!
+            b.frameLength = AVAudioFrameCount(perChunk)
+            acc.append(b)
+            try await Task.sleep(for: .milliseconds(400))   // let each pass finish, in order
+        }
+
+        try await feedOneChunk()   // pass 1 -> emits nothing (LocalAgreement-2 needs a 2nd pass)
+        try await feedOneChunk()   // pass 2 -> confirms "你好"
+        try await feedOneChunk()   // pass 3 -> confirms "现在"
+
+        // Poll until the confirmed prefix lands (inject hops through extra Tasks).
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, !mockInjection.appendedTexts.joined().contains("现在") {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+
+        let streamed = mockInjection.appendedTexts.joined()
+        XCTAssertFalse(streamed.lowercased().contains("thank"),
+                       "one-pass hallucination must never reach the cursor; got: '\(streamed)'")
+        XCTAssertTrue(streamed.contains("你好"),
+                      "confirmed prefix should be injected; got: '\(streamed)'")
+        XCTAssertTrue(streamed.contains("现在"),
+                      "second confirmed token should be injected; got: '\(streamed)'")
     }
 
     // MARK: 9b — Tracker invalidated mid-session: full-pass skips replacement
@@ -1179,46 +1245,50 @@ final class CPULoadMonitorEdgeCaseTests: XCTestCase {
             sustainedSeconds: 0.1,
             pollInterval: 0.05
         )
-        var fired = false
-        await MainActor.run { monitor.onSustainedHighLoad = { fired = true } }
+        let fires = LockedCounter()
+        await MainActor.run { monitor.onSustainedHighLoad = { fires.increment() } }
         monitor.start()
         try await Task.sleep(for: .seconds(0.4))
         await MainActor.run { monitor.stop() }
 
-        XCTAssertFalse(fired,
+        XCTAssertFalse(fires.value > 0,
             "onSustainedHighLoad must not fire when load never exceeds impossible threshold")
     }
 
     // MARK: 14b — multiple start/stop cycles do not cause double-firing
 
     func test_cpuMonitor_startStop_multipleCycles_noDoubleFire() async throws {
-        var fireCount = 0
+        let fires = LockedCounter()
         let monitor = CPULoadMonitor(
             threshold: 0.0,
             sustainedSeconds: 0.05,
             pollInterval: 0.02
         )
-        await MainActor.run { monitor.onSustainedHighLoad = { fireCount += 1 } }
+        await MainActor.run { monitor.onSustainedHighLoad = { fires.increment() } }
 
+        // First cycle: with threshold 0.0 the monitor detects sustained load
+        // and fires exactly once (evaluate() self-stops on fire). Poll for the
+        // fire rather than sleeping a fixed window — under machine load the
+        // detached poller can be starved past any fixed budget.
         monitor.start()
-        try await Task.sleep(for: .seconds(0.15))
-        let firstCount = fireCount
+        let firedFirst = await pollUntil { fires.value >= 1 }
+        XCTAssertTrue(firedFirst,
+            "With threshold=0.0, callback must fire at least once during start")
+        let firstCount = fires.value
 
+        // After an explicit stop, the count must not advance.
         await MainActor.run { monitor.stop() }
         try await Task.sleep(for: .seconds(0.1))
-        let countAfterStop = fireCount
-
-        // Restart
-        monitor.start()
-        try await Task.sleep(for: .seconds(0.15))
-        await MainActor.run { monitor.stop() }
-
-        // First cycle fired at least once; after stop count froze; second cycle fired again.
-        // Key assertion: count after stop must not increase during the gap.
+        let countAfterStop = fires.value
         XCTAssertEqual(firstCount, countAfterStop,
             "stop() must freeze the callback count — no fires in the stopped gap")
-        XCTAssertGreaterThanOrEqual(firstCount, 1,
-            "With threshold=0.0, callback must fire at least once during start")
+
+        // Second cycle fires again — start/stop is reusable.
+        monitor.start()
+        let firedSecond = await pollUntil { fires.value > firstCount }
+        await MainActor.run { monitor.stop() }
+        XCTAssertTrue(firedSecond,
+            "Second start cycle must fire again after a prior stop")
     }
 }
 

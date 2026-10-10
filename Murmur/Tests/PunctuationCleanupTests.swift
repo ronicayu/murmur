@@ -415,12 +415,14 @@ actor SpyCleanupService: TranscriptionCleanup {
         case .failure(let error):
             throw error
         case .slowSuccess(let cleaned, _):
-            // Block indefinitely without a wall-clock dependency so the
-            // coordinator's withTimeout always fires before this resumes.
-            // Task.sleep(nanoseconds:) throws CancellationError when the
-            // enclosing task group cancels this task — deterministic.
+            // Block far longer than any test runs, so the coordinator's
+            // withTimeout always fires first; the sleep then throws
+            // CancellationError when the task group cancels this task.
+            // Not UInt64.max nanoseconds: that overflows the deadline on some
+            // runtimes and returns immediately, handing back the "cleaned"
+            // text the test expects never to see.
             _ = cleaned  // result is intentionally never returned
-            try await Task.sleep(nanoseconds: UInt64.max)
+            try await Task.sleep(for: .seconds(3600))
             return cleaned  // unreachable; satisfies the compiler
         }
     }

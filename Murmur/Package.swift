@@ -21,6 +21,8 @@ let package = Package(
             name: "Murmur",
             dependencies: [
                 "HotKey",
+                // No Swift code imports this. The vendored sherpa-onnx static
+                // library needs the ONNX Runtime symbols at link time.
                 .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
                 "SherpaOnnxC",
             ],

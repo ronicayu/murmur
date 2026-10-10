@@ -47,7 +47,7 @@ struct FloatingPillView: View {
     }
 
     /// Badge is shown during recording, streaming, AND transcribing — so the
-    /// LID-updated badge remains visible while Cohere processes the audio.
+    /// badge remains visible while the audio is being transcribed.
     var isLanguageBadgeVisible: Bool {
         switch state {
         case .recording, .streaming, .transcribing: return true

@@ -6,6 +6,32 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [0.5.0] — 2026-10-10
+
+Murmur now runs a single speech model, Qwen3-ASR, and streaming shows a live preview instead of typing as you speak.
+
+### Changed
+- **One speech model: Qwen3-ASR-0.6B.** Murmur now runs Alibaba's [Qwen3-ASR-0.6B](https://github.com/QwenLM/Qwen3-ASR) (int8, through the vendored sherpa-onnx, ~0.99 GB) for everything: dictation, streaming and file transcription. It recognises the spoken language itself and writes its own punctuation.
+  - In an offline benchmark against the previous Chinese engine, FireRedASR2-AED (ASCEND conversational + FLEURS read Mandarin, ~1,360 utterances, mixed error rate), it was slightly better on pure Chinese (6.99 vs 7.99, and 4.35 vs 5.35) and slightly worse on Chinese-English mixed speech (14.13 vs 12.77), and about 5× faster (a 14.7 s clip in ~1.0 s vs ~5.1 s on an M5 Max).
+  - Chinese, English and mixed speech are what it is tested on. Other languages go to the same model and are untested.
+- **Streaming shows its text in a floating bubble and inserts once at the end.** While you speak, the audio so far is re-transcribed every second and the words two consecutive passes agree on appear in a bubble below the pill (LocalAgreement-2, from the stable-prefix work in PR #2), a second or two behind your voice. Nothing is typed into the app. When you stop, the full recording is transcribed once more, goes through the same correction / clean-up pipeline as non-streaming input, and is inserted in a single paste — in every app, with Recent and Undo. If the final pass fails, the streamed text is inserted. Settings → Experimental → Preview bubble turns the bubble off and types as you speak instead.
+- **Model downloads no longer need Python.** Murmur lists the model files through `URLSession` and fetches them with the system `/usr/bin/curl`, resuming partial files. Both use the macOS keychain for TLS trust, so Cloudflare WARP / Zero Trust needs no custom CA bundle. Previously a download first built a Python environment and `pip install`ed eight packages (including PyTorch); any failure there surfaced as "Setup failed. Please check your internet connection."
+- **The language setting is now a hint.** The model detects the language itself. The setting (Auto follows your keyboard layout) is used to reject misfires in another script and to choose punctuation clean-up rules.
+- **Settings → Model is one "Speech Model" section** with status, download, re-download and delete. Onboarding downloads the same model (~1 GB instead of ~1.5 GB).
+- **Long files are split at pauses.** File transcription skips silences of 2 s or more and turns them into paragraph breaks, with or without the VAD add-on. The VAD add-on is now used only for the live silence gate and hands-free auto-stop.
+
+### Removed
+- **The Cohere Transcribe ("Standard") and FireRedASR2 engines**, the engine picker, and the "Use FireRed for Chinese" toggle.
+- **The ASR Punctuation add-on** (CT-Transformer). Qwen3-ASR punctuates its own output; the add-on doubled every mark when run on it.
+- **"Auto-detect language" (re-transcribe on mismatch).** It existed to correct Cohere when its language constraint was wrong; Qwen3-ASR has no such constraint.
+- **All Python**: the legacy transcription bridge, `transcribe.py`, `requirements.txt`, the spike scripts and the ONNX Runtime Float16 patch step. Building is now `swift build`.
+- Model folders from the removed engines are no longer read. Settings → Model → Old Models shows how much space they take and removes them (`Models-ONNX`, `Models-FireRed`, `Models-PuncCT`, `Models-LID`, `Models-Whisper`, the Python environment).
+
+### Fixed
+- **Qwen3-ASR occasionally returned garbage for ordinary speech** — a few characters of template debris (`<asr_text>system…`, `�斯系统`) or text in an unrelated script. The int8 model has a rare input-sensitive failure: the same clip shifted by one sample transcribes correctly. Murmur detects debris, wrong-script text and near-empty output for audible speech, and decodes again from 10 ms later. Leaked markers are also stripped.
+- **Long recordings were cut off.** A single decode is bounded by the model's context. Recordings over 40 s are decoded in pieces split at the quietest point near each boundary.
+- **Type-as-you-speak streaming repeated some phrases and lost others** (Preview bubble off). Pastes ran from independent tasks and returned as soon as Cmd+V was posted, so two pieces confirmed close together both pasted whichever reached the clipboard last. Pastes now run one at a time, wait for the target app, and coalesce what queues up; the clipboard is saved once per run and restored after the last paste. The end-of-recording correction, which a premature cursor check had been disabling, runs again, and the closing words are no longer dropped.
+
 ## [0.4.10] — 2026-05-01
 
 ### Fixed

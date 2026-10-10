@@ -10,10 +10,6 @@ APP_DIR="$BUILD_DIR/$APP_NAME.app"
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
-APP_SUPPORT="$HOME/Library/Application Support/Murmur"
-
-# Patch ORT for Float16 support (idempotent)
-bash Scripts/patch-ort-float16.sh
 
 # Build
 swift build
@@ -23,13 +19,6 @@ mkdir -p "$MACOS" "$RESOURCES"
 cp "$BUILD_DIR/$APP_NAME" "$MACOS/$APP_NAME"
 cp Info.plist "$CONTENTS/Info.plist"
 cp Murmur.entitlements "$CONTENTS/" 2>/dev/null || true
-
-# Copy resources
-cp Resources/transcribe.py "$RESOURCES/" 2>/dev/null || true
-
-# Also copy transcribe.py to App Support so the subprocess can always find it
-mkdir -p "$APP_SUPPORT"
-cp Scripts/transcribe.py "$APP_SUPPORT/transcribe.py"
 
 # Copy the resource bundle if it exists
 if [ -d "$BUILD_DIR/Murmur_Murmur.bundle" ]; then

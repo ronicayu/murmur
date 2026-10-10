@@ -166,32 +166,10 @@ struct OnboardingView: View {
 
     // MARK: - Step 4: Model Choice
 
+    /// There is one speech model, so there is nothing to choose; the view
+    /// model always skips this step. Kept only so `OnboardingStep` stays stable.
     private var modelChoiceStep: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            Image(systemName: "sparkles")
-                .font(.system(size: 48))
-                .foregroundStyle(.blue)
-            Text("Choose Speech Engine")
-                .font(.title2.bold())
-            Text("Pick how Murmur turns your voice into text.\nYou can switch anytime in Settings.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
-            VStack(spacing: 12) {
-                ForEach(ModelBackend.allCases, id: \.self) { backend in
-                    backendCard(backend)
-                }
-            }
-
-            Spacer()
-            Button("Continue") {
-                viewModel.nextStep()
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-        }
+        EmptyView()
     }
 
     // MARK: - Step 5: Model Download
@@ -204,7 +182,7 @@ struct OnboardingView: View {
                 .foregroundStyle(.blue)
             Text("Download Speech Model")
                 .font(.title2.bold())
-            Text("\(viewModel.modelManager.activeBackend.shortName) engine (\(viewModel.modelManager.activeBackend.sizeDescription)).\nEverything runs on your Mac — no data leaves your device.")
+            Text("Murmur needs its speech model (\(ModelBackend.qwen3.sizeDescription)).\nEverything runs on your Mac — no data leaves your device.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -468,99 +446,6 @@ struct OnboardingView: View {
         }
         .onAppear {
             viewModel.checkHotkeyConflict()
-        }
-    }
-
-    @ViewBuilder
-    private func backendCard(_ backend: ModelBackend) -> some View {
-        let isSelected: Bool = viewModel.modelManager.activeBackend == backend
-        let isDownloaded: Bool = viewModel.modelManager.isModelDownloaded(for: backend)
-        let switchLocked: Bool = viewModel.modelManager.isDownloadActive
-        let isLocked: Bool = switchLocked && !isSelected
-        let fillColor: Color = isSelected ? Color.accentColor.opacity(0.08) : Color.clear
-        let strokeColor: Color = isSelected ? Color.accentColor.opacity(0.3) : Color.secondary.opacity(0.2)
-
-        Button {
-            viewModel.selectBackend(backend)
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: backendIcon(backend))
-                    .font(.title2)
-                    .foregroundStyle(backendColor(backend))
-                    .frame(width: 32)
-
-                backendCardContent(backend, isDownloaded: isDownloaded, isLocked: isLocked)
-
-                Spacer()
-                if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color.accentColor)
-                }
-            }
-            .padding(12)
-            .background(RoundedRectangle(cornerRadius: 10).fill(fillColor))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(strokeColor, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        // Mirror the SettingsView.engineRow disabled pattern (CR-M1):
-        // lock non-selected cards while a download or verification is running.
-        // The setActiveBackend guard is still authoritative; this is defense-in-depth.
-        .disabled(isLocked)
-        .help(isLocked ? "Locked during download — wait for it to finish or cancel first." : "")
-    }
-
-    @ViewBuilder
-    private func backendCardContent(_ backend: ModelBackend, isDownloaded: Bool, isLocked: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                Text(backend.displayName)
-                    .font(.headline)
-                if backend == .onnx {
-                    Text("Recommended")
-                        .font(.caption2.bold())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.blue, in: Capsule())
-                }
-                if isDownloaded {
-                    Text("Downloaded")
-                        .font(.caption2.bold())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.green, in: Capsule())
-                }
-            }
-            Text(backend.description)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
-            if !isDownloaded {
-                Text("Download: \(backend.sizeDescription)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-            if isLocked {
-                Text("Locked during download")
-                    .font(.caption)
-                    .foregroundStyle(Color.secondary)
-            }
-        }
-    }
-
-    private func backendIcon(_ backend: ModelBackend) -> String {
-        switch backend {
-        case .onnx: return "hare.fill"
-        case .fireRed: return "flame.fill"
-        }
-    }
-
-    private func backendColor(_ backend: ModelBackend) -> Color {
-        switch backend {
-        case .onnx: return .blue
-        case .fireRed: return .red
         }
     }
 

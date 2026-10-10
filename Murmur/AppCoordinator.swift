@@ -75,12 +75,6 @@ final class AppCoordinator: ObservableObject {
     let audioFeedback: AudioFeedbackService
     let pill: any PillControlling
 
-    /// Legacy slot — Whisper-tiny LID was removed in favour of Cohere-echo
-    /// (see `transcribeWithAutoDetectIfNeeded`). Kept to avoid breaking the
-    /// public surface during the deprecation window. Always nil at runtime.
-    /// TODO(v0.4): delete when no external code references it.
-    var lid: Any? = nil
-
     /// Optional post-transcription cleanup service. When non-nil and the
     /// `cleanupTranscription` UserDefault is on, called after V1 transcription
     /// succeeds and before text is injected. Injected by MurmurApp on every
@@ -146,10 +140,10 @@ final class AppCoordinator: ObservableObject {
         UserDefaults.standard.bool(forKey: "correctTranscription")
     }
 
-    /// Map a post-hoc text-based `DetectedLanguage` (what Cohere actually
-    /// produced) back to a Cohere language code. Returns nil for `.unknown` —
-    /// caller should keep the current language hint.
-    private static func cohereCode(for detected: DetectedLanguage) -> String? {
+    /// Language code for the post-processing rules, from the language the
+    /// transcript is actually written in. Returns nil for `.unknown` — the
+    /// caller then falls back to the language hint.
+    private static func languageCode(for detected: DetectedLanguage) -> String? {
         switch detected {
         case .english: return "en"
         case .chinese: return "zh"
@@ -161,65 +155,26 @@ final class AppCoordinator: ObservableObject {
 
     private(set) var streamingCoordinator: StreamingTranscriptionCoordinator?
 
-    /// Set by MurmurApp at construction time; the coordinator queries the
-    /// router via this manager.
-    weak var modelManager: ModelManager?
-
-    /// FireRed transcription service. Lazily created when first needed AND
-    /// when the FireRed model is downloaded. nil until either condition fails.
-    /// Replaced when the model directory changes (for tests via __testing seams).
-    private var fireRed: FireRedTranscriptionService?
-    private var fireRedModelDirectory: URL?
-
-    /// True after we've logged the first FireRed failure this session — keeps
-    /// the log readable when the model is missing or broken.
-    private var hasLoggedFireRedFailureThisSession = false
-
-    /// CT-Transformer punctuation service. Active when the user has enabled
-    /// the ASR-punctuation toggle AND the aux model is on disk. nil otherwise.
-    private var asrPunc: ASRPunctuationService?
-
-    /// Suppress repeat punc-failure logs the same way as FireRed.
-    private var hasLoggedASRPuncFailureThisSession = false
-
     private var isStreamingEnabled: Bool {
         UserDefaults.standard.bool(forKey: "streamingInputEnabled")
     }
 
+    /// When on (the default), streamed text is shown in a floating bubble and
+    /// only the final text is inserted, once, after recording stops. When off,
+    /// streamed text is typed into the target app as it arrives.
+    private var isStreamingPreviewEnabled: Bool {
+        UserDefaults.standard.object(forKey: "streamingPreviewBubble") as? Bool ?? true
+    }
+
+    private let streamingPreview = StreamingPreviewController()
+
+    /// How often streaming re-transcribes the growing audio window. Qwen3-ASR
+    /// handles a full 12 s window in about a second and returns nothing for
+    /// silence, so a one-second cadence keeps text a pass or two behind speech.
+    private static let streamingPassIntervalSeconds = 1.0
+
     /// When true, skips accessibility check (for onboarding test where we show text in-app, not inject)
     var skipAccessibilityCheck = false
-
-    /// Update the transcription backend model path (called when user switches backends)
-    func switchModelPath(_ newPath: URL) {
-        Task {
-            await transcription.setModelPath(newPath)
-        }
-        preloadModelInBackground()
-    }
-
-    /// Replace the transcription service (e.g. when switching between ONNX and Python backends)
-    func replaceTranscriptionService(_ newService: any TranscriptionServiceProtocol) {
-        Task { await transcription.killProcess() }
-        transcription = newService
-        preloadModelInBackground()
-    }
-
-    /// Wire up (or tear down) the FireRed service. Called from `MurmurApp` in
-    /// response to `committedUseFireRedChange` and `committedBackendChange`.
-    /// Passing `nil` releases the recognizer.
-    func setFireRedService(_ service: FireRedTranscriptionService?, modelDirectory: URL?) {
-        self.fireRed = service
-        self.fireRedModelDirectory = modelDirectory
-        self.hasLoggedFireRedFailureThisSession = false
-    }
-
-    /// Wire up (or tear down) the ASR-punctuation service. Called from
-    /// `MurmurApp` in response to `committedUseASRPunctuationChange`.
-    /// Passing `nil` releases the recognizer.
-    func setASRPunctuationService(_ service: ASRPunctuationService?) {
-        self.asrPunc = service
-        self.hasLoggedASRPuncFailureThisSession = false
-    }
 
     /// Wire up (or tear down) the Silero VAD service. AudioService uses
     /// it to decide silence at stop time and to drive endpointing in
@@ -283,7 +238,11 @@ final class AppCoordinator: ObservableObject {
     init(
         hotkey: HotkeyService = HotkeyService(),
         audio: AudioService = AudioService(),
-        transcription: any TranscriptionServiceProtocol = TranscriptionService(),
+        transcription: any TranscriptionServiceProtocol = Qwen3TranscriptionService(
+            modelDirectory: FileManager.default
+                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent(ModelBackend.qwen3.modelSubdirectory)
+        ),
         injection: TextInjectionService = TextInjectionService(),
         permissions: PermissionsService = PermissionsService(),
         audioFeedback: AudioFeedbackService = AudioFeedbackService(),
@@ -506,6 +465,7 @@ final class AppCoordinator: ObservableObject {
             audio.detachStreamingAccumulator()
             streamingCoordinator?.cancelSession()
             streamingCoordinator?.resetToIdle()
+            streamingPreview.hide()
             audio.cancelRecording()
             // No sound: user just pressed Escape; pill.hide() is the confirmation.
             pill.hide()
@@ -624,7 +584,11 @@ final class AppCoordinator: ObservableObject {
                 language: lang,
                 targetAppPID: targetPID,
                 startOffset: startOffset,
-                fullWavURL: wavURL
+                fullWavURL: wavURL,
+                incrementalSeconds: Self.streamingPassIntervalSeconds,
+                onPreviewText: isStreamingPreviewEnabled
+                    ? { [weak self] text in self?.streamingPreview.update(text) }
+                    : nil
             )
             streamingAccumulator = acc
 
@@ -634,6 +598,7 @@ final class AppCoordinator: ObservableObject {
             audioLevelTask?.cancel()
             audio.onAutoStop = nil
             streamingCoordinator?.cancelSession()
+            streamingPreview.hide()
             audioFeedback.playError()
             transition(to: .error(mapError(error)))
         }
@@ -663,9 +628,26 @@ final class AppCoordinator: ObservableObject {
 
             // Wait for coordinator to reach done/cancelled/failed
             await waitForStreamingDone()
+            streamingPreview.hide()
 
             // Check how the session ended and show appropriate feedback.
-            if let reason = streamingCoordinator?.cancellationReason {
+            if streamingCoordinator?.cancellationReason == nil,
+               let final = streamingCoordinator?.finalResult {
+                // Preview session: nothing has been typed yet. Run the same
+                // post-processing as V1 and insert the final text once.
+                if final.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    transition(to: .idle)
+                    pill.hide(after: 0.5)
+                } else {
+                    let initialLang = resolveTranscriptionLanguage()
+                    let language = final.language == .unknown
+                        ? Qwen3TranscriptionService.detectLanguage(final.text) : final.language
+                    try await deliverTranscription(
+                        TranscriptionResult(text: final.text, language: language, durationMs: final.durationMs),
+                        initialLang: initialLang
+                    )
+                }
+            } else if let reason = streamingCoordinator?.cancellationReason {
                 switch reason {
                 case .focusAbandoned:
                     // UT-P1: Notify user that session was abandoned due to app switch.
@@ -701,6 +683,7 @@ final class AppCoordinator: ObservableObject {
 
         } catch {
             streamingCoordinator?.cancelSession()
+            streamingPreview.hide()
             handleError(mapError(error))
         }
 
@@ -812,56 +795,16 @@ final class AppCoordinator: ObservableObject {
             let wav = try await withTimeout(seconds: 5, operation: "stop recording") {
                 try await self.audio.stopRecording()
             }
-            // Initial guess from the IME / Settings picker. When auto-detect is
-            // on we may end up re-transcribing if Cohere reports a different
-            // language for the output text — see transcribeWithAutoDetectIfNeeded.
+            // Language hint from the IME / Settings picker. The model detects the
+            // spoken language itself; the hint only helps it reject misfires.
             let initialLang = resolveTranscriptionLanguage()
-            let result = try await transcribeWithAutoDetectIfNeeded(wav: wav, initialLang: initialLang)
-            // The "actual" language used for this transcription, post-retry.
-            let lang = Self.cohereCode(for: result.language) ?? initialLang
-
-            // Pipeline: transcribe → ASR-punc (CT-Transformer, ~1 ms) → correction (LLM, 2.5 s cap)
-            // → cleanup (rules, 250 ms cap) → inject. Each step silently falls back to its input on
-            // timeout or error.
-            let rawTranscribed = result.text
-            let punctuated = await applyASRPunctuationIfEnabled(text: rawTranscribed, language: lang)
-            let corrected = await applyCorrectionIfEnabled(text: punctuated, language: lang)
-            let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
-
-            transition(to: .injecting)
-            pill.show(state: .injecting)
-
-            let method = try await withTimeout(seconds: 5, operation: "text injection") {
-                try await self.injection.inject(text: textToInject)
+            let result = try await withTimeout(seconds: 120, operation: "transcription") {
+                try await self.transcription.transcribe(audioURL: wav, language: initialLang)
             }
-
-            lastTranscription = textToInject
-            lastLanguage = result.language
-            // History records the injected (final) text. `rawText` captures
-            // the pre-pipeline transcription whenever ANY post-processing
-            // step (LLM correction OR rule-based cleanup) changed the text.
-            // Comparing against the final injected text — not just the
-            // correction step — means cleanup-only diffs (e.g. just adding
-            // a terminal `。`) also surface in Recent, so the user can
-            // always tell whether the pipeline did anything to their words.
-            let rawForHistory: String? = (textToInject != rawTranscribed) ? rawTranscribed : nil
-            transcriptionHistory.insert((text: textToInject, rawText: rawForHistory, language: result.language, date: Date()), at: 0)
-            if transcriptionHistory.count > maxHistoryCount {
-                transcriptionHistory.removeLast()
-            }
+            try await deliverTranscription(result, initialLang: initialLang)
 
             // Increment V1 usage counter for discovery badge
             V1UsageCounter.increment()
-
-            let undoableState = AppState.undoable(text: textToInject, method: method)
-            transition(to: undoableState)
-            // No success chime: user can see the text appear in their editor
-            // and the "Inserted" pill confirms it. A sound is redundant. Error
-            // path still plays error sound because failures have no visual
-            // equivalent.
-            pill.show(state: undoableState)
-            pill.hide(after: 2)
-            // Undo timer + Cmd+Z monitor set up automatically by transition(to: .undoable)
         } catch {
             handleError(mapError(error))
         }
@@ -873,28 +816,50 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    /// Runs the CT-Transformer punctuation model on the bare ASR transcript
-    /// if the toggle is ON and the service is wired in. Pure additive: the
-    /// model only inserts ，。？！ and never paraphrases, so we don't apply
-    /// the LLM safety rails here. Silent fallback to `rawText` on any throw.
-    ///
-    /// Decides whether to run based on text content (`looksChineseEnough`),
-    /// NOT the `language` parameter. The IME-derived language can be wrong
-    /// (English IME + Chinese speech is common), and Cohere/FireRed both
-    /// faithfully produce CJK chars from Chinese audio regardless of the
-    /// input hint. The CT-Transformer trained on zh-en data would otherwise
-    /// append a Chinese 。 to pure-English text — see spike at
-    /// ~/work/firered-spike/run_punc.py case 4.
-    private func applyASRPunctuationIfEnabled(text rawText: String, language: String) async -> String {
-        guard let svc = asrPunc else { return rawText }
-        guard Self.looksChineseEnough(rawText) else { return rawText }
-        let punctuated = await svc.addPunctuation(to: rawText)
-        if !hasLoggedASRPuncFailureThisSession && punctuated.isEmpty && !rawText.isEmpty {
-            hasLoggedASRPuncFailureThisSession = true
-            Self.log.warning("ASR punctuation returned empty for non-empty input; falling back to raw")
-            return rawText
+    /// Post-process a finished transcription, insert it at the cursor, record
+    /// it in history and show the "Inserted" pill. Shared by the V1 full-pass
+    /// path and streaming preview sessions, which both insert the text once.
+    private func deliverTranscription(_ result: TranscriptionResult, initialLang: String) async throws {
+        // The "actual" language used for this transcription, post-retry.
+        let lang = Self.languageCode(for: result.language) ?? initialLang
+
+        // Pipeline: transcribe → correction (LLM, 2.5 s cap) → cleanup (rules, 250 ms cap) → inject. Each step silently falls back to its input on
+        // timeout or error.
+        let rawTranscribed = result.text
+        let corrected = await applyCorrectionIfEnabled(text: rawTranscribed, language: lang)
+        let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
+
+        transition(to: .injecting)
+        pill.show(state: .injecting)
+
+        let method = try await withTimeout(seconds: 5, operation: "text injection") {
+            try await self.injection.inject(text: textToInject)
         }
-        return punctuated.isEmpty ? rawText : punctuated
+
+        lastTranscription = textToInject
+        lastLanguage = result.language
+        // History records the injected (final) text. `rawText` captures
+        // the pre-pipeline transcription whenever ANY post-processing
+        // step (LLM correction OR rule-based cleanup) changed the text.
+        // Comparing against the final injected text — not just the
+        // correction step — means cleanup-only diffs (e.g. just adding
+        // a terminal `。`) also surface in Recent, so the user can
+        // always tell whether the pipeline did anything to their words.
+        let rawForHistory: String? = (textToInject != rawTranscribed) ? rawTranscribed : nil
+        transcriptionHistory.insert((text: textToInject, rawText: rawForHistory, language: result.language, date: Date()), at: 0)
+        if transcriptionHistory.count > maxHistoryCount {
+            transcriptionHistory.removeLast()
+        }
+
+        let undoableState = AppState.undoable(text: textToInject, method: method)
+        transition(to: undoableState)
+        // No success chime: user can see the text appear in their editor
+        // and the "Inserted" pill confirms it. A sound is redundant. Error
+        // path still plays error sound because failures have no visual
+        // equivalent.
+        pill.show(state: undoableState)
+        pill.hide(after: 2)
+        // Undo timer + Cmd+Z monitor set up automatically by transition(to: .undoable)
     }
 
     /// Runs the cleanup service if the toggle is on and a service is wired in.
@@ -949,8 +914,7 @@ final class AppCoordinator: ObservableObject {
             }
 
             let rawTranscribed = result.text
-            let punctuated = await applyASRPunctuationIfEnabled(text: rawTranscribed, language: lang)
-            let corrected = await applyCorrectionIfEnabled(text: punctuated, language: lang)
+            let corrected = await applyCorrectionIfEnabled(text: rawTranscribed, language: lang)
             let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
 
             // Skip real injection in tests — just record what would be injected.
@@ -1027,21 +991,14 @@ final class AppCoordinator: ObservableObject {
     /// in the NSAlert for critical errors and the unified log for everything.
     private static let errorAutoRecoverySeconds: TimeInterval = 4
 
-    /// Fast readiness check for the currently selected backend — is a
-    /// manifest.json (FU-04 "download + verify completed" marker) present
-    /// on disk for the active backend? Used by the startRecording pre-check
-    /// to avoid wasting a recording session when no model is installed.
+    /// Fast readiness check — is a manifest.json (the "download + verify
+    /// completed" marker) present on disk for the speech model? Used by the
+    /// startRecording pre-check to avoid wasting a recording session when no
+    /// model is installed.
     private static var isActiveBackendModelInstalled: Bool {
-        let saved = UserDefaults.standard.string(forKey: "modelBackend") ?? "onnx"
-        let subdir: String
-        switch saved {
-        case "huggingface": subdir = "Murmur/Models"
-        case "whisper": subdir = "Murmur/Models-Whisper"
-        default: subdir = "Murmur/Models-ONNX"
-        }
         let manifestURL = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(subdir)
+            .appendingPathComponent(ModelBackend.qwen3.modelSubdirectory)
             .appendingPathComponent("manifest.json")
         return FileManager.default.fileExists(atPath: manifestURL.path)
     }
@@ -1134,113 +1091,6 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    private var autoDetectLanguageEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "autoDetectLanguage")
-    }
-
-    /// V1 transcribe path that consults `TranscriptionRouter` and dispatches to
-    /// either FireRed or the existing transcription service. On FireRed errors
-    /// we fall back to Cohere for THIS request only and log the failure once
-    /// per session.
-    private func routedTranscribeV1(wav: URL, language: String) async throws -> TranscriptionResult {
-        let mm = self.modelManager
-        let choice = TranscriptionRouter.route(
-            activeBackend: mm?.activeBackend ?? .onnx,
-            useFireRedForChinese: mm?.useFireRedForChinese ?? false,
-            language: language,
-            version: .v1FullPass
-        )
-
-        switch choice {
-        case .fireRed:
-            guard let svc = fireRed else {
-                Self.log.warning("FireRed routing chosen but service not initialised — falling back to Cohere")
-                return try await transcription.transcribe(audioURL: wav, language: language)
-            }
-            do {
-                let samples = try Self.loadSamples16k(url: wav)
-                let text = try await svc.transcribe(samples: samples, sampleRate: 16000)
-                // Tag the result by content, NOT by the input language hint —
-                // a user with an English IME can still speak Chinese, and FireRed
-                // will faithfully transcribe Chinese characters. Echoing the input
-                // hint here would lie to the auto-detect retry path AND make the
-                // ASR-punc guard skip Chinese text. Mirrors NativeTranscriptionService's
-                // detectLanguage(_:) heuristic (CJK-char ratio > 30%).
-                let lang: DetectedLanguage = Self.detectLanguageFromText(text)
-                return TranscriptionResult(text: text, language: lang, durationMs: 0)
-            } catch {
-                if !hasLoggedFireRedFailureThisSession {
-                    hasLoggedFireRedFailureThisSession = true
-                    Self.log.warning("FireRed inference failed (further failures suppressed this session): \(String(describing: error), privacy: .public)")
-                }
-                return try await transcription.transcribe(audioURL: wav, language: language)
-            }
-
-        case .cohereONNX, .cohereStreaming, .existing:
-            // Existing path — the active service is already correct because
-            // MurmurApp swaps it on backend changes.
-            return try await transcription.transcribe(audioURL: wav, language: language)
-        }
-    }
-
-    /// Transcribe with optional Cohere-echo auto-detect. Replaces the old
-    /// pre-flight Whisper-tiny LID step.
-    ///
-    /// Flow:
-    /// 1. Transcribe once with `initialLang` (the IME guess or Settings picker).
-    /// 2. If `autoDetectLanguage` is on and the post-hoc text-based language
-    ///    on the result differs from `initialLang`, the constraint was wrong
-    ///    — re-transcribe with the detected language.
-    /// 3. Otherwise return the first result.
-    ///
-    /// Cost: zero extra latency when the IME guess was right; one extra
-    /// transcription pass when it was wrong. Encoder dominates pass cost so
-    /// the retry is roughly 1× the base latency, not negligible — but only
-    /// fires on the rare cases that previously produced garbage output.
-    ///
-    /// Updates `activeBadge` if the language changed so the pill reflects
-    /// what the user is actually getting.
-    private func transcribeWithAutoDetectIfNeeded(
-        wav: URL,
-        initialLang: String
-    ) async throws -> TranscriptionResult {
-        let result1 = try await withTimeout(seconds: 120, operation: "transcription") {
-            try await self.routedTranscribeV1(wav: wav, language: initialLang)
-        }
-        guard autoDetectLanguageEnabled else { return result1 }
-
-        // `result1.language` is what the transcription engine reports based on
-        // the OUTPUT TEXT (`NativeTranscriptionService.detectLanguage`). When
-        // it disagrees with the constrained input language, that's the signal
-        // that the constraint was wrong.
-        guard let detectedCode = Self.cohereCode(for: result1.language),
-              detectedCode != initialLang else {
-            Self.log.info("auto-detect: initialLang=\(initialLang, privacy: .public) matched \(String(describing: result1.language), privacy: .public) — no retry")
-            return result1
-        }
-
-        Self.log.info("auto-detect: initialLang=\(initialLang, privacy: .public) → detected=\(detectedCode, privacy: .public); re-transcribing")
-
-        // Visibly update the badge during the retry so the user sees the
-        // correction in flight (e.g. EN· → ZH·).
-        let storedSetting = UserDefaults.standard.string(forKey: Self.transcriptionLanguageKey) ?? "auto"
-        let updatedBadge = LanguageBadge.badgeText(resolvedCode: detectedCode, storedSetting: storedSetting)
-        if updatedBadge != activeBadge {
-            activeBadge = updatedBadge
-            pill.show(state: .transcribing, languageBadge: activeBadge)
-        }
-
-        do {
-            let result2 = try await withTimeout(seconds: 120, operation: "transcription-retry") {
-                try await self.routedTranscribeV1(wav: wav, language: detectedCode)
-            }
-            return result2
-        } catch {
-            Self.log.warning("auto-detect retry failed, using first result: \(String(describing: error), privacy: .public)")
-            return result1
-        }
-    }
-
     /// When language is "auto", resolve to the active input method's language.
     /// e.g., Pinyin/Wubi → "zh", ABC/US → "en", Kotoeri → "ja"
     private func resolveTranscriptionLanguage() -> String {
@@ -1294,94 +1144,6 @@ final class AppCoordinator: ObservableObject {
             group.cancelAll()
             return result
         }
-    }
-
-    /// Load 16 kHz mono Float32 samples from a wav. Mirrors
-    /// NativeTranscriptionService.loadAudio for the same conversion semantics.
-    /// Decide whether a transcript is "Chinese-ish" enough to deserve the
-    /// CT-Transformer ASR punctuation pass. Looks at content, NOT at the
-    /// language hint or IME, because the hint may have been wrong (English
-    /// IME with Chinese speech is a real and common case). The CT-Transformer
-    /// is trained on zh-en specifically, so we also bail when the text
-    /// contains hiragana / katakana — Japanese-only text would otherwise get
-    /// a Chinese 。 appended.
-    fileprivate static func looksChineseEnough(_ text: String) -> Bool {
-        var hasCJK = false
-        for scalar in text.unicodeScalars {
-            let v = scalar.value
-            if (0x3040...0x309F).contains(v) || (0x30A0...0x30FF).contains(v) {
-                return false  // Japanese hiragana / katakana detected — skip
-            }
-            if (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v) {
-                hasCJK = true
-            }
-        }
-        return hasCJK
-    }
-
-    /// Content-based language detection, used to tag FireRed transcripts
-    /// because FireRed itself doesn't return a language. Mirrors
-    /// NativeTranscriptionService.detectLanguage(_:): if Chinese characters
-    /// make up >30% of the alphabetic chars, call it Chinese.
-    fileprivate static func detectLanguageFromText(_ text: String) -> DetectedLanguage {
-        let chineseChars = text.unicodeScalars.filter { (0x4E00...0x9FFF).contains($0.value) }.count
-        let totalAlpha = text.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
-        if totalAlpha > 0 && Double(chineseChars) / Double(totalAlpha) > 0.3 {
-            return .chinese
-        }
-        return .english
-    }
-
-    fileprivate static func loadSamples16k(url: URL) throws -> [Float] {
-        let file = try AVAudioFile(forReading: url)
-        let srcFormat = file.processingFormat
-        let targetFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16000,
-            channels: 1,
-            interleaved: false
-        )!
-
-        if srcFormat.sampleRate == 16000 && srcFormat.channelCount == 1
-            && srcFormat.commonFormat == .pcmFormatFloat32 {
-            let frameCount = AVAudioFrameCount(file.length)
-            guard let buf = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount) else {
-                throw MurmurError.transcriptionFailed("Failed to create audio buffer")
-            }
-            try file.read(into: buf)
-            guard let data = buf.floatChannelData?[0] else {
-                throw MurmurError.transcriptionFailed("No audio data")
-            }
-            return Array(UnsafeBufferPointer(start: data, count: Int(buf.frameLength)))
-        }
-
-        guard let conv = AVAudioConverter(from: srcFormat, to: targetFormat) else {
-            throw MurmurError.transcriptionFailed("Cannot create audio converter")
-        }
-        let inBuf = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: 4096)!
-        var allSamples = [Float]()
-        var convError: NSError?
-        let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-            do {
-                inBuf.frameLength = 0
-                try file.read(into: inBuf)
-                if inBuf.frameLength == 0 { outStatus.pointee = .endOfStream; return nil }
-                outStatus.pointee = .haveData
-                return inBuf
-            } catch { outStatus.pointee = .endOfStream; return nil }
-        }
-        var status: AVAudioConverterOutputStatus
-        repeat {
-            let chunk = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: 4096)!
-            status = conv.convert(to: chunk, error: &convError, withInputFrom: inputBlock)
-            if let data = chunk.floatChannelData?[0], chunk.frameLength > 0 {
-                allSamples.append(contentsOf: UnsafeBufferPointer(start: data, count: Int(chunk.frameLength)))
-            }
-        } while status == .haveData
-        if allSamples.isEmpty {
-            throw MurmurError.transcriptionFailed("No audio data after conversion")
-        }
-        return allSamples
     }
 }
 

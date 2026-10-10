@@ -24,182 +24,84 @@ private final class ResumeGuard: @unchecked Sendable {
 
 // MARK: - Model Backend
 
+/// The speech model Murmur runs. There is one engine today; the enum keeps the
+/// per-model metadata (repo, files, on-disk location) in one place and leaves
+/// room for another model without reshaping `ModelManager`.
 enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
-    case onnx
-    case fireRed
+    case qwen3
 
     var id: String { rawValue }
 
-    var displayName: String {
-        switch self {
-        case .onnx: return "Standard (Recommended)"
-        case .fireRed: return "FireRed (Chinese-first)"
-        }
-    }
+    var displayName: String { "Qwen3-ASR" }
 
-    var shortName: String {
-        switch self {
-        case .onnx: return "Standard"
-        case .fireRed: return "FireRed"
-        }
-    }
+    var shortName: String { "Qwen3-ASR" }
 
-    var modelRepo: String {
-        switch self {
-        case .onnx: return "onnx-community/cohere-transcribe-03-2026-ONNX"
-        case .fireRed: return "csukuangfj2/sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26"
-        }
-    }
+    var modelRepo: String { "csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25" }
 
-    var requiredDiskSpace: Int64 {
-        switch self {
-        case .onnx: return 1_600_000_000       // ~1.5 GB
-        case .fireRed: return 1_300_000_000    // ~1.24 GB rounded up
-        }
-    }
+    var requiredDiskSpace: Int64 { 1_050_000_000 }  // ~0.99 GB rounded up
 
-    var modelSubdirectory: String {
-        switch self {
-        case .onnx: return "Murmur/Models-ONNX"
-        case .fireRed: return "Murmur/Models-FireRed"
-        }
-    }
+    var modelSubdirectory: String { "Murmur/Models-Qwen3ASR" }
 
     /// HuggingFace download filter patterns (nil = download everything)
     var allowPatterns: [String]? {
-        switch self {
-        case .onnx: return ["onnx/encoder_model_q4f16*", "onnx/decoder_model_merged_q4f16*", "*.json"]
-        case .fireRed: return ["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt", "*.json"]
-        }
+        ["conv_frontend.onnx", "encoder.int8.onnx", "decoder.int8.onnx", "tokenizer/*"]
     }
 
     /// Files that must exist for the model to be considered valid
     var requiredFiles: [String] {
-        switch self {
-        case .onnx: return ["config.json", "onnx/encoder_model_q4f16.onnx", "onnx/decoder_model_merged_q4f16.onnx"]
-        case .fireRed: return ["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt"]
-        }
+        [
+            "conv_frontend.onnx", "encoder.int8.onnx", "decoder.int8.onnx",
+            "tokenizer/vocab.json", "tokenizer/merges.txt", "tokenizer/tokenizer_config.json",
+        ]
     }
 
-    /// Whether this backend requires a HuggingFace token (gated model).
-    /// Always false now — both remaining backends are public ONNX repos.
+    /// Whether this model requires a HuggingFace token (gated model).
     var requiresHFLogin: Bool { false }
 
-    var sizeDescription: String {
-        switch self {
-        case .onnx: return "~1.5 GB"
-        case .fireRed: return "~1.24 GB"
-        }
-    }
+    var sizeDescription: String { "~0.99 GB" }
 
     var description: String {
-        switch self {
-        case .onnx: return "Smaller download, fast and lightweight. Great for most users."
-        case .fireRed: return "Best Chinese accuracy, including dialects and Chinese-English code-switching. Other languages fall back to Cohere ONNX (1.5 GB additional)."
-        }
+        "Chinese, English and mixed speech, with punctuation. Runs entirely on this Mac."
     }
+
+    /// Model folders left behind by engines that Murmur no longer ships
+    /// (Cohere Transcribe, FireRedASR2, and their add-ons), relative to
+    /// Application Support. They are never read; the user can delete them.
+    static let legacySubdirectories = [
+        "Murmur/Models-ONNX", "Murmur/Models-FireRed", "Murmur/Models",
+        "Murmur/Models-Whisper", "Murmur/Models-PuncCT", "Murmur/Models-LID",
+        "Murmur/Python",
+    ]
 }
 
 // MARK: - Auxiliary Model
 
-/// Small, optional models that live alongside the primary transcription backend
-/// (e.g. Whisper-tiny used only for language ID). Unlike `ModelBackend`, there is
-/// no notion of an "active" auxiliary — each one is downloaded and managed
-/// independently on demand.
+/// Small, optional models that live alongside the speech model. Unlike
+/// `ModelBackend`, there is no notion of an "active" auxiliary — each one is
+/// downloaded and managed independently on demand.
 enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
-    /// Whisper-tiny multilingual, ONNX quantised. Used by
-    /// `LanguageIdentificationService` when the user enables audio-based
-    /// language detection.
-    case lidWhisperTiny
-
-    /// Sherpa-onnx CT-Transformer punctuation model (Chinese + English).
-    /// Used by `ASRPunctuationService` when the user enables ASR-side
-    /// punctuation. Adds ，。？！ to bare ASR transcripts at ~1 ms / clip.
-    /// F1 ~62.77% on Chinese; weaker than LLM correction but offline,
-    /// instant, and never paraphrases.
-    case punctuationCT
-
     /// Silero VAD v5 (ONNX). Used by `VadService` to drive endpointing
-    /// across live PTT, hands-free, V3 streaming, and long-audio chunking.
-    /// Pulled from the `onnx-community/silero-vad` mirror — same Silero v5
-    /// graph that sherpa-onnx uses internally, hosted on HuggingFace so the
-    /// existing snapshot_download path works unchanged.
+    /// across live PTT, hands-free, and long-audio chunking. Pulled from the
+    /// `onnx-community/silero-vad` mirror — the same Silero v5 graph that
+    /// sherpa-onnx uses internally.
     case sileroVad
 
     var id: String { rawValue }
 
-    var displayName: String {
-        switch self {
-        case .lidWhisperTiny: return "Language Detection Model"
-        case .punctuationCT: return "Punctuation Model"
-        case .sileroVad: return "Voice Activity Detection Model"
-        }
-    }
+    var displayName: String { "Voice Activity Detection Model" }
 
-    var modelRepo: String {
-        switch self {
-        case .lidWhisperTiny: return "onnx-community/whisper-tiny"
-        case .punctuationCT: return "csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12"
-        case .sileroVad: return "onnx-community/silero-vad"
-        }
-    }
+    var modelRepo: String { "onnx-community/silero-vad" }
 
-    var modelSubdirectory: String {
-        switch self {
-        case .lidWhisperTiny: return "Murmur/Models-LID"
-        case .punctuationCT: return "Murmur/Models-PuncCT"
-        case .sileroVad: return "Murmur/Models-SileroVAD"
-        }
-    }
+    var modelSubdirectory: String { "Murmur/Models-SileroVAD" }
 
-    /// ~50 MB worst-case. Quantised encoder + decoder are each ~15–25 MB.
-    var requiredDiskSpace: Int64 {
-        switch self {
-        case .lidWhisperTiny: return 100_000_000
-        case .punctuationCT: return 320_000_000   // 280 MB ONNX + 4 MB tokens.json + headroom
-        case .sileroVad: return 10_000_000        // ~2.2 MB ONNX + headroom
-        }
-    }
+    var requiredDiskSpace: Int64 { 10_000_000 }  // ~2.2 MB ONNX + headroom
 
-    var sizeDescription: String {
-        switch self {
-        case .lidWhisperTiny: return "~40 MB"
-        case .punctuationCT: return "~280 MB"
-        case .sileroVad: return "~2 MB"
-        }
-    }
+    var sizeDescription: String { "~2 MB" }
 
-    var allowPatterns: [String] {
-        switch self {
-        case .lidWhisperTiny:
-            return [
-                "onnx/encoder_model_quantized.onnx",
-                "onnx/decoder_model_quantized.onnx",
-                "*.json",
-            ]
-        case .punctuationCT:
-            // Skip the upstream test.py / show-model-input-output.py / add-model-metadata.py.
-            return ["model.onnx", "tokens.json", "*.yaml"]
-        case .sileroVad:
-            // Just the unquantised ONNX — sherpa-onnx loads the Silero v5 graph directly.
-            return ["onnx/model.onnx"]
-        }
-    }
+    /// Just the unquantised ONNX — sherpa-onnx loads the Silero v5 graph directly.
+    var allowPatterns: [String] { ["onnx/model.onnx"] }
 
-    var requiredFiles: [String] {
-        switch self {
-        case .lidWhisperTiny:
-            return [
-                "onnx/encoder_model_quantized.onnx",
-                "onnx/decoder_model_quantized.onnx",
-                "config.json",
-            ]
-        case .punctuationCT:
-            return ["model.onnx", "tokens.json"]
-        case .sileroVad:
-            return ["onnx/model.onnx"]
-        }
-    }
+    var requiredFiles: [String] { ["onnx/model.onnx"] }
 }
 
 enum ModelState: Sendable, Equatable {
@@ -245,10 +147,8 @@ final class ModelManager: ObservableObject {
     @Published private(set) var downloadedBytes: Int64 = 0 // total bytes written so far
     @Published private(set) var statusMessage: String = ""
 
-    /// The currently selected backend. Use `setActiveBackend(_:)` to change it;
-    /// direct assignment is intentionally not exposed so callers must go through
-    /// the guard that refuses switches during active downloads.
-    @Published private(set) var activeBackend: ModelBackend
+    /// The speech model in use. Fixed today — there is a single model.
+    let activeBackend: ModelBackend = .qwen3
 
     /// Per-auxiliary-model state. Only keys the user has interacted with appear.
     /// Reads go through `auxiliaryState(for:)` which returns `.notDownloaded` for
@@ -259,129 +159,17 @@ final class ModelManager: ObservableObject {
     @Published private(set) var auxiliaryDownloadedBytes: [AuxiliaryModel: Int64] = [:]
     @Published private(set) var auxiliaryStatusMessage: [AuxiliaryModel: String] = [:]
 
-    /// Emits only when a backend switch is *accepted* (i.e. not refused by the
-    /// download-in-progress guard). Observers that need to react to a committed
-    /// backend change — such as `MurmurApp` replacing the transcription service —
-    /// should subscribe here instead of `$activeBackend`, to avoid acting on
-    /// attempted-but-reverted switches.
-    let committedBackendChange = PassthroughSubject<ModelBackend, Never>()
-
-    /// Whether to route Chinese audio to FireRed when the active backend is a
-    /// Cohere variant. OFF by default. Persisted in UserDefaults under
-    /// `"useFireRedForChinese"`. Callers MUST go through `setUseFireRedForChinese(_:)`
-    /// — direct assignment is intentionally not exposed so the gating logic
-    /// (download-active, model-not-downloaded) runs every time.
-    @Published private(set) var useFireRedForChinese: Bool
-
-    /// Emits when `setUseFireRedForChinese(_:)` actually commits a change.
-    /// Subscribers (e.g. AppCoordinator) can re-evaluate the routing function.
-    let committedUseFireRedChange = PassthroughSubject<Bool, Never>()
-
-    /// Whether to apply ASR-side punctuation (CT-Transformer) to bare
-    /// transcripts before correction/cleanup. OFF by default. Adds ，。？！
-    /// at ~1 ms per clip. Particularly useful with FireRed (which never
-    /// emits punctuation); harmless with Cohere (which already does, but
-    /// the model is idempotent on already-punctuated text).
-    /// Callers MUST go through `setUseASRPunctuation(_:)` — same gating
-    /// pattern as `useFireRedForChinese`.
-    @Published private(set) var useASRPunctuation: Bool
-
-    /// Emits when `setUseASRPunctuation(_:)` actually commits a change.
-    let committedUseASRPunctuationChange = PassthroughSubject<Bool, Never>()
-
     /// Whether the Silero VAD model should be wired into the audio
     /// pipelines (live PTT silence gate, hands-free auto-stop, V3
     /// streaming chunk boundaries, long-audio chunking + paragraph
     /// breaks). OFF by default; flipping ON downloads the ~2 MB model if
-    /// it isn't already on disk. Callers MUST go through `setUseVAD(_:)`
-    /// — same gating pattern as `useASRPunctuation`.
+    /// it isn't already on disk. Callers MUST go through `setUseVAD(_:)` —
+    /// direct assignment is not exposed so the gating logic (download active,
+    /// model not downloaded) runs every time.
     @Published private(set) var useVAD: Bool
 
     /// Emits when `setUseVAD(_:)` actually commits a change.
     let committedUseVADChange = PassthroughSubject<Bool, Never>()
-
-    /// Attempt to switch the active backend.
-    ///
-    /// - Returns: `true` if the switch was accepted and persisted; `false` if a
-    ///   download or verification is in progress and the switch was refused.
-    @discardableResult
-    func setActiveBackend(_ backend: ModelBackend) -> Bool {
-        // Short-circuit: same backend requested — nothing to do. Return true because
-        // the desired state is already in effect. Do NOT fire committedBackendChange;
-        // any observer (e.g. MurmurApp.onReceive) would tear down and rebuild the
-        // transcription service unnecessarily, wasting resources and potentially
-        // killing an in-flight preload.
-        guard backend != activeBackend else { return true }
-        guard !isDownloadActive else {
-            logger.warning("Refused backend switch \(self.activeBackend.rawValue) → \(backend.rawValue) — download in progress")
-            return false
-        }
-        activeBackend = backend
-        UserDefaults.standard.set(backend.rawValue, forKey: "modelBackend")
-        committedBackendChange.send(backend)
-        refreshState()
-        return true
-    }
-
-    /// Attempt to set the FireRed-for-Chinese toggle.
-    ///
-    /// - Parameter newValue: desired toggle state.
-    /// - Returns: `true` if the change was accepted and persisted; `false` if:
-    ///   - a download or verification is in progress (newValue=true rejected), OR
-    ///   - newValue=true but the FireRed model is not on disk (caller must
-    ///     trigger a `download(for: .fireRed)` first).
-    @discardableResult
-    func setUseFireRedForChinese(_ newValue: Bool) -> Bool {
-        guard newValue != useFireRedForChinese else { return true }
-
-        if newValue == true {
-            guard !isDownloadActive else {
-                logger.warning("Refused FireRed toggle ON — download in progress")
-                return false
-            }
-            guard isModelDownloaded(for: .fireRed) else {
-                logger.warning("Refused FireRed toggle ON — model not downloaded")
-                return false
-            }
-        }
-
-        useFireRedForChinese = newValue
-        UserDefaults.standard.set(newValue, forKey: "useFireRedForChinese")
-        committedUseFireRedChange.send(newValue)
-        return true
-    }
-
-    /// Attempt to set the ASR-punctuation toggle.
-    ///
-    /// - Parameter newValue: desired toggle state.
-    /// - Returns: `true` if the change was accepted and persisted; `false` if:
-    ///   - a primary download is in progress (newValue=true rejected), OR
-    ///   - newValue=true but the punctuation model is not on disk (caller
-    ///     must trigger `downloadAuxiliary(.punctuationCT)` first).
-    @discardableResult
-    func setUseASRPunctuation(_ newValue: Bool) -> Bool {
-        guard newValue != useASRPunctuation else { return true }
-
-        if newValue == true {
-            guard !isDownloadActive else {
-                logger.warning("Refused ASR-punc toggle ON — primary download in progress")
-                return false
-            }
-            let dir = auxiliaryModelDirectory(.punctuationCT)
-            let allPresent = AuxiliaryModel.punctuationCT.requiredFiles.allSatisfy {
-                FileManager.default.fileExists(atPath: dir.appendingPathComponent($0).path)
-            }
-            guard allPresent else {
-                logger.warning("Refused ASR-punc toggle ON — model not downloaded")
-                return false
-            }
-        }
-
-        useASRPunctuation = newValue
-        UserDefaults.standard.set(newValue, forKey: "useASRPunctuation")
-        committedUseASRPunctuationChange.send(newValue)
-        return true
-    }
 
     /// Attempt to set the Silero VAD toggle.
     ///
@@ -438,8 +226,6 @@ final class ModelManager: ObservableObject {
     private var activeDownloadProcess: Process?
     private var urlSession: URLSession?
     private var resumeData: Data?
-    /// Cached path to the keychain-aware CA bundle (lazy, built once per launch).
-    private var cachedCABundlePath: String?
 
     var modelDirectory: URL {
         modelDirectory(for: activeBackend)
@@ -627,49 +413,9 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    var pythonEnvPath: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Murmur/Python")
-    }
-
     init() {
-        let saved = UserDefaults.standard.string(forKey: "modelBackend")
-            .flatMap(ModelBackend.init(rawValue:)) ?? .onnx
-        // Assign directly here — we are in init, no guard needed, and setActiveBackend
-        // is not callable before self is fully initialized.
-        self.activeBackend = saved
-
-        // Read persisted toggle, but downgrade to OFF if the FireRed model is
-        // not actually on disk — guards against stale state for users who
-        // deleted the model directory manually. When we downgrade, also clear
-        // the UserDefaults key so the persisted state matches the in-memory
-        // state and subsequent reads don't see a stale `true`.
-        let persistedToggle = UserDefaults.standard.bool(forKey: "useFireRedForChinese")
-        let fireRedDir = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(ModelBackend.fireRed.modelSubdirectory)
-        let fireRedPresent = FileManager.default.fileExists(atPath: fireRedDir.path)
-        let effectiveToggle = persistedToggle && fireRedPresent
-        if persistedToggle && !effectiveToggle {
-            UserDefaults.standard.set(false, forKey: "useFireRedForChinese")
-        }
-        self.useFireRedForChinese = effectiveToggle
-
-        // Same downgrade-on-missing-model logic for the ASR-punctuation toggle.
-        let persistedPunc = UserDefaults.standard.bool(forKey: "useASRPunctuation")
-        let puncDir = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(AuxiliaryModel.punctuationCT.modelSubdirectory)
-        let puncFilesPresent = AuxiliaryModel.punctuationCT.requiredFiles.allSatisfy {
-            FileManager.default.fileExists(atPath: puncDir.appendingPathComponent($0).path)
-        }
-        let effectivePunc = persistedPunc && puncFilesPresent
-        if persistedPunc && !effectivePunc {
-            UserDefaults.standard.set(false, forKey: "useASRPunctuation")
-        }
-        self.useASRPunctuation = effectivePunc
-
-        // Same downgrade-on-missing-model logic for the VAD toggle.
+        // Downgrade the VAD toggle to OFF if its model is not actually on disk —
+        // guards against stale state when the folder was deleted by hand.
         let persistedVAD = UserDefaults.standard.bool(forKey: "useVAD")
         let vadDir = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -682,17 +428,6 @@ final class ModelManager: ObservableObject {
             UserDefaults.standard.set(false, forKey: "useVAD")
         }
         self.useVAD = effectiveVAD
-
-        // One-time migration: move the old shared "modelConfigHash" key to the
-        // per-backend key so that existing hash verifications keep working.
-        let oldKey = "modelConfigHash"
-        if let oldHash = UserDefaults.standard.string(forKey: oldKey) {
-            let perBackendKey = "modelConfigHash_\(saved.rawValue)"
-            if UserDefaults.standard.string(forKey: perBackendKey) == nil {
-                UserDefaults.standard.set(oldHash, forKey: perBackendKey)
-            }
-            UserDefaults.standard.removeObject(forKey: oldKey)
-        }
 
         // FU-04 manifest migration: if existing downloads predate the manifest
         // system, generate the manifest from on-disk files so users are not
@@ -753,57 +488,27 @@ final class ModelManager: ObservableObject {
 
         logger.info("Starting model download from HuggingFace: \(backend.modelRepo) (backend: \(backend.rawValue))")
 
-        statusMessage = "Preparing first-time setup..."
+        statusMessage = "Preparing download..."
 
-        // Ensure bundled Python env exists with all dependencies
-        let pythonBin = try await ensurePythonEnv()
-
-        statusMessage = "Downloading speech model..."
-
-        let allowPatternsArg: String
-        if let patterns = backend.allowPatterns {
-            let quoted = patterns.map { "\"\($0)\"" }.joined(separator: ", ")
-            allowPatternsArg = "allow_patterns=[\(quoted)],"
-        } else {
-            allowPatternsArg = ""
+        // Model files are fetched with the system curl rather than a Python
+        // `snapshot_download`. This needs no pip-installed environment, and both
+        // URLSession (file listing) and /usr/bin/curl (SecureTransport) trust the
+        // macOS keychain, so TLS-intercepting clients such as Cloudflare WARP
+        // work without a custom CA bundle.
+        let process: Process
+        do {
+            process = try await makeHFDownloadProcess(
+                repo: backend.modelRepo, patterns: backend.allowPatterns, into: modelDirectory
+            )
+        } catch {
+            let message = Self.downloadListingErrorMessage(error)
+            logger.error("Model file listing failed: \(String(describing: error))")
+            statusMessage = "Error: \(message)"
+            state = .error(String(message.prefix(200)))
+            throw MurmurError.transcriptionFailed(message)
         }
 
-        let downloadScript = """
-        import sys, json, os, traceback
-        print("[murmur] python", sys.version.split()[0], "starting download", flush=True)
-        print("[murmur] SSL_CERT_FILE=" + repr(os.environ.get("SSL_CERT_FILE")), flush=True)
-        print("[murmur] REQUESTS_CA_BUNDLE=" + repr(os.environ.get("REQUESTS_CA_BUNDLE")), flush=True)
-        from huggingface_hub import snapshot_download
-
-        try:
-            print("[murmur] calling snapshot_download(\(backend.modelRepo))", flush=True)
-            path = snapshot_download(
-                "\(backend.modelRepo)",
-                local_dir="\(modelDirectory.path)",
-                \(allowPatternsArg)
-            )
-            print(json.dumps({"status": "ok", "path": path}), flush=True)
-        except Exception as e:
-            etype = type(e).__name__
-            tb = traceback.format_exc()
-            print("[murmur] download failed: " + etype + ": " + str(e), flush=True)
-            print(tb, flush=True)
-            msg = str(e)
-            if "401" in msg or "gated" in msg.lower() or "restricted" in msg.lower():
-                msg = "Access denied. Please log in and request access at huggingface.co first."
-            elif "404" in msg:
-                msg = "Model not found. Please check your internet connection and try again."
-            elif "CERTIFICATE_VERIFY_FAILED" in msg or "SSLError" in etype or "SSLCertVerificationError" in etype:
-                msg = "TLS certificate verification failed. If you use Cloudflare WARP / Zero Trust or another TLS-intercepting proxy, set Settings → Advanced → Custom CA bundle to a PEM file containing the intercepting root."
-            elif "ConnectionError" in etype or "Timeout" in etype or "NameResolutionError" in etype or "getaddrinfo" in msg:
-                msg = "Could not reach huggingface.co (" + etype + "). Check your network or try again later."
-            print(json.dumps({"status": "error", "error": msg, "type": etype}), flush=True)
-        """
-
-        let process = Process()
-        process.executableURL = pythonBin
-        process.arguments = ["-c", downloadScript]
-        process.environment = pythonSubprocessEnvironment()
+        statusMessage = "Downloading speech model..."
 
         let stdout = Pipe()
         let stderr = Pipe()
@@ -823,9 +528,7 @@ final class ModelManager: ObservableObject {
         let streamStdout = Task {
             for try await line in stdout.fileHandleForReading.bytes.lines {
                 outputAccumulator.appendStdout(line)
-                if line.hasPrefix("[murmur]") || line.hasPrefix("{") {
-                    logger.info("py> \(line)")
-                }
+                logger.info("curl> \(line)")
             }
         }
         let streamStderr = Task {
@@ -833,7 +536,7 @@ final class ModelManager: ObservableObject {
                 outputAccumulator.appendStderr(line)
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if !trimmed.isEmpty {
-                    logger.info("py! \(trimmed)")
+                    logger.info("curl! \(trimmed)")
                 }
             }
         }
@@ -949,8 +652,8 @@ final class ModelManager: ObservableObject {
         }
         streamStdout.cancel()
         streamStderr.cancel()
-        let outputStr = outputAccumulator.stdoutText
         let stderrStr = outputAccumulator.stderrText
+        let outputStr = Self.downloadResultJSON(for: process, stderr: stderrStr)
 
         // Try to parse JSON response from our script
         if let jsonLine = outputStr.components(separatedBy: "\n").last(where: { $0.contains("{") }),
@@ -1002,14 +705,12 @@ final class ModelManager: ObservableObject {
     func cancelDownload() {
         // --- Subprocess termination with SIGKILL escalation ---
         //
-        // Process.terminate() sends SIGTERM asynchronously. Python cannot service
-        // the signal until the current C-extension call returns (TLS read, file I/O,
-        // zlib), which can take 1-3 seconds. During that window the process is still
-        // writing to the model directory, which could corrupt the partial-file state
-        // (see C6 in handoff 066).
+        // Process.terminate() sends SIGTERM asynchronously. curl normally exits at
+        // once, but until it has, it may still be writing to the model directory,
+        // which could corrupt the partial-file state (see C6 in handoff 066).
         //
         // Strategy:
-        //   1. Send SIGTERM synchronously (unblocks Python on next bytecode dispatch).
+        //   1. Send SIGTERM synchronously (curl exits at its next write).
         //   2. Synchronously reset UI state so isDownloadActive is false immediately.
         //   3. In a background Task, wait up to 2 seconds for the process to exit.
         //      If it hasn't, escalate to SIGKILL via Darwin.kill to guarantee no
@@ -1044,7 +745,7 @@ final class ModelManager: ObservableObject {
                     // during that window. In practice, if the recycled PID belongs
                     // to another user's process, kill() returns EPERM and is a no-op.
                     // If the recycled PID is another Murmur child (extremely unlikely
-                    // — we only spawn one python subprocess at a time), we would send
+                    // — we only spawn one download subprocess at a time), we would send
                     // SIGKILL to it; that subprocess would also require cleanup, so
                     // this is an accepted risk given the narrow window. For a cleaner
                     // design, replace the poll loop with a kqueue EVFILT_PROC wait in
@@ -1203,6 +904,39 @@ final class ModelManager: ObservableObject {
         logger.info("Model deleted")
     }
 
+    // MARK: - Leftovers from removed engines
+
+    private var legacyURLs: [URL] {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return ModelBackend.legacySubdirectories.map { appSupport.appendingPathComponent($0) }
+            + [appSupport.appendingPathComponent("Murmur/cabundle.pem")]
+    }
+
+    /// Bytes on disk still held by models and tooling of engines Murmur no
+    /// longer ships. Zero when there is nothing to clean up.
+    func legacyDataSize() -> Int64 {
+        legacyURLs.reduce(0) { total, url in
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return total }
+            if isDirectory.boolValue { return total + directorySize(url) }
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value
+            return total + (size ?? 0)
+        }
+    }
+
+    /// Delete the leftovers counted by `legacyDataSize()`.
+    func deleteLegacyData() {
+        for url in legacyURLs where FileManager.default.fileExists(atPath: url.path) {
+            do {
+                try FileManager.default.removeItem(at: url)
+                logger.info("Removed legacy data at \(url.path, privacy: .public)")
+            } catch {
+                logger.warning("Could not remove legacy data at \(url.path, privacy: .public): \(error.localizedDescription)")
+            }
+        }
+        objectWillChange.send()
+    }
+
     // MARK: - Stall Detection
 
     /// Pure predicate: returns true when the elapsed time since the last byte-count
@@ -1221,114 +955,148 @@ final class ModelManager: ObservableObject {
         return now.timeIntervalSince(lastProgressAt) >= timeout
     }
 
-    // MARK: - Helpers
+    // MARK: - HuggingFace download (native)
 
-    /// Creates the bundled Python venv and installs all dependencies.
-    private func ensurePythonEnv() async throws -> URL {
-        let bundledPython = pythonEnvPath.appendingPathComponent("bin/python3")
+    private struct HFFile {
+        let path: String
+        let size: Int64
+    }
 
-        if FileManager.default.fileExists(atPath: bundledPython.path) {
-            statusMessage = "Checking setup..."
-            let check = try await runProcess(bundledPython, args: ["-c", "import huggingface_hub, onnxruntime, transformers, torch, opencc; print('ok')"])
-            if check.status == 0 {
-                statusMessage = "Ready"
-                return bundledPython
-            }
-            statusMessage = "Installing missing components..."
+    /// Shell-style match of a repo-relative path against HuggingFace
+    /// `allow_patterns`. Like Python's `fnmatch`, `*` also matches `/`.
+    nonisolated static func hfPath(_ path: String, matchesAny patterns: [String]?) -> Bool {
+        guard let patterns else { return true }
+        return patterns.contains { fnmatch($0, path, 0) == 0 }
+    }
+
+    /// Lists the files of `repo` (main branch) that match `patterns`.
+    private func listHFFiles(repo: String, patterns: [String]?) async throws -> [HFFile] {
+        guard let url = URL(string: "https://huggingface.co/api/models/\(repo)/tree/main?recursive=true") else {
+            throw MurmurError.transcriptionFailed("Invalid model repository: \(repo)")
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard status == 200 else {
+            throw MurmurError.transcriptionFailed("huggingface.co returned HTTP \(status) when listing model files")
+        }
+        guard let entries = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            throw MurmurError.transcriptionFailed("Unexpected response when listing model files")
+        }
+        return entries.compactMap { entry -> HFFile? in
+            guard entry["type"] as? String == "file",
+                  let path = entry["path"] as? String,
+                  Self.hfPath(path, matchesAny: patterns)
+            else { return nil }
+            let size = (entry["size"] as? NSNumber)?.int64Value ?? -1
+            return HFFile(path: path, size: size)
+        }
+    }
+
+    /// Builds (but does not start) the subprocess that downloads every file of
+    /// `repo` matching `patterns` into `directory`.
+    ///
+    /// Files already on disk at their full size are skipped; partial files are
+    /// resumed. If nothing is left to fetch, the process is a no-op that exits 0
+    /// so callers can treat both cases the same way.
+    private func makeHFDownloadProcess(repo: String, patterns: [String]?, into directory: URL) async throws -> Process {
+        let files = try await listHFFiles(repo: repo, patterns: patterns)
+        guard !files.isEmpty else {
+            throw MurmurError.transcriptionFailed("No model files found in \(repo)")
         }
 
-        guard let systemPython = findSystemPython() else {
-            statusMessage = "Error: Python is required but not installed"
-            state = .error("Python3 not found. Install it from python.org or via Homebrew: brew install python3")
-            throw MurmurError.transcriptionFailed("Python3 not found")
+        let fm = FileManager.default
+        var transfers: [String] = []
+        for file in files {
+            let destination = directory.appendingPathComponent(file.path)
+            if let attrs = try? fm.attributesOfItem(atPath: destination.path),
+               let onDisk = (attrs[.size] as? NSNumber)?.int64Value,
+               file.size >= 0 {
+                if onDisk == file.size { continue }
+                // Larger than upstream means a stale or corrupt file; resuming
+                // would fail, so start it over.
+                if onDisk > file.size { try? fm.removeItem(at: destination) }
+            }
+            let encodedPath = file.path
+                .split(separator: "/")
+                .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+                .joined(separator: "/")
+            transfers += ["--output", destination.path, "https://huggingface.co/\(repo)/resolve/main/\(encodedPath)"]
         }
 
-        // Create venv
-        if !FileManager.default.fileExists(atPath: bundledPython.path) {
-            statusMessage = "Preparing environment..."
-            let venvResult = try await runProcess(systemPython, args: ["-m", "venv", pythonEnvPath.path])
-            if venvResult.status != 0 {
-                statusMessage = "Error: Failed to set up environment"
-                state = .error("Setup failed — could not create environment")
-                throw MurmurError.transcriptionFailed("venv creation failed: \(venvResult.stderr.prefix(200))")
-            }
+        let process = Process()
+        if transfers.isEmpty {
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+            return process
         }
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        process.arguments = [
+            "--fail", "--location", "--silent", "--show-error",
+            "--retry", "3", "--retry-delay", "2", "--connect-timeout", "30",
+            "--create-dirs", "--continue-at", "-",
+        ] + transfers
+        return process
+    }
 
-        // Install all packages from pinned requirements.txt
-        let pip = pythonEnvPath.appendingPathComponent("bin/pip3")
-        statusMessage = "Setting up: installing components..."
+    /// Translates a finished download subprocess into the one-line JSON result
+    /// the callers parse. A process killed by a signal (user cancel, stall
+    /// timeout) yields an empty string so the caller's exit-status fallback
+    /// handles it.
+    nonisolated static func downloadResultJSON(for process: Process, stderr: String) -> String {
+        guard process.terminationReason == .exit else { return "" }
+        return downloadResultJSON(exitStatus: process.terminationStatus, stderr: stderr)
+    }
 
-        // Find requirements.txt — it lives alongside transcribe.py in the app bundle Resources
-        let requirementsPath: String? = {
-            if let bundlePath = Bundle.main.path(forResource: "requirements", ofType: "txt") {
-                return bundlePath
-            }
-            // Fallback: resolve relative to the bundle's Resources directory
-            if let resourcesURL = Bundle.main.resourceURL {
-                let candidate = resourcesURL.appendingPathComponent("requirements.txt")
-                if FileManager.default.fileExists(atPath: candidate.path) {
-                    return candidate.path
-                }
-            }
-            return nil
-        }()
-
-        if let reqPath = requirementsPath {
-            let result = try await runProcessWithLiveOutput(pip, args: ["install", "-r", reqPath])
-            if result != 0 {
-                // Fall back to individual pinned installs if the requirements file approach fails
-                let packages: [(String, String)] = [
-                    ("huggingface_hub==0.30.2", "Setting up: downloading components (1/8)..."),
-                    ("transformers==4.52.4", "Setting up: downloading components (2/8)..."),
-                    ("torch==2.7.0", "Setting up: downloading components (3/8, this may take a minute)..."),
-                    ("onnxruntime==1.21.1", "Setting up: downloading components (4/8)..."),
-                    ("soundfile==0.13.1", "Setting up: downloading components (5/8)..."),
-                    ("librosa==0.11.0", "Setting up: downloading components (6/8)..."),
-                    ("accelerate==1.7.0", "Setting up: downloading components (7/8)..."),
-                    ("opencc-python-reimplemented==0.1.7", "Setting up: downloading components (8/8)..."),
-                ]
-                for (pkg, message) in packages {
-                    statusMessage = message
-                    let pkgResult = try await runProcessWithLiveOutput(pip, args: ["install", pkg])
-                    if pkgResult != 0 {
-                        statusMessage = "Error: Setup failed. Please check your internet connection."
-                        state = .error("Setup failed — could not install required components")
-                        throw MurmurError.transcriptionFailed("pip install \(pkg) failed")
-                    }
-                }
-            }
+    nonisolated static func downloadResultJSON(exitStatus: Int32, stderr: String) -> String {
+        let payload: [String: String]
+        if exitStatus == 0 {
+            payload = ["status": "ok"]
         } else {
-            // requirements.txt not found in bundle — fall back to individual pinned installs
-            let packages: [(String, String)] = [
-                ("huggingface_hub==0.30.2", "Setting up: downloading components (1/8)..."),
-                ("transformers==4.52.4", "Setting up: downloading components (2/8)..."),
-                ("torch==2.7.0", "Setting up: downloading components (3/8, this may take a minute)..."),
-                ("onnxruntime==1.21.1", "Setting up: downloading components (4/8)..."),
-                ("soundfile==0.13.1", "Setting up: downloading components (5/8)..."),
-                ("librosa==0.11.0", "Setting up: downloading components (6/8)..."),
-                ("accelerate==1.7.0", "Setting up: downloading components (7/8)..."),
-                ("opencc-python-reimplemented==0.1.7", "Setting up: downloading components (8/8)..."),
-            ]
-            for (pkg, message) in packages {
-                statusMessage = message
-                let result = try await runProcessWithLiveOutput(pip, args: ["install", pkg])
-                if result != 0 {
-                    statusMessage = "Error: Setup failed. Please check your internet connection."
-                    state = .error("Setup failed — could not install required components")
-                    throw MurmurError.transcriptionFailed("pip install \(pkg) failed")
-                }
+            payload = ["status": "error", "error": curlErrorMessage(exitStatus: exitStatus, stderr: stderr)]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8)
+        else { return "" }
+        return json
+    }
+
+    /// User-facing explanation for a curl exit code.
+    nonisolated static func curlErrorMessage(exitStatus: Int32, stderr: String) -> String {
+        let detail = stderr
+            .components(separatedBy: "\n")
+            .last { !$0.trimmingCharacters(in: .whitespaces).isEmpty }?
+            .trimmingCharacters(in: .whitespaces) ?? "curl exit \(exitStatus)"
+        switch exitStatus {
+        case 5, 6, 7, 28:
+            return "Could not reach huggingface.co. Check your network or try again later. (\(detail))"
+        case 35, 51, 58, 60, 77:
+            return "TLS certificate verification failed. If you use Cloudflare WARP / Zero Trust or another TLS-intercepting proxy, make sure its root certificate is trusted in Keychain Access. (\(detail))"
+        case 22, 56:
+            return "huggingface.co refused the download. (\(detail))"
+        case 23:
+            return "Could not write the model files to disk. (\(detail))"
+        default:
+            return "Download failed. (\(detail))"
+        }
+    }
+
+    /// User-facing explanation for a failure while listing the model files.
+    nonisolated static func downloadListingErrorMessage(_ error: Error) -> String {
+        if case MurmurError.transcriptionFailed(let message) = error { return message }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .serverCertificateUntrusted, .serverCertificateHasUnknownRoot,
+                 .serverCertificateHasBadDate, .serverCertificateNotYetValid, .secureConnectionFailed:
+                return "TLS certificate verification failed for huggingface.co. If you use Cloudflare WARP / Zero Trust, make sure its root certificate is trusted in Keychain Access."
+            default:
+                return "Could not reach huggingface.co (\(urlError.localizedDescription))."
             }
         }
-
-        statusMessage = "Setup complete"
-        return bundledPython
+        return "Could not list model files: \(error.localizedDescription)"
     }
 
-    private struct ProcessResult {
-        let status: Int32
-        let stdout: String
-        let stderr: String
-    }
+    // MARK: - Helpers
 
     /// Thread-safe accumulator for subprocess output streamed line-by-line.
     /// Sendable so it can be captured by detached Tasks reading the pipes.
@@ -1353,238 +1121,6 @@ final class ModelManager: ObservableObject {
             lock.lock(); defer { lock.unlock() }
             return stderrLines.joined(separator: "\n")
         }
-    }
-
-    /// Environment for Python subprocesses.
-    ///
-    /// Python's `ssl`/`requests`/`urllib3` use certifi's bundled CA store and
-    /// ignore the macOS keychain. Under TLS-intercepting clients like Cloudflare
-    /// WARP / Zero Trust (which install their own root CA into System keychain),
-    /// every HTTPS call from the subprocess fails with `CERTIFICATE_VERIFY_FAILED`.
-    ///
-    /// Resolution order for the CA bundle path:
-    ///   1. User override from Settings → Advanced → Custom CA bundle
-    ///      (`UserDefaults.customCABundlePath`).
-    ///   2. Caller-supplied env var (anyone who launched Murmur with
-    ///      `SSL_CERT_FILE=...` already gets their way).
-    ///   3. Auto-generated bundle that concatenates certifi's defaults with the
-    ///      macOS System keychains' anchor certs (built once per app launch into
-    ///      `~/Library/Application Support/Murmur/cabundle.pem`). This is what
-    ///      makes Cloudflare WARP work without user setup.
-    private func pythonSubprocessEnvironment() -> [String: String] {
-        var env = ProcessInfo.processInfo.environment
-        let chosen = resolveCABundlePath(env: env)
-        if let path = chosen {
-            env["SSL_CERT_FILE"] = path
-            env["REQUESTS_CA_BUNDLE"] = path
-        }
-        return env
-    }
-
-    private func resolveCABundlePath(env: [String: String]) -> String? {
-        // 1. User override
-        if let custom = UserDefaults.standard.string(forKey: "customCABundlePath"),
-           !custom.isEmpty,
-           FileManager.default.fileExists(atPath: custom) {
-            return custom
-        }
-        // 2. Caller-supplied (preserve whichever env var the user pre-set)
-        if let preset = env["SSL_CERT_FILE"], FileManager.default.fileExists(atPath: preset) {
-            return preset
-        }
-        if let preset = env["REQUESTS_CA_BUNDLE"], FileManager.default.fileExists(atPath: preset) {
-            return preset
-        }
-        // 3. Auto-generated keychain-aware bundle
-        return ensureKeychainCABundle()
-    }
-
-    /// Builds `~/Library/Application Support/Murmur/cabundle.pem` once per app
-    /// launch by concatenating certifi's bundle (so we don't lose any default
-    /// public roots) with anchor certs dumped from the macOS System keychains
-    /// (so we pick up any user-installed roots, including Cloudflare WARP).
-    /// Returns nil only if writing to disk fails — callers fall through to
-    /// certifi's defaults in that case.
-    private func ensureKeychainCABundle() -> String? {
-        if let cached = cachedCABundlePath { return cached }
-
-        let bundleURL = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Murmur/cabundle.pem")
-
-        do {
-            try FileManager.default.createDirectory(
-                at: bundleURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-
-            var combined = Data()
-
-            // Start with the bundled Python's certifi roots (best-effort —
-            // missing file just means we skip this layer).
-            let certifiPath = pythonEnvPath
-                .appendingPathComponent("lib")
-            if let certifi = locateCertifiBundle(under: certifiPath),
-               let data = try? Data(contentsOf: certifi) {
-                combined.append(data)
-                combined.append(Data([0x0A])) // newline between concatenated PEMs
-            }
-
-            // Append macOS System keychain anchors. Two locations cover all
-            // user-installed and Apple-shipped roots.
-            for keychain in [
-                "/Library/Keychains/System.keychain",
-                "/System/Library/Keychains/SystemRootCertificates.keychain",
-            ] {
-                if let data = dumpKeychainPEM(path: keychain) {
-                    combined.append(data)
-                    combined.append(Data([0x0A]))
-                }
-            }
-
-            try combined.write(to: bundleURL, options: .atomic)
-            cachedCABundlePath = bundleURL.path
-            logger.info("CA bundle ready at \(bundleURL.path) (\(combined.count) bytes)")
-            return bundleURL.path
-        } catch {
-            logger.warning("Failed to build CA bundle: \(error.localizedDescription)")
-            return nil
-        }
-    }
-
-    private func locateCertifiBundle(under root: URL) -> URL? {
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) else { return nil }
-        for case let url as URL in enumerator {
-            if url.lastPathComponent == "cacert.pem", url.path.contains("certifi") {
-                return url
-            }
-        }
-        return nil
-    }
-
-    private func dumpKeychainPEM(path: String) -> Data? {
-        guard FileManager.default.fileExists(atPath: path) else { return nil }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        proc.arguments = ["find-certificate", "-a", "-p", path]
-        let stdout = Pipe()
-        proc.standardOutput = stdout
-        proc.standardError = Pipe()
-        do {
-            try proc.run()
-            let data = stdout.fileHandleForReading.readDataToEndOfFile()
-            proc.waitUntilExit()
-            return proc.terminationStatus == 0 ? data : nil
-        } catch {
-            return nil
-        }
-    }
-
-    private func runProcess(_ executable: URL, args: [String]) async throws -> ProcessResult {
-        let proc = Process()
-        proc.executableURL = executable
-        proc.arguments = args
-        proc.environment = pythonSubprocessEnvironment()
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        proc.standardOutput = stdoutPipe
-        proc.standardError = stderrPipe
-
-        // Same race fix as download(): attach handler before run(). See ResumeGuard.
-        let resumeGuard = ResumeGuard()
-        let status: Int32 = await withCheckedContinuation { continuation in
-            proc.terminationHandler = { p in
-                if resumeGuard.claim() {
-                    continuation.resume(returning: p.terminationStatus)
-                }
-            }
-            do { try proc.run() } catch {
-                if resumeGuard.claim() {
-                    continuation.resume(returning: Int32(-1))
-                }
-                return
-            }
-            if !proc.isRunning, resumeGuard.claim() {
-                continuation.resume(returning: proc.terminationStatus)
-            }
-        }
-
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-
-        return ProcessResult(
-            status: status,
-            stdout: String(data: stdoutData, encoding: .utf8) ?? "",
-            stderr: String(data: stderrData, encoding: .utf8) ?? ""
-        )
-    }
-
-    /// Runs a process and streams stderr lines to statusMessage for live progress.
-    private func runProcessWithLiveOutput(_ executable: URL, args: [String]) async throws -> Int32 {
-        let proc = Process()
-        proc.executableURL = executable
-        proc.arguments = args
-        proc.environment = pythonSubprocessEnvironment()
-
-        let stderrPipe = Pipe()
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = stderrPipe
-
-        // Stream stderr lines to update status
-        let streamTask = Task { @MainActor [weak self] in
-            let handle = stderrPipe.fileHandleForReading
-            while let line = String(data: handle.availableData, encoding: .utf8), !line.isEmpty, !Task.isCancelled {
-                // Show the last meaningful line (pip progress)
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    // Extract just the last line for display
-                    if let lastLine = trimmed.components(separatedBy: "\n").last, !lastLine.isEmpty {
-                        self?.statusMessage = String(lastLine.prefix(80))
-                    }
-                }
-            }
-        }
-
-        // Same race fix: attach handler before run(). See ResumeGuard.
-        let resumeGuard = ResumeGuard()
-        let status: Int32 = await withCheckedContinuation { continuation in
-            proc.terminationHandler = { p in
-                if resumeGuard.claim() {
-                    continuation.resume(returning: p.terminationStatus)
-                }
-            }
-            do { try proc.run() } catch {
-                if resumeGuard.claim() {
-                    continuation.resume(returning: Int32(-1))
-                }
-                return
-            }
-            if !proc.isRunning, resumeGuard.claim() {
-                continuation.resume(returning: proc.terminationStatus)
-            }
-        }
-        streamTask.cancel()
-
-        return status
-    }
-
-    private func findSystemPython() -> URL? {
-        let candidates = [
-            "/opt/homebrew/bin/python3",
-            "/usr/local/bin/python3",
-            "/usr/bin/python3"
-        ]
-        for path in candidates {
-            if FileManager.default.fileExists(atPath: path) {
-                return URL(fileURLWithPath: path)
-            }
-        }
-        return nil
     }
 
     private func directorySize(_ url: URL) -> Int64 {
@@ -1678,8 +1214,8 @@ final class ModelManager: ObservableObject {
         auxiliarySpeed[aux] = 0
     }
 
-    /// Download an auxiliary model via the bundled Python env. Shares the same
-    /// `snapshot_download` path as the primary backend — a second subprocess is
+    /// Download an auxiliary model. Shares the same curl-based download path
+    /// as the primary backend (`makeHFDownloadProcess`) — a second subprocess is
     /// run, independent of any in-flight backend download, so the user can
     /// enable LID without interrupting a primary download.
     func downloadAuxiliary(_ aux: AuxiliaryModel) async throws {
@@ -1704,28 +1240,19 @@ final class ModelManager: ObservableObject {
         auxiliaryDownloadedBytes[aux] = 0
         auxiliaryStatusMessage[aux] = "Preparing download..."
 
-        let pythonBin = try await ensurePythonEnv()
+        let process: Process
+        do {
+            process = try await makeHFDownloadProcess(
+                repo: aux.modelRepo, patterns: aux.allowPatterns, into: dir
+            )
+        } catch {
+            let message = Self.downloadListingErrorMessage(error)
+            auxiliaryStatusMessage[aux] = "Error: \(message)"
+            auxiliaryStates[aux] = .error(String(message.prefix(200)))
+            throw MurmurError.transcriptionFailed(message)
+        }
         auxiliaryStatusMessage[aux] = "Downloading..."
 
-        let quoted = aux.allowPatterns.map { "\"\($0)\"" }.joined(separator: ", ")
-        let script = """
-        import sys, json
-        from huggingface_hub import snapshot_download
-        try:
-            path = snapshot_download(
-                "\(aux.modelRepo)",
-                local_dir="\(dir.path)",
-                allow_patterns=[\(quoted)],
-            )
-            print(json.dumps({"status": "ok", "path": path}), flush=True)
-        except Exception as e:
-            print(json.dumps({"status": "error", "error": str(e)}), flush=True)
-        """
-
-        let process = Process()
-        process.executableURL = pythonBin
-        process.arguments = ["-c", script]
-        process.environment = pythonSubprocessEnvironment()
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
@@ -1768,10 +1295,9 @@ final class ModelManager: ObservableObject {
         }
         monitorTask.cancel()
 
-        let outData = stdout.fileHandleForReading.readDataToEndOfFile()
         let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-        let outStr = String(data: outData, encoding: .utf8) ?? ""
         let errStr = String(data: errData, encoding: .utf8) ?? ""
+        let outStr = Self.downloadResultJSON(for: process, stderr: errStr)
 
         if let line = outStr.components(separatedBy: "\n").last(where: { $0.contains("{") }),
            let data = line.data(using: .utf8),
@@ -1943,19 +1469,6 @@ final class ModelManager: ObservableObject {
             "__testing_setState invoked outside XCTest — this is a test seam and must only be called from unit tests"
         )
         state = newState
-    }
-
-    /// Force the activeBackend without going through the download guard.
-    ///
-    /// Used by tests that need to set up a specific backend without triggering
-    /// refreshState() side-effects that would require real files on disk.
-    /// NEVER call this from non-test code.
-    func __testing_setActiveBackend(_ backend: ModelBackend) {
-        assert(
-            NSClassFromString("XCTestCase") != nil,
-            "__testing_setActiveBackend invoked outside XCTest — this is a test seam and must only be called from unit tests"
-        )
-        activeBackend = backend
     }
 
     /// Directly invokes the post-cancel cleanup logic for deterministic unit testing

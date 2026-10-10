@@ -3,10 +3,10 @@
 Local voice input for macOS. Press a hotkey, speak, text appears at your cursor. No cloud, no latency, no data leaves your Mac.
 
 Two modes:
-- **Voice input** — real-time streaming transcription injected at your cursor
+- **Voice input** — dictate, with an optional live preview while you speak, and the text is inserted at your cursor
 - **Audio transcription** — record or upload long audio files, get full transcripts
 
-Supports Chinese, English, Japanese, Korean, French, German, Spanish and more with automatic language detection.
+Built for Chinese, English and mixed Chinese-English speech. The speech model recognises the language by itself and writes its own punctuation.
 
 ## How It Works
 
@@ -14,9 +14,9 @@ Supports Chinese, English, Japanese, Korean, French, German, Spanish and more wi
 Right Command → Record → Transcribe (local) → Text inserted at cursor
 ```
 
-Murmur lives in your menu bar. It uses [Cohere Transcribe](https://cohere.com/blog/transcribe) running entirely on your Mac via a native Swift ONNX Runtime backend (with CoreML acceleration on Apple Silicon). Text is inserted into the active app using clipboard paste.
+Murmur lives in your menu bar. It runs [Qwen3-ASR-0.6B](https://github.com/QwenLM/Qwen3-ASR) entirely on your Mac through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). Text is inserted into the active app using clipboard paste.
 
-**Streaming mode** (V3): Text appears in real-time as you speak. Chunks are transcribed and injected continuously, then a full-pass refinement runs when you stop to ensure accuracy.
+**Streaming mode**: your words appear in a floating bubble while you speak. When you stop, the whole recording is transcribed once more and that final text is inserted in one go.
 
 > **Important:** Murmur temporarily uses your clipboard to insert text. It saves your clipboard contents before pasting and restores them afterward. If you copy something during the brief insertion window (~1.5s), your new clipboard content is preserved — Murmur won't overwrite it.
 
@@ -27,7 +27,7 @@ Murmur lives in your menu bar. It uses [Cohere Transcribe](https://cohere.com/bl
 | Chip | Apple Silicon (M1+) |
 | RAM | 8 GB |
 | macOS | 14.0 (Sonoma) |
-| Disk | 3 GB free (1.5 GB model) |
+| Disk | 2 GB free (1 GB model) |
 
 ## Install
 
@@ -47,7 +47,6 @@ Because Murmur isn't notarized by Apple yet, macOS will block it the first time 
 ```bash
 cd Murmur
 swift package resolve
-bash Scripts/patch-ort-float16.sh   # Required: patches ONNX Runtime for Float16 support
 swift build
 open .build/debug/Murmur.app
 ```
@@ -58,7 +57,7 @@ On first launch, Murmur walks you through 5 steps:
 
 1. **Welcome + Microphone** — Grant mic access (the OS permission dialog appears automatically)
 2. **Accessibility** — Required for text insertion (System Settings opens automatically)
-3. **Model Download** — Downloads the ONNX speech model (~1.5 GB)
+3. **Model Download** — Downloads the speech model (~1 GB)
 4. **Test** — Record with the button, then try the hotkey
 5. **Done** — Shortcuts cheat sheet
 
@@ -80,7 +79,7 @@ The entire setup takes 3-5 minutes depending on your internet speed.
 4. Press **Right Command** again to stop
 5. Text appears at your cursor within 1-2 seconds
 
-With **streaming mode** enabled (Settings > Experimental), text appears in real-time as you speak. A full-pass refinement runs when you stop to correct any streaming errors.
+With **streaming mode** enabled (Settings > Experimental), a floating bubble shows the text as you speak, about a second or two behind your voice. Nothing is typed until you stop; then the final text is inserted once. Turn off **Preview bubble** in the same place if you would rather have the text typed into the app as you go.
 
 The hotkey and recording mode (toggle vs hold-to-talk) are customizable in Settings.
 
@@ -109,27 +108,11 @@ Before transcription starts, you can select the language (auto-detect, Chinese, 
 
 ### Language
 
-Murmur defaults to **Auto** — it detects your language from your active macOS input method:
+The speech model works out the language you are speaking by itself, so there is nothing you have to set. The language setting is a hint: with **Auto** it follows your macOS input method (Pinyin or Wubi means Chinese, ABC or US means English), and it is used to reject the occasional misfire (for example Chinese speech answered in another script) and to pick the punctuation clean-up rules.
 
-- Using **Pinyin** or **Wubi** keyboard? Murmur transcribes in Chinese (simplified)
-- Using **ABC** or **US** keyboard? Murmur transcribes in English
-- Switch your input method, and the transcription language follows automatically
+You can pin the hint manually via the menu bar dropdown or Settings. The menu bar shows quick-switch capsule buttons: **Auto | EN | 中文 | 日 | 한**
 
-You can also pin a language manually via the menu bar dropdown or Settings.
-
-The menu bar shows quick-switch capsule buttons: **Auto | EN | 中文 | 日 | 한**
-
-### Recommended setup for Chinese users 中文用户推荐配置
-
-Murmur ships with [Cohere Transcribe](https://cohere.com/blog/transcribe) by default — multilingual, fast, accurate on English. For Chinese (and Chinese-English code-switching) we recommend two opt-in toggles, both in **Settings → Speech Engine** / **ASR Punctuation**:
-
-1. **Enable FireRed for Chinese** (~1.24 GB additional download) — Xiaohongshu's [FireRedASR2-AED](https://github.com/FireRedTeam/FireRedASR2S), specialised for Mandarin + 20+ Chinese dialects + Chinese-English mixing. On the SenseVoice cn-en mixed benchmark FireRed achieves **CER 8.94%** vs Cohere's 22.76% (zh prompt). FireRed is character-faithful — it preserves "做 machine learning 做 deep learning…" verbatim instead of paraphrasing. English audio continues to use Cohere.
-
-2. **Add punctuation to ASR transcripts** (~280 MB additional download) — runs the [sherpa-onnx CT-Transformer](https://huggingface.co/csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12) zh-en punctuation model on the bare transcript at ~1 ms per clip. **FireRed never emits punctuation on its own**, so this toggle is what gives you `，。？！` automatically. Skipped for pure-English audio.
-
-中文场景启用这两项后,转写质量(尤其是字面忠实度)和标点完整度都会显著好于默认配置。完全离线,无需 LLM。
-
-> Use the toggles together. FireRed gives the most accurate Chinese characters; the punctuation model adds the marks FireRed itself never produces.
+Chinese, English and mixed Chinese-English speech are what Murmur is tested on. The model accepts other languages too, but they are untested here.
 
 ### How text insertion works
 
@@ -180,13 +163,13 @@ Open Settings from the menu bar dropdown.
 - Launch at login
 
 **Experimental tab:**
-- Streaming voice input (real-time transcription as you speak)
-- Focus timeout (auto-cancel when target app loses focus)
+- Streaming voice input (live text while you speak)
+- Preview bubble (on: live text in a floating bubble, inserted once at the end; off: typed as you speak)
 
 **Model tab:**
-- ONNX engine is the default (~1.5 GB, fast, recommended)
-- Native Swift ONNX backend (no Python dependency)
-- Download progress, model status, re-download option
+- Speech model status, download, re-download and delete (~1 GB)
+- Voice activity detection add-on (~2 MB) for better silence detection and hands-free auto-stop
+- Remove models left over from earlier versions of Murmur
 - Model and log folder shortcuts
 
 ### Sleep / Wake
@@ -199,29 +182,24 @@ Murmur unloads the model when your Mac sleeps to free memory, and reloads it whe
 ┌──────────────────────────────────────────────────────────────────────┐
 │                      AppCoordinator (@MainActor)                      │
 │   State: idle → recording → transcribing → injecting → idle          │
-│   Streaming: idle → recording (streaming chunks) → finalizing → idle  │
 ├──────────┬──────────┬────────────────┬──────────────┬────────────────┤
-│ Hotkey   │ Audio    │ Transcription  │ Injection    │ Permissions    │
-│ Service  │ Service  │ Service        │ Service      │ Service        │
-│          │          │                │              │                │
-│ RightCmd │ AVAudio  │ Native ONNX    │ Clipboard    │ Mic + A11y     │
-│ Toggle/  │ Engine   │ (pure Swift)   │ paste        │                │
-│ Hold     │ RMS/VAD  │ + Python IPC   │ (Cmd+V)     │                │
-│          │          │ fallback       │              │                │
-│          │ Streaming│                │              │                │
-│          │ Accum.   │ Mel Spectro.   │              │                │
-│          │ (chunks) │ (pure Swift)   │              │                │
+│ Hotkey   │ Audio    │ Qwen3          │ Text         │ Permissions    │
+│ Service  │ Service  │ Transcription  │ Injection    │ Service        │
+│          │          │ Service        │ Service      │                │
+│ RightCmd │ AVAudio  │ sherpa-onnx    │ Clipboard    │ Mic + A11y     │
+│ Toggle/  │ Engine   │ Qwen3-ASR-0.6B │ paste        │                │
+│ Hold     │ RMS/VAD  │ int8           │ (Cmd+V)      │                │
 └──────────┴──────────┴────────────────┴──────────────┴────────────────┘
          │
          └─── StreamingTranscriptionCoordinator
-              (chunk transcribe + full-pass refinement + focus guard)
+              (growing-window passes → stable prefix → preview bubble
+               → full pass → single insert)
 ```
 
-- **Native ONNX backend** — pure Swift, no Python dependency. Uses ONNX Runtime Swift bindings with CoreML acceleration
-- **MelSpectrogramExtractor** — pure Swift mel spectrogram, replacing the ONNX mel_extractor dependency
-- **StreamingTranscriptionCoordinator** — manages real-time chunk transcription, text injection, and full-pass refinement
-- **Python subprocess** (legacy fallback) communicates via JSON lines over stdin/stdout
-- Model preloads on launch and after wake for instant first transcription
+- **Qwen3TranscriptionService** — the one speech engine. Loads the model lazily, retries when a decode comes back corrupt, and splits long audio at pauses.
+- **StreamingTranscriptionCoordinator** — re-transcribes the growing audio window every second and shows the words two consecutive passes agree on (`StablePrefixAggregator`).
+- **ModelManager** — downloads the model files from Hugging Face with the system `curl` (no Python), verifies them against a manifest.
+- Model preloads on launch and after wake for instant first transcription.
 
 ## Project Structure
 
@@ -231,43 +209,40 @@ Murmur/
 ├── AppCoordinator.swift                     # State machine, flow orchestration
 ├── MurmurError.swift                        # Typed error enum
 ├── Services/
-│   ├── NativeTranscriptionService.swift     # Native ONNX backend (pure Swift)
-│   ├── ONNXTranscriptionBackend.swift       # ONNX Runtime model inference
-│   ├── MelSpectrogramExtractor.swift        # Pure Swift mel spectrogram
-│   ├── BPETokenizerDecoder.swift            # BPE token decoding
-│   ├── StreamingTranscriptionCoordinator.swift # V3 streaming state machine
+│   ├── Qwen3TranscriptionService.swift      # Speech engine (sherpa-onnx Qwen3-ASR)
+│   ├── TranscriptionTypes.swift             # Result / progress types, service protocol
+│   ├── StreamingTranscriptionCoordinator.swift # Streaming state machine
+│   ├── StablePrefixAggregator.swift         # LocalAgreement-2 stable prefix
 │   ├── AudioBufferAccumulator.swift         # Streaming audio chunk accumulator
-│   ├── TranscriptionService.swift           # Python subprocess bridge (legacy)
+│   ├── AudioService.swift                   # AVAudioEngine recording + silence gate
+│   ├── VadService.swift                     # Silero voice activity detection
 │   ├── HotkeyService.swift                  # Global hotkey (Right Command)
-│   ├── AudioService.swift                   # AVAudioEngine recording + VAD
 │   ├── TextInjectionService.swift           # Clipboard paste + CGEvent fallback
 │   ├── LongRecordingService.swift           # Long audio recording for transcription
 │   ├── TranscriptionHistoryService.swift    # Persistent transcription history
+│   ├── TranscriptionCorrectionService.swift # Optional LLM correction
+│   ├── PunctuationCleanupService.swift      # Rule-based punctuation clean-up
 │   ├── ModelManager.swift                   # Model download, verification
 │   ├── PermissionsService.swift             # Mic + accessibility checks
-│   └── AudioFeedbackService.swift           # System sounds
+│   ├── AudioFeedbackService.swift           # System sounds
+│   └── Vendor/SherpaOnnx.swift              # sherpa-onnx Swift wrapper
 ├── Views/
 │   ├── MenuBarView.swift                    # Menu bar dropdown
 │   ├── FloatingPillView.swift               # Recording overlay
+│   ├── StreamingPreviewBubble.swift         # Live text bubble for streaming
 │   ├── TranscriptionWindowView.swift        # Audio transcription main window
 │   ├── TranscriptionWindowModel.swift       # Transcription window ViewModel
 │   ├── TranscriptionSubViews.swift          # Idle/Record/Upload/Result sub-views
+│   ├── RecentHistoryView.swift              # Recent transcriptions
 │   ├── SettingsView.swift                   # Settings
-│   └── HotkeyRecorderView.swift            # Hotkey capture widget
+│   └── HotkeyRecorderView.swift             # Hotkey capture widget
 ├── Onboarding/
-│   ├── OnboardingView.swift                 # 5-step first-launch flow
+│   ├── OnboardingView.swift                 # First-launch flow
 │   └── OnboardingViewModel.swift            # Onboarding logic
-├── Tests/                                   # 295 unit tests
-│   ├── V3Phase1Tests.swift                  # Streaming voice input tests
-│   ├── V3Phase0Tests.swift                  # Streaming spike tests
-│   ├── NativeTranscriptionTests.swift       # Native ONNX backend tests
-│   ├── TranscriptionWindowModelTests.swift  # Audio transcription UI tests
-│   └── ...                                  # + 8 more test files
-├── Scripts/
-│   └── patch-ort-float16.sh                 # Patch ONNX Runtime for Float16
-└── Resources/
-    ├── transcribe.py                        # Python inference (legacy fallback)
-    └── requirements.txt                     # Python dependencies
+├── Tests/                                   # Unit tests
+├── Scripts/                                 # run.sh, build-release.sh
+├── vendor/sherpa-onnx.xcframework           # Vendored sherpa-onnx static library
+└── Resources/                               # App icon
 ```
 
 ## Development
@@ -275,14 +250,13 @@ Murmur/
 Built with Swift Package Manager. Dependencies:
 
 - [HotKey](https://github.com/soffes/HotKey) (0.2.1+) — Global keyboard shortcuts
-- [onnxruntime-swift-package-manager](https://github.com/microsoft/onnxruntime-swift-package-manager) (1.24+) — ONNX Runtime for native inference
+- [onnxruntime-swift-package-manager](https://github.com/microsoft/onnxruntime-swift-package-manager) (1.24+) — ONNX Runtime, linked by the vendored sherpa-onnx library
 
 ```bash
 cd Murmur
 swift package resolve
-bash Scripts/patch-ort-float16.sh   # Required before first build
 swift build        # Build
-swift test         # Run 295 unit tests
+swift test         # Run the unit tests
 open .build/debug/Murmur.app   # Launch
 ```
 
