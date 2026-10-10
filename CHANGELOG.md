@@ -20,6 +20,8 @@
 - **Escape leaves the shortcut recorder.** Before, the only way out with the keyboard was to record a new shortcut.
 - Settings switches, sliders and text fields, the Cancel button on the pill, the status icons in the Transcription window and its progress bar have names for VoiceOver. The live preview bubble is hidden from VoiceOver.
 - Pulsing icons stop when Reduce Motion is on.
+- The menu-bar item says its state to VoiceOver ("Murmur, recording"), not only through its icon.
+- A click on a row of the Recent window shows "Copied" on the row and says it to VoiceOver.
 - Export in the Transcription window answers to ⌘S as shown. The ⌘C hint on Copy All is gone: ⌘C copies the selected text.
 
 ### Fixed

@@ -264,6 +264,12 @@ swift test         # Run the unit tests
 open .build/debug/Murmur.app   # Launch
 ```
 
+`swift test` skips the tests that need the speech model unless the model is installed and `MURMUR_RUN_HEAVY_TESTS=1` is set. To run them, including on a Mac that has the Command Line Tools but not Xcode:
+
+```bash
+Scripts/model-regression.sh    # uses the model the app downloaded
+```
+
 ## Troubleshooting
 
 **"Murmur needs microphone access"** — On first use, the OS permission dialog should appear automatically. If it doesn't, go to System Settings > Privacy & Security > Microphone and add Murmur.

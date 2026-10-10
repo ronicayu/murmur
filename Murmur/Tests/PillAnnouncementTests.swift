@@ -27,4 +27,23 @@ final class PillAnnouncementTests: XCTestCase {
         XCTAssertTrue(text.hasPrefix("Error: "))
         XCTAssertTrue(text.contains(MurmurError.diskFull.shortMessage))
     }
+
+    // MARK: - Menu-bar item name
+
+    func test_menuBarName_saysTheStateTheIconShows() {
+        XCTAssertEqual(AppState.idle.menuBarAccessibilityName, "Murmur")
+        XCTAssertEqual(AppState.recording.menuBarAccessibilityName, "Murmur, recording")
+        XCTAssertEqual(AppState.streaming(chunkCount: 2).menuBarAccessibilityName, "Murmur, recording")
+        XCTAssertEqual(AppState.transcribing.menuBarAccessibilityName, "Murmur, transcribing")
+        XCTAssertEqual(AppState.injecting.menuBarAccessibilityName, "Murmur, inserting text")
+        XCTAssertEqual(
+            AppState.error(.diskFull).menuBarAccessibilityName,
+            "Murmur, error: \(MurmurError.diskFull.shortMessage)"
+        )
+    }
+
+    func test_menuBarName_doesNotReadOutTheInsertedText() {
+        let state = AppState.undoable(text: "a private sentence", method: .clipboard)
+        XCTAssertEqual(state.menuBarAccessibilityName, "Murmur")
+    }
 }
