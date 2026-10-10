@@ -541,7 +541,9 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
         mockInjection = MockTextInjectionService()
         coordinator = await StreamingTranscriptionCoordinator(
             transcription: mockTranscription,
-            injection: mockInjection
+            injection: mockInjection,
+            // No real cursor to read: the mock injection types nothing.
+            cursorOffsetProvider: { nil }
         )
     }
 

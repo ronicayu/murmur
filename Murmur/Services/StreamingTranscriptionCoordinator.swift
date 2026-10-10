@@ -306,6 +306,12 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     let transcription: TranscriptionServiceProtocol
     let injection: TextInjectionServiceProtocol & StreamingTextInjectionProtocol
     private let cpuMonitor: CPULoadMonitor
+    /// Where the text cursor is in the focused app (UTF-16 offset), or nil
+    /// when it cannot be read. Injectable because the real lookup asks the
+    /// Accessibility API about whatever app happens to be frontmost — on a
+    /// machine with the permission granted, a test would otherwise see that
+    /// app's cursor, conclude the user moved it, and skip the replacement.
+    private let cursorOffsetProvider: () -> Int?
 
     // MARK: - Session state
 
@@ -401,8 +407,10 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         transcription: TranscriptionServiceProtocol,
         injection: TextInjectionServiceProtocol & StreamingTextInjectionProtocol,
         cpuMonitor: CPULoadMonitor = CPULoadMonitor(),
-        fullPassTimeoutOverride: TimeInterval? = nil
+        fullPassTimeoutOverride: TimeInterval? = nil,
+        cursorOffsetProvider: @escaping () -> Int? = { resolveAXCursorOffset() }
     ) {
+        self.cursorOffsetProvider = cursorOffsetProvider
         self.transcription = transcription
         self.injection = injection
         self.cpuMonitor = cpuMonitor
@@ -1035,7 +1043,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     }
 
     private func resolveCurrentCursorOffsetAX() -> Int? {
-        resolveAXCursorOffset()
+        cursorOffsetProvider()
     }
 
     /// True when no 100 ms frame of `samples` reaches `silenceRMSThreshold`.
