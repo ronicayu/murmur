@@ -154,11 +154,113 @@ final class LongRecordingServiceTests: XCTestCase {
                        "2-hour cap must be 7200 seconds")
     }
 
-    // MARK: - disk budget
+    // MARK: - auto-stop at the duration cap
 
-    func test_diskBudgetBytes_is_2GB() {
-        XCTAssertEqual(LongRecordingService.diskBudgetBytes, 2 * 1024 * 1024 * 1024,
-                       "Disk budget must be 2 GB")
+    /// Builds a service whose duration cap is reached when the returned stream
+    /// is finished, instead of after two real hours.
+    private func makeServiceWithManualCap(
+        recorder: MockAVRecorderBridge
+    ) -> (service: LongRecordingService, reachCap: () -> Void) {
+        mockDiskCheck.freeBytes = 2 * 1024 * 1024 * 1024
+        let (capReached, continuation) = AsyncStream<Void>.makeStream()
+        let service = LongRecordingService(
+            outputDirectory: tempDir,
+            diskChecker: mockDiskCheck,
+            recorderFactory: { url, settings in recorder },
+            autoStopSleep: { _ in for await _ in capReached {} }
+        )
+        return (service, { continuation.finish() })
+    }
+
+    func test_autoStop_stops_recorder_and_reports_the_m4a() async throws {
+        // Arrange
+        let recorder = MockAVRecorderBridge()
+        let (service, reachCap) = makeServiceWithManualCap(recorder: recorder)
+        sut = service
+        let reported = expectation(description: "onAutoStop called")
+        var reportedURL: URL?
+        sut.onAutoStop = { url in
+            reportedURL = url
+            reported.fulfill()
+        }
+        try await sut.startRecording()
+        let outputURL = try XCTUnwrap(sut.currentOutputURL)
+
+        // Act
+        reachCap()
+        await fulfillment(of: [reported], timeout: 5)
+
+        // Assert
+        XCTAssertEqual(reportedURL, outputURL)
+        XCTAssertTrue(recorder.didStop)
+        do {
+            _ = try await sut.stopRecording()
+            XCTFail("Expected notRecording — the auto-stop already ended the recording")
+        } catch LongRecordingError.notRecording {
+            // pass
+        }
+    }
+
+    func test_manual_stop_does_not_report_autoStop() async throws {
+        // Arrange
+        let recorder = MockAVRecorderBridge()
+        let (service, reachCap) = makeServiceWithManualCap(recorder: recorder)
+        sut = service
+        var autoStopCount = 0
+        sut.onAutoStop = { _ in autoStopCount += 1 }
+        try await sut.startRecording()
+
+        // Act — the owner stops first; the cap is reached afterwards
+        _ = try await sut.stopRecording()
+        reachCap()
+        for _ in 0..<50 { await Task.yield() }
+
+        // Assert
+        XCTAssertEqual(autoStopCount, 0, "onAutoStop is only for the duration cap")
+    }
+
+    // MARK: - file ownership
+
+    func test_ownsRecording_true_for_its_own_output_file() async throws {
+        // Arrange
+        mockDiskCheck.freeBytes = 2 * 1024 * 1024 * 1024
+        sut = LongRecordingService(
+            outputDirectory: tempDir,
+            diskChecker: mockDiskCheck,
+            recorderFactory: { url, settings in MockAVRecorderBridge() }
+        )
+        try await sut.startRecording()
+        let outputURL = try XCTUnwrap(sut.currentOutputURL)
+
+        // Assert
+        XCTAssertTrue(sut.ownsRecording(at: outputURL))
+    }
+
+    func test_ownsRecording_false_for_files_outside_the_output_directory() throws {
+        // Arrange — a "user" directory next to the recordings directory
+        let userDir = tempDir.deletingLastPathComponent()
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: userDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: userDir) }
+        let userFile = userDir.appendingPathComponent("song.m4a")
+        FileManager.default.createFile(atPath: userFile.path, contents: Data("user".utf8))
+
+        // A path that starts inside the output directory but leaves it
+        let escaping = tempDir
+            .appendingPathComponent("..")
+            .appendingPathComponent(userDir.lastPathComponent)
+            .appendingPathComponent("song.m4a")
+        // A symlink inside the output directory that points at the user's file
+        let link = tempDir.appendingPathComponent("link.m4a")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: userFile)
+
+        // Assert
+        XCTAssertFalse(sut.ownsRecording(at: userFile))
+        XCTAssertFalse(sut.ownsRecording(at: escaping))
+        XCTAssertFalse(sut.ownsRecording(at: link))
+        XCTAssertFalse(sut.ownsRecording(at: tempDir), "The directory itself is not a recording")
+        XCTAssertFalse(sut.ownsRecording(at: tempDir.appendingPathComponent("sub/a.m4a")))
+        XCTAssertTrue(sut.ownsRecording(at: tempDir.appendingPathComponent("a.m4a")))
     }
 }
 
