@@ -93,11 +93,9 @@ struct MurmurApp: App {
                     }
                 }
                 .onReceive(modelManager.$state) { newState in
-                    // Preload the model as soon as a download completes, and
-                    // release it when the user deletes it.
-                    if newState == .ready {
-                        coordinator.preloadModelInBackground()
-                    } else if newState == .notDownloaded {
+                    // Release the model when the user deletes it. It is
+                    // loaded when a recording starts, not here.
+                    if newState == .notDownloaded {
                         Task { await coordinator.transcription.unloadModel() }
                     }
                 }

@@ -159,9 +159,8 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    /// Preload the model so the first transcription is instant.
-    /// Cancels any in-flight preload to avoid concurrent `send()` calls
-    /// that would corrupt the JSON protocol.
+    /// Load the model while the user is still speaking, so that it is ready
+    /// when the recording ends. Does nothing when it is already loaded.
     private var preloadTask: Task<Void, Never>?
 
     func preloadModelInBackground() {
@@ -240,24 +239,16 @@ final class AppCoordinator: ObservableObject {
             }
         }
 
-        // Unload model on sleep, re-preload on wake. Sleep and wake are only
-        // posted on the workspace's own notification center.
-        let workspaceCenter = NSWorkspace.shared.notificationCenter
-        workspaceCenter.addObserver(
+        // Unload the model on sleep. Sleep is only posted on the workspace's
+        // own notification center. The model is not loaded here or on wake:
+        // it holds gigabytes, so it is loaded when a recording starts and the
+        // engine releases it after a few idle minutes.
+        NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willSleepNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
             Task { await self?.transcription.unloadModel() }
         }
-        workspaceCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification,
-            object: nil, queue: .main
-        ) { [weak self] _ in
-            self?.preloadModelInBackground()
-        }
-
-        // Preload model in background so first transcription is instant
-        preloadModelInBackground()
 
         Self.log.info("Coordinator started")
     }
@@ -362,6 +353,7 @@ final class AppCoordinator: ObservableObject {
         // The undo window of the previous dictation ends here; its timer
         // must not put a live recording back to idle.
         undoWindow.cancel()
+        preloadModelInBackground()
         if isStreamingEnabled {
             await startStreamingRecordingFlow()
         } else {
