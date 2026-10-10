@@ -10,8 +10,12 @@ final class SpokenLanguagesTests: XCTestCase {
         XCTAssertEqual(Set(codes).count, codes.count)
     }
 
-    func test_listsTheThirtyLanguagesTheModelSupports() {
-        XCTAssertEqual(SpokenLanguages.all.count, 30)
+    func test_offersOnlyLanguagesThatMeasuredAcceptably() {
+        let codes = SpokenLanguages.all.map(\.code)
+        XCTAssertEqual(codes.count, 19)
+        // Two that measured over 40% word error and must not be offered.
+        XCTAssertFalse(codes.contains("pl"))
+        XCTAssertFalse(codes.contains("mk"))
     }
 
     func test_normalised_dropsUnknownAndDuplicateCodes_andUsesListOrder() {
@@ -78,10 +82,10 @@ final class SpokenLanguagesTests: XCTestCase {
         XCTAssertEqual(SpokenLanguages.expectedScripts(forHint: "auto"), Set(WritingScript.allCases))
     }
 
-    func test_expectedScripts_everyLanguageExpectsEveryNamedScript() {
+    func test_expectedScripts_everyOfferedLanguageTogether() {
         let hint = SpokenLanguages.hint(for: SpokenLanguages.all.map(\.code))
         XCTAssertEqual(SpokenLanguages.expectedScripts(forHint: hint),
-                       Set(WritingScript.allCases).subtracting([.other]))
+                       [.latin, .han, .kana, .hangul, .cyrillic, .arabic, .thai, .devanagari])
     }
 
     // MARK: - Scripts

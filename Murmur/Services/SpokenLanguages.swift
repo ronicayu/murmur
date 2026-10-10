@@ -61,7 +61,15 @@ enum SpokenLanguages {
 
     static let defaultsKey = "spokenLanguages"
 
-    /// Every language Qwen3-ASR lists as supported.
+    /// The languages Murmur offers: those of Qwen3-ASR's 30 that it transcribes
+    /// acceptably in this configuration (0.6B, int8, no language forcing).
+    ///
+    /// Measured on 30 FLEURS validation clips per language, eleven languages
+    /// came out at 40–75% word error — often a phonetic approximation, or the
+    /// words of a neighbouring language — and are left out: Filipino, Polish,
+    /// Swedish, Greek, Czech, Romanian, Finnish, Hungarian, Danish, Persian
+    /// and Macedonian. The model still transcribes them if spoken; Murmur
+    /// just does not present them as supported. Figures are in the README.
     static let all: [SpokenLanguage] = [
         SpokenLanguage(code: "zh", name: "中文", scripts: [.han]),
         SpokenLanguage(code: "en", name: "English", scripts: []),
@@ -81,18 +89,7 @@ enum SpokenLanguages {
         SpokenLanguage(code: "vi", name: "Tiếng Việt", scripts: []),
         SpokenLanguage(code: "id", name: "Bahasa Indonesia", scripts: []),
         SpokenLanguage(code: "ms", name: "Bahasa Melayu", scripts: []),
-        SpokenLanguage(code: "fil", name: "Filipino", scripts: []),
         SpokenLanguage(code: "tr", name: "Türkçe", scripts: []),
-        SpokenLanguage(code: "fa", name: "فارسی", scripts: [.arabic]),
-        SpokenLanguage(code: "el", name: "Ελληνικά", scripts: [.greek]),
-        SpokenLanguage(code: "pl", name: "Polski", scripts: []),
-        SpokenLanguage(code: "cs", name: "Čeština", scripts: []),
-        SpokenLanguage(code: "hu", name: "Magyar", scripts: []),
-        SpokenLanguage(code: "ro", name: "Română", scripts: []),
-        SpokenLanguage(code: "mk", name: "Македонски", scripts: [.cyrillic]),
-        SpokenLanguage(code: "sv", name: "Svenska", scripts: []),
-        SpokenLanguage(code: "da", name: "Dansk", scripts: []),
-        SpokenLanguage(code: "fi", name: "Suomi", scripts: []),
     ]
 
     private static let byCode: [String: SpokenLanguage] =
