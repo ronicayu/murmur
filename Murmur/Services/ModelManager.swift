@@ -38,6 +38,11 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
 
     var modelRepo: String { "csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25" }
 
+    /// The commit of `modelRepo` that Murmur downloads. Pinned so the files
+    /// and their checksums cannot change under a shipped app; moving to newer
+    /// model files is a deliberate edit of this line.
+    var modelRevision: String { "68818b2313fe77bd06f6a7c5068ff3ef59d02b8a" }
+
     var requiredDiskSpace: Int64 { 1_050_000_000 }  // ~0.99 GB rounded up
 
     var modelSubdirectory: String { "Murmur/Models-Qwen3ASR" }
@@ -92,6 +97,9 @@ enum AuxiliaryModel: String, CaseIterable, Identifiable, Sendable {
 
     var modelRepo: String { "onnx-community/silero-vad" }
 
+    /// The pinned commit of `modelRepo`; see `ModelBackend.modelRevision`.
+    var modelRevision: String { "e71cae966052b992a7eca6b17738916ce0eca4ec" }
+
     var modelSubdirectory: String { "Murmur/Models-SileroVAD" }
 
     var requiredDiskSpace: Int64 { 10_000_000 }  // ~2.2 MB ONNX + headroom
@@ -127,16 +135,6 @@ enum ModelState: Sendable, Equatable {
             return false
         }
     }
-}
-
-protocol ModelManagerProtocol {
-    var state: ModelState { get }
-    var modelPath: URL? { get }
-    func download() async throws
-    func cancelDownload()
-    func verify() async throws -> Bool
-    func delete() throws
-    func checkDiskSpace() throws
 }
 
 @MainActor
@@ -213,19 +211,35 @@ final class ModelManager: ObservableObject {
 
     private let logger = Logger(subsystem: "com.murmur.app", category: "model")
 
-    // FU-07: Stall timeout — if downloadedBytes does not increase for this many
-    // seconds, the download is considered stalled. HuggingFace downloads on a
-    // normal connection always make some progress every 60s, even on a slow link.
-    // 90s gives a grace period for momentary network hiccups without leaving the
-    // user stuck indefinitely.
-    private static let stallTimeoutSeconds: TimeInterval = 90
-
-    // Note: downloadTask was removed (M3 — it was never assigned by download() so
-    // downloadTask?.cancel() in cancelDownload() was always a no-op). The actual
-    // subprocess is cancelled via activeDownloadProcess.terminate() + SIGKILL escalation.
+    // The subprocess is cancelled via activeDownloadProcess.terminate() + SIGKILL escalation.
     private var activeDownloadProcess: Process?
-    private var urlSession: URLSession?
-    private var resumeData: Data?
+
+    /// Identifies the current download attempt. `download()` and
+    /// `cancelDownload()` both advance it; a `download()` that finds a
+    /// different value after an `await` was cancelled and must stop without
+    /// touching the published state, which now belongs to the canceller or to
+    /// a newer attempt.
+    private var downloadEpoch = 0
+
+    /// The download's contact points with the outside world. Production uses
+    /// the defaults; tests replace them to run `download()` without a network.
+    struct DownloadEnvironment {
+        /// Returns the body of the Hugging Face file listing at the given URL.
+        var fetchListing: @MainActor (URL) async throws -> Data = ModelManager.fetchListing(_:)
+        /// Builds (but does not start) the subprocess for `HFDownload.curlArguments`.
+        var makeProcess: @MainActor ([String]) -> Process = ModelManager.makeCurlProcess(arguments:)
+        // FU-07: Stall timeout — if downloadedBytes does not increase for this many
+        // seconds, the download is considered stalled. HuggingFace downloads on a
+        // normal connection always make some progress every 60s, even on a slow link.
+        // 90s gives a grace period for momentary network hiccups without leaving the
+        // user stuck indefinitely.
+        var stallTimeout: TimeInterval = 90
+    }
+    private var downloadEnvironment = DownloadEnvironment()
+
+    /// Present in a model directory from the start of a download until its
+    /// files have passed verification. Hidden, so `buildManifest` skips it.
+    private static let incompleteMarker = ".download-incomplete"
 
     var modelDirectory: URL {
         modelDirectory(for: activeBackend)
@@ -281,8 +295,7 @@ final class ModelManager: ObservableObject {
     }
 
     /// Walks `modelDirectory(for:)` and computes a manifest entry for every file
-    /// found, excluding `manifest.json` itself. Does NOT exclude `.cache/` prefixes
-    /// because HF doesn't write a `.cache` subdir into local_dir.
+    /// found, excluding `manifest.json` itself and hidden files.
     ///
     /// - Throws: if a file cannot be read.
     func buildManifest(for backend: ModelBackend) throws -> ModelManifest {
@@ -372,7 +385,7 @@ final class ModelManager: ObservableObject {
     ///
     /// For the active backend, the state machine is authoritative: returns false
     /// while a download or verification is in progress, even if files exist on
-    /// disk (HuggingFace writes files incrementally before the copy completes).
+    /// disk (curl writes them incrementally).
     /// For inactive backends, manifest validity is the signal.
     func isModelDownloaded(for backend: ModelBackend) -> Bool {
         if backend == activeBackend {
@@ -398,6 +411,9 @@ final class ModelManager: ObservableObject {
         guard loadManifest(for: backend) == nil else { return }
 
         let dir = modelDirectory(for: backend)
+        // Files of a download that never passed verification must not be
+        // blessed with a manifest; the next download() checks and completes them.
+        guard !FileManager.default.fileExists(atPath: dir.appendingPathComponent(Self.incompleteMarker).path) else { return }
         let requiredFilesPresent = backend.requiredFiles.allSatisfy { file in
             FileManager.default.fileExists(atPath: dir.appendingPathComponent(file).path)
         }
@@ -473,233 +489,189 @@ final class ModelManager: ObservableObject {
     }
 
     func download() async throws {
+        guard !isDownloadActive else {
+            logger.info("download(): already in progress")
+            return
+        }
         let backend = activeBackend
         try checkDiskSpace()
 
+        let directory = modelDirectory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        FileManager.default.createFile(
+            atPath: directory.appendingPathComponent(Self.incompleteMarker).path, contents: nil
+        )
+
+        downloadEpoch += 1
+        let epoch = downloadEpoch
         state = .downloading(progress: 0, bytesPerSec: 0)
         downloadProgress = 0
         downloadSpeed = 0
 
-        // Create model directory
-        try FileManager.default.createDirectory(
-            at: modelDirectory,
-            withIntermediateDirectories: true
-        )
-
-        logger.info("Starting model download from HuggingFace: \(backend.modelRepo) (backend: \(backend.rawValue))")
+        logger.info("Starting model download from HuggingFace: \(backend.modelRepo)@\(backend.modelRevision) (backend: \(backend.rawValue))")
 
         statusMessage = "Preparing download..."
 
-        // Model files are fetched with the system curl rather than a Python
-        // `snapshot_download`. This needs no pip-installed environment, and both
-        // URLSession (file listing) and /usr/bin/curl (SecureTransport) trust the
-        // macOS keychain, so TLS-intercepting clients such as Cloudflare WARP
-        // work without a custom CA bundle.
-        let process: Process
+        // Model files are fetched with the system curl. Both URLSession (file
+        // listing) and /usr/bin/curl (SecureTransport) trust the macOS keychain,
+        // so TLS-intercepting clients such as Cloudflare WARP work without a
+        // custom CA bundle.
+        let files: [HFDownload.File]
         do {
-            process = try await makeHFDownloadProcess(
-                repo: backend.modelRepo, patterns: backend.allowPatterns, into: modelDirectory
+            files = try await listFiles(
+                repo: backend.modelRepo, revision: backend.modelRevision,
+                patterns: backend.allowPatterns, required: backend.requiredFiles, into: directory
             )
         } catch {
+            try throwIfCancelled(epoch)
             let message = Self.downloadListingErrorMessage(error)
             logger.error("Model file listing failed: \(String(describing: error))")
             statusMessage = "Error: \(message)"
             state = .error(String(message.prefix(200)))
             throw MurmurError.transcriptionFailed(message)
         }
+        try throwIfCancelled(epoch)
 
-        statusMessage = "Downloading speech model..."
+        // A file already on disk is kept only when its content matches the
+        // listed checksum; a matching size alone proves nothing. Partial files
+        // are resumed, and wrong ones are deleted so curl starts them over.
+        let statuses = await Self.localStatuses(of: files, in: directory)
+        try throwIfCancelled(epoch)
+        let plan = HFDownload.plan(for: files, statuses: statuses)
+        Self.remove(plan.delete, from: directory)
 
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
+        if !plan.fetch.isEmpty {
+            statusMessage = "Downloading speech model..."
 
-        // Stream subprocess output to the logger as it arrives. Without this,
-        // a hung huggingface_hub call (e.g. waiting on a TLS handshake under
-        // WARP) produces zero log output until the process eventually times
-        // out — leaving the user looking at "Starting model download" with
-        // nothing else for minutes. We read stdout incrementally for the
-        // [murmur] probe markers and stderr for tqdm/urllib3 chatter.
-        // Output is captured into accumulators that are returned via the
-        // continuation below (so the post-exit JSON parser still sees it).
-        let outputAccumulator = OutputAccumulator()
-        let logger = self.logger
-        let streamStdout = Task {
-            for try await line in stdout.fileHandleForReading.bytes.lines {
-                outputAccumulator.appendStdout(line)
-                logger.info("curl> \(line)")
+            let transfers = plan.fetch.map {
+                HFDownload.transfer(for: $0, repo: backend.modelRepo, revision: backend.modelRevision, into: directory)
             }
-        }
-        let streamStderr = Task {
-            for try await line in stderr.fileHandleForReading.bytes.lines {
-                outputAccumulator.appendStderr(line)
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if !trimmed.isEmpty {
-                    logger.info("curl! \(trimmed)")
+            let process = downloadEnvironment.makeProcess(HFDownload.curlArguments(for: transfers))
+            let stallTimeout = downloadEnvironment.stallTimeout
+
+            // Monitor download activity: show downloaded size and speed.
+            // The progress is indeterminate; 100% is only set once curl has
+            // finished. Returns true when it stopped the download for a stall.
+            let monitorTask = Task { @MainActor [weak self] () -> Bool in
+                guard let self else { return false }
+                var lastSize: Int64 = 0
+                var speedSamples: [Int64] = []
+                let maxSamples = 5
+                // FU-07: Track when bytes last increased. Initialise to "now" so the
+                // first poll interval doesn't immediately fire a false stall.
+                var lastProgressAt = Date()
+
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(1))
+                    // Re-check after the sleep: a cancel or the subprocess exit can
+                    // land during it, and without this guard we'd post one final
+                    // .downloading state write AFTER the state has moved on,
+                    // leaving the UI stuck on "Downloading".
+                    guard !Task.isCancelled, self.downloadEpoch == epoch else { break }
+                    let modelSize = self.directorySize(directory)
+
+                    let instantSpeed = modelSize - lastSize
+                    speedSamples.append(instantSpeed)
+                    if speedSamples.count > maxSamples { speedSamples.removeFirst() }
+                    let smoothedSpeed = speedSamples.reduce(0, +) / Int64(speedSamples.count)
+
+                    // FU-07: Reset the stall clock whenever bytes increase.
+                    if modelSize > lastSize {
+                        lastProgressAt = Date()
+                    }
+
+                    // FU-07: If no bytes have arrived for stallTimeout, cancel
+                    // the subprocess and surface a recoverable error. We cancel the
+                    // process first (which stops writes), then set .error so the user
+                    // sees the NSAlert rather than returning to .notDownloaded silently.
+                    if Self.isStalled(lastProgressAt: lastProgressAt, now: Date(), timeout: stallTimeout) {
+                        self.logger.warning("Download stalled — no progress for \(stallTimeout)s; cancelling subprocess")
+                        self.cancelDownload()
+                        // cancelDownload() sets state to .notDownloaded; override with the
+                        // stall error so the existing NSAlert routing chain shows recovery UI.
+                        self.state = .error(MurmurError.downloadStalled.shortMessage)
+                        self.statusMessage = MurmurError.downloadStalled.alertTitle
+                        return true
+                    }
+
+                    self.downloadSpeed = smoothedSpeed
+                    self.downloadedBytes = modelSize
+                    // Use indeterminate progress (-1) so the UI shows a spinner, not a stuck bar
+                    self.state = .downloading(progress: -1, bytesPerSec: smoothedSpeed)
+                    let sizeMB = modelSize / 1_000_000
+                    self.statusMessage = "Downloading: \(sizeMB) MB"
+                    lastSize = modelSize
                 }
+                return false
+            }
+
+            // Store the reference so cancelDownload() can terminate the process immediately.
+            let (end, stderr) = await run(process) { activeDownloadProcess = process }
+
+            monitorTask.cancel()
+            if await monitorTask.value {
+                // The monitor has already published the stall error; keep it.
+                throw MurmurError.downloadStalled
+            }
+            try throwIfCancelled(epoch)
+            activeDownloadProcess = nil
+
+            if let message = HFDownload.failureMessage(for: end, stderr: stderr) {
+                logger.error("Model download error: \(message)")
+                statusMessage = "Error: \(message)"
+                state = .error(String(message.prefix(200)))
+                throw MurmurError.transcriptionFailed(message)
             }
         }
 
-        // Monitor download activity: show downloaded size and speed.
-        // We don't know the exact total, so we show an indeterminate progress
-        // and only set 100% when the process confirms success.
-        // Scope size tracking to the model directory only — the HF cache dir
-        // can contain unrelated prior downloads and would report misleadingly
-        // large numbers.
-        let monitorTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            var lastSize: Int64 = 0
-            var speedSamples: [Int64] = []
-            let maxSamples = 5
-            // FU-07: Track when bytes last increased. Initialise to "now" so the
-            // first poll interval doesn't immediately fire a false stall.
-            var lastProgressAt = Date()
+        // curl's exit status is not proof: every fetched file must now have
+        // the listed size and checksum.
+        logger.info("Model downloaded, verifying...")
+        state = .verifying
+        statusMessage = "Verifying model..."
+        downloadProgress = 1.0
+        let fetchedStatuses = await Self.localStatuses(of: plan.fetch, in: directory)
+        try throwIfCancelled(epoch)
+        let fetched = HFDownload.plan(for: plan.fetch, statuses: fetchedStatuses)
+        Self.remove(fetched.delete, from: directory)
 
-            while !Task.isCancelled && process.isRunning {
-                try? await Task.sleep(for: .seconds(1))
-                // Re-check after the sleep: cancel() or subprocess-exit can land
-                // during the sleep, and without this guard we'd post one final
-                // .downloading state write AFTER download() has set .ready or
-                // .verifying, leaving the UI stuck on "Downloading".
-                guard !Task.isCancelled, process.isRunning else { break }
-                let modelSize = self.directorySize(self.modelDirectory)
-
-                let instantSpeed = modelSize - lastSize
-                speedSamples.append(instantSpeed)
-                if speedSamples.count > maxSamples { speedSamples.removeFirst() }
-                let smoothedSpeed = speedSamples.reduce(0, +) / Int64(speedSamples.count)
-
-                // FU-07: Reset the stall clock whenever bytes increase.
-                if modelSize > lastSize {
-                    lastProgressAt = Date()
-                }
-
-                // FU-07: If no bytes have arrived for stallTimeoutSeconds, cancel
-                // the subprocess and surface a recoverable error. We cancel the
-                // process first (which stops writes), then set .error so the user
-                // sees the NSAlert rather than returning to .notDownloaded silently.
-                if Self.isStalled(lastProgressAt: lastProgressAt, now: Date(), timeout: Self.stallTimeoutSeconds) {
-                    self.logger.warning("Download stalled — no progress for \(Self.stallTimeoutSeconds)s; cancelling subprocess")
-                    self.cancelDownload()
-                    // cancelDownload() sets state to .notDownloaded; override with the
-                    // stall error so the existing NSAlert routing chain shows recovery UI.
-                    self.state = .error(MurmurError.downloadStalled.shortMessage)
-                    self.statusMessage = MurmurError.downloadStalled.alertTitle
-                    break
-                }
-
-                self.downloadSpeed = smoothedSpeed
-                self.downloadedBytes = modelSize
-                // Use indeterminate progress (-1) so the UI shows a spinner, not a stuck bar
-                self.state = .downloading(progress: -1, bytesPerSec: smoothedSpeed)
-                let sizeMB = modelSize / 1_000_000
-                // Always report as "Downloading" — verify() will set "Verifying" when
-                // it actually runs, so we never show a misleading "Finalizing" mid-transfer.
-                self.statusMessage = "Downloading: \(sizeMB) MB"
-                lastSize = modelSize
-            }
+        switch HFDownload.rejection(afterFetch: fetched) {
+        case .corrupt(let message):
+            logger.error("Model verification failed: \(message)")
+            statusMessage = "Error: \(message)"
+            state = .corrupt
+            throw MurmurError.transcriptionFailed(message)
+        case .incomplete(let message):
+            logger.error("Model download incomplete: \(message)")
+            statusMessage = "Error: \(message)"
+            state = .error(String(message.prefix(200)))
+            throw MurmurError.transcriptionFailed(message)
+        case nil:
+            break
         }
 
-        // Race fix: attach terminationHandler BEFORE process.run() so that a
-        // cache-hit subprocess that exits in milliseconds never escapes the handler.
-        // ResumeGuard ensures the handler (background queue) and the post-run
-        // defensive check (calling actor) cannot both resume the same continuation.
-        let resumeGuard = ResumeGuard()
-
-        // Wait for process exit (M2 fix: don't block main actor).
-        // Handler is attached first, then run() is called, then we do a defensive
-        // check in case the process already exited before we finished setting up.
-        let exitStatus: Int32 = await withCheckedContinuation { continuation in
-            process.terminationHandler = { proc in
-                if resumeGuard.claim() {
-                    continuation.resume(returning: proc.terminationStatus)
-                }
-            }
-
-            do {
-                try process.run()
-            } catch {
-                if resumeGuard.claim() {
-                    continuation.resume(returning: Int32(-1))
-                }
-                return
-            }
-
-            // Store reference so cancelDownload() can terminate the process immediately.
-            activeDownloadProcess = process
-
-            // Defensive: if the subprocess already exited before we got here
-            // (race between handler attach and run completion), resume now.
-            if !process.isRunning, resumeGuard.claim() {
-                continuation.resume(returning: process.terminationStatus)
-            }
+        // Record what was verified. This replaces any older manifest: the
+        // pinned listing, not the previous contents of the folder, is the reference.
+        do {
+            let sha256 = plan.verified.merging(fetched.verified) { $1 }
+            try writeManifest(Self.manifest(named: backend.rawValue, files: files, sha256: sha256), for: backend)
+        } catch {
+            logger.error("Failed to write model manifest: \(error)")
+            statusMessage = "Error: Could not save the model manifest"
+            state = .error("Could not save the model manifest")
+            throw error
         }
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent(Self.incompleteMarker))
 
-        monitorTask.cancel()
-        activeDownloadProcess = nil
+        state = .ready
+        statusMessage = "Model ready"
+        logger.info("Model ready (\(backend.rawValue)): \(files.count) files verified")
+    }
 
-        // Drain any remaining buffered output the streaming tasks may not have
-        // observed yet (race between EOF and AsyncStream cancellation), then
-        // stop them.
-        let leftoverStdout = (try? stdout.fileHandleForReading.readToEnd()) ?? Data()
-        let leftoverStderr = (try? stderr.fileHandleForReading.readToEnd()) ?? Data()
-        if let s = String(data: leftoverStdout, encoding: .utf8), !s.isEmpty {
-            outputAccumulator.appendStdout(s)
-        }
-        if let s = String(data: leftoverStderr, encoding: .utf8), !s.isEmpty {
-            outputAccumulator.appendStderr(s)
-        }
-        streamStdout.cancel()
-        streamStderr.cancel()
-        let stderrStr = outputAccumulator.stderrText
-        let outputStr = Self.downloadResultJSON(for: process, stderr: stderrStr)
-
-        // Try to parse JSON response from our script
-        if let jsonLine = outputStr.components(separatedBy: "\n").last(where: { $0.contains("{") }),
-           let data = jsonLine.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-
-            if let error = json["error"] as? String {
-                logger.error("Model download error: \(error)")
-                statusMessage = "Error: \(error)"
-                state = .error(String(error.prefix(200)))
-                throw MurmurError.transcriptionFailed(error)
-            }
-
-            if json["status"] as? String == "ok" {
-                logger.info("Model downloaded, verifying...")
-                statusMessage = "Verifying model..."
-                downloadProgress = 1.0
-                let valid = try await verify()
-                guard valid else {
-                    statusMessage = "Error: Model integrity check failed"
-                    state = .corrupt
-                    throw MurmurError.transcriptionFailed("Model integrity check failed")
-                }
-                statusMessage = "Model ready"
-                return
-            }
-        }
-
-        // Fallback: no JSON parsed, check exit status
-        if exitStatus != 0 {
-            let shortErr = String(stderrStr.suffix(200))
-            logger.error("Model download failed: \(shortErr)")
-            statusMessage = "Error: \(shortErr)"
-            state = .error("Download failed")
-            throw MurmurError.transcriptionFailed("Model download failed: \(shortErr)")
-        }
-
-        // Process exited 0 but no JSON — check if files exist
-        if modelPath != nil {
-            statusMessage = "Model ready"
-            state = .ready
-        } else {
-            statusMessage = "Error: Download completed but model files missing"
-            state = .error("Model files missing after download")
-            throw MurmurError.transcriptionFailed("Model files missing")
-        }
+    /// Throws when `cancelDownload()` has run since the download attempt
+    /// identified by `epoch` started.
+    private func throwIfCancelled(_ epoch: Int) throws {
+        if epoch != downloadEpoch { throw CancellationError() }
     }
 
     func cancelDownload() {
@@ -720,6 +692,10 @@ final class ModelManager: ObservableObject {
         // QA integration note: the SIGKILL path is not exercised by unit tests
         // (activeDownloadProcess is nil in the test harness). A real-subprocess
         // integration test is tracked in handoff 068_QA_EN_b3-b4-integration-ask.md.
+
+        // Tell a download() that is suspended (listing, hashing, or waiting
+        // for curl) that it has been cancelled, whether or not curl is running.
+        downloadEpoch += 1
 
         let capturedBackend = activeBackend
         let capturedModelDir = modelDirectory(for: capturedBackend)
@@ -766,7 +742,7 @@ final class ModelManager: ObservableObject {
 
         // Set state synchronously before returning so isDownloadActive is false
         // immediately — callers that check isDownloadActive right after cancel
-        // (e.g. setActiveBackend guard) will see the updated state.
+        // (e.g. the setUseVAD guard, or a new download()) will see the updated state.
         state = .notDownloaded
         downloadProgress = 0
         downloadedBytes = 0
@@ -949,7 +925,7 @@ final class ModelManager: ObservableObject {
     /// - Parameters:
     ///   - lastProgressAt: The timestamp when `downloadedBytes` last increased.
     ///   - now: The reference "current" time (injectable for testing).
-    ///   - timeout: Stall threshold in seconds; defaults to `stallTimeoutSeconds`.
+    ///   - timeout: Stall threshold in seconds.
     /// - Returns: `true` if no progress has been made for at least `timeout` seconds.
     nonisolated static func isStalled(lastProgressAt: Date, now: Date, timeout: TimeInterval) -> Bool {
         return now.timeIntervalSince(lastProgressAt) >= timeout
@@ -957,23 +933,24 @@ final class ModelManager: ObservableObject {
 
     // MARK: - HuggingFace download (native)
 
-    private struct HFFile {
-        let path: String
-        let size: Int64
-    }
-
-    /// Shell-style match of a repo-relative path against HuggingFace
-    /// `allow_patterns`. Like Python's `fnmatch`, `*` also matches `/`.
-    nonisolated static func hfPath(_ path: String, matchesAny patterns: [String]?) -> Bool {
-        guard let patterns else { return true }
-        return patterns.contains { fnmatch($0, path, 0) == 0 }
-    }
-
-    /// Lists the files of `repo` (main branch) that match `patterns`.
-    private func listHFFiles(repo: String, patterns: [String]?) async throws -> [HFFile] {
-        guard let url = URL(string: "https://huggingface.co/api/models/\(repo)/tree/main?recursive=true") else {
+    /// Lists the files of `repo` at `revision` that match `patterns`. Every
+    /// name in `required` must be among them, so a short or paged listing
+    /// fails here instead of producing a model with files missing.
+    private func listFiles(
+        repo: String, revision: String, patterns: [String]?, required: [String], into directory: URL
+    ) async throws -> [HFDownload.File] {
+        guard let url = HFDownload.listingURL(repo: repo, revision: revision) else {
             throw MurmurError.transcriptionFailed("Invalid model repository: \(repo)")
         }
+        let data = try await downloadEnvironment.fetchListing(url)
+        let files = try HFDownload.parseListing(data, patterns: patterns, into: directory)
+        if let missing = required.first(where: { name in !files.contains { $0.path == name } }) {
+            throw MurmurError.transcriptionFailed("\(missing) is not in the file listing of \(repo)")
+        }
+        return files
+    }
+
+    nonisolated static func fetchListing(_ url: URL) async throws -> Data {
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -981,104 +958,111 @@ final class ModelManager: ObservableObject {
         guard status == 200 else {
             throw MurmurError.transcriptionFailed("huggingface.co returned HTTP \(status) when listing model files")
         }
-        guard let entries = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            throw MurmurError.transcriptionFailed("Unexpected response when listing model files")
-        }
-        return entries.compactMap { entry -> HFFile? in
-            guard entry["type"] as? String == "file",
-                  let path = entry["path"] as? String,
-                  Self.hfPath(path, matchesAny: patterns)
-            else { return nil }
-            let size = (entry["size"] as? NSNumber)?.int64Value ?? -1
-            return HFFile(path: path, size: size)
-        }
+        return data
     }
 
-    /// Builds (but does not start) the subprocess that downloads every file of
-    /// `repo` matching `patterns` into `directory`.
-    ///
-    /// Files already on disk at their full size are skipped; partial files are
-    /// resumed. If nothing is left to fetch, the process is a no-op that exits 0
-    /// so callers can treat both cases the same way.
-    private func makeHFDownloadProcess(repo: String, patterns: [String]?, into directory: URL) async throws -> Process {
-        let files = try await listHFFiles(repo: repo, patterns: patterns)
-        guard !files.isEmpty else {
-            throw MurmurError.transcriptionFailed("No model files found in \(repo)")
-        }
-
-        let fm = FileManager.default
-        var transfers: [String] = []
-        for file in files {
-            let destination = directory.appendingPathComponent(file.path)
-            if let attrs = try? fm.attributesOfItem(atPath: destination.path),
-               let onDisk = (attrs[.size] as? NSNumber)?.int64Value,
-               file.size >= 0 {
-                if onDisk == file.size { continue }
-                // Larger than upstream means a stale or corrupt file; resuming
-                // would fail, so start it over.
-                if onDisk > file.size { try? fm.removeItem(at: destination) }
-            }
-            let encodedPath = file.path
-                .split(separator: "/")
-                .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
-                .joined(separator: "/")
-            transfers += ["--output", destination.path, "https://huggingface.co/\(repo)/resolve/main/\(encodedPath)"]
-        }
-
+    nonisolated static func makeCurlProcess(arguments: [String]) -> Process {
         let process = Process()
-        if transfers.isEmpty {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
-            return process
-        }
         process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        process.arguments = [
-            "--fail", "--location", "--silent", "--show-error",
-            "--retry", "3", "--retry-delay", "2", "--connect-timeout", "30",
-            "--create-dirs", "--continue-at", "-",
-        ] + transfers
+        process.arguments = arguments
         return process
     }
 
-    /// Translates a finished download subprocess into the one-line JSON result
-    /// the callers parse. A process killed by a signal (user cancel, stall
-    /// timeout) yields an empty string so the caller's exit-status fallback
-    /// handles it.
-    nonisolated static func downloadResultJSON(for process: Process, stderr: String) -> String {
-        guard process.terminationReason == .exit else { return "" }
-        return downloadResultJSON(exitStatus: process.terminationStatus, stderr: stderr)
+    /// Checks each file on disk against its listing entry. Runs detached:
+    /// hashing the model takes seconds and must not hold the main actor.
+    private nonisolated static func localStatuses(
+        of files: [HFDownload.File], in directory: URL
+    ) async -> [HFDownload.LocalStatus] {
+        await Task.detached {
+            files.map { HFDownload.localStatus(of: $0, in: directory) }
+        }.value
     }
 
-    nonisolated static func downloadResultJSON(exitStatus: Int32, stderr: String) -> String {
-        let payload: [String: String]
-        if exitStatus == 0 {
-            payload = ["status": "ok"]
-        } else {
-            payload = ["status": "error", "error": curlErrorMessage(exitStatus: exitStatus, stderr: stderr)]
+    private nonisolated static func remove(_ files: [HFDownload.File], from directory: URL) {
+        for file in files {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(file.path))
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: payload),
-              let json = String(data: data, encoding: .utf8)
-        else { return "" }
-        return json
     }
 
-    /// User-facing explanation for a curl exit code.
-    nonisolated static func curlErrorMessage(exitStatus: Int32, stderr: String) -> String {
-        let detail = stderr
-            .components(separatedBy: "\n")
-            .last { !$0.trimmingCharacters(in: .whitespaces).isEmpty }?
-            .trimmingCharacters(in: .whitespaces) ?? "curl exit \(exitStatus)"
-        switch exitStatus {
-        case 5, 6, 7, 28:
-            return "Could not reach huggingface.co. Check your network or try again later. (\(detail))"
-        case 35, 51, 58, 60, 77:
-            return "TLS certificate verification failed. If you use Cloudflare WARP / Zero Trust or another TLS-intercepting proxy, make sure its root certificate is trusted in Keychain Access. (\(detail))"
-        case 22, 56:
-            return "huggingface.co refused the download. (\(detail))"
-        case 23:
-            return "Could not write the model files to disk. (\(detail))"
-        default:
-            return "Download failed. (\(detail))"
+    /// The manifest of a download whose files all passed verification.
+    private nonisolated static func manifest(
+        named name: String, files: [HFDownload.File], sha256: [String: String]
+    ) -> ModelManifest {
+        var entries: [String: ManifestFileEntry] = [:]
+        for file in files {
+            if let hash = sha256[file.path] {
+                entries[file.path] = ManifestFileEntry(sha256: hash, size: file.size)
+            }
         }
+        return ModelManifest(
+            version: 1,
+            backend: name,
+            createdAt: ISO8601DateFormatter().string(from: Date()),
+            files: entries
+        )
+    }
+
+    /// Runs `process` to its end without blocking the main actor and returns
+    /// how it ended together with its stderr. `onLaunch` runs once the
+    /// process has started.
+    private func run(
+        _ process: Process, onLaunch: () -> Void = {}
+    ) async -> (end: HFDownload.ProcessEnd, stderr: String) {
+        let stderr = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = stderr
+
+        // Stream stderr to the logger as it arrives, so a hung transfer (e.g.
+        // waiting on a TLS handshake under WARP) is visible while it happens.
+        let logger = self.logger
+        let stderrText = Task { () -> String in
+            var lines: [String] = []
+            do {
+                for try await line in stderr.fileHandleForReading.bytes.lines {
+                    lines.append(line)
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    if !trimmed.isEmpty {
+                        logger.info("curl! \(trimmed)")
+                    }
+                }
+            } catch {}
+            return lines.joined(separator: "\n")
+        }
+
+        // Race fix: attach terminationHandler BEFORE process.run() so that a
+        // subprocess that exits in milliseconds never escapes the handler.
+        // ResumeGuard ensures the handler (background queue) and the post-run
+        // defensive check (calling actor) cannot both resume the same continuation.
+        let resumeGuard = ResumeGuard()
+        let end: HFDownload.ProcessEnd = await withCheckedContinuation { continuation in
+            process.terminationHandler = { proc in
+                if resumeGuard.claim() {
+                    continuation.resume(returning: HFDownload.ProcessEnd(proc))
+                }
+            }
+
+            do {
+                try process.run()
+            } catch {
+                if resumeGuard.claim() {
+                    continuation.resume(returning: .launchFailed)
+                }
+                return
+            }
+
+            onLaunch()
+
+            // Defensive: if the subprocess already exited before we got here
+            // (race between handler attach and run completion), resume now.
+            if !process.isRunning, resumeGuard.claim() {
+                continuation.resume(returning: HFDownload.ProcessEnd(process))
+            }
+        }
+
+        // Our copy of the write end must be closed for the reader to see EOF
+        // (it is still open when the launch failed).
+        try? stderr.fileHandleForWriting.close()
+        return (end, await stderrText.value)
     }
 
     /// User-facing explanation for a failure while listing the model files.
@@ -1097,31 +1081,6 @@ final class ModelManager: ObservableObject {
     }
 
     // MARK: - Helpers
-
-    /// Thread-safe accumulator for subprocess output streamed line-by-line.
-    /// Sendable so it can be captured by detached Tasks reading the pipes.
-    private final class OutputAccumulator: @unchecked Sendable {
-        private let lock = NSLock()
-        private var stdoutLines: [String] = []
-        private var stderrLines: [String] = []
-
-        func appendStdout(_ line: String) {
-            lock.lock(); defer { lock.unlock() }
-            stdoutLines.append(line)
-        }
-        func appendStderr(_ line: String) {
-            lock.lock(); defer { lock.unlock() }
-            stderrLines.append(line)
-        }
-        var stdoutText: String {
-            lock.lock(); defer { lock.unlock() }
-            return stdoutLines.joined(separator: "\n")
-        }
-        var stderrText: String {
-            lock.lock(); defer { lock.unlock() }
-            return stderrLines.joined(separator: "\n")
-        }
-    }
 
     private func directorySize(_ url: URL) -> Int64 {
         let fm = FileManager.default
@@ -1214,15 +1173,17 @@ final class ModelManager: ObservableObject {
         auxiliarySpeed[aux] = 0
     }
 
-    /// Download an auxiliary model. Shares the same curl-based download path
-    /// as the primary backend (`makeHFDownloadProcess`) — a second subprocess is
-    /// run, independent of any in-flight backend download, so the user can
-    /// enable LID without interrupting a primary download.
+    /// Download an auxiliary model. Shares the listing, curl and verification
+    /// steps with the primary download but runs its own subprocess, so the
+    /// user can fetch it without interrupting a primary download.
     func downloadAuxiliary(_ aux: AuxiliaryModel) async throws {
         // Guard: already downloading / verifying this aux model.
-        if case .downloading = auxiliaryState(for: aux) {
+        switch auxiliaryState(for: aux) {
+        case .downloading, .verifying:
             logger.info("downloadAuxiliary(\(aux.rawValue)): already in progress")
             return
+        default:
+            break
         }
 
         // Disk space: use the auxiliary's own requirement, not the active backend's.
@@ -1240,147 +1201,89 @@ final class ModelManager: ObservableObject {
         auxiliaryDownloadedBytes[aux] = 0
         auxiliaryStatusMessage[aux] = "Preparing download..."
 
-        let process: Process
+        func fail(_ message: String, state: ModelState? = nil) -> Error {
+            auxiliaryStatusMessage[aux] = "Error: \(message)"
+            auxiliaryStates[aux] = state ?? .error(String(message.prefix(200)))
+            return MurmurError.transcriptionFailed(message)
+        }
+
+        let files: [HFDownload.File]
         do {
-            process = try await makeHFDownloadProcess(
-                repo: aux.modelRepo, patterns: aux.allowPatterns, into: dir
+            files = try await listFiles(
+                repo: aux.modelRepo, revision: aux.modelRevision,
+                patterns: aux.allowPatterns, required: aux.requiredFiles, into: dir
             )
         } catch {
-            let message = Self.downloadListingErrorMessage(error)
-            auxiliaryStatusMessage[aux] = "Error: \(message)"
-            auxiliaryStates[aux] = .error(String(message.prefix(200)))
-            throw MurmurError.transcriptionFailed(message)
-        }
-        auxiliaryStatusMessage[aux] = "Downloading..."
-
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-
-        let monitorTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            var lastSize: Int64 = 0
-            var samples: [Int64] = []
-            while !Task.isCancelled && process.isRunning {
-                try? await Task.sleep(for: .seconds(1))
-                guard !Task.isCancelled, process.isRunning else { break }
-                let size = self.directorySize(dir)
-                let instant = size - lastSize
-                samples.append(instant)
-                if samples.count > 5 { samples.removeFirst() }
-                let smoothed = samples.reduce(0, +) / Int64(samples.count)
-                self.auxiliarySpeed[aux] = smoothed
-                self.auxiliaryDownloadedBytes[aux] = size
-                self.auxiliaryStates[aux] = .downloading(progress: -1, bytesPerSec: smoothed)
-                self.auxiliaryStatusMessage[aux] = "Downloading: \(size / 1_000_000) MB"
-                lastSize = size
-            }
+            throw fail(Self.downloadListingErrorMessage(error))
         }
 
-        let resumeGuard = ResumeGuard()
-        let exitStatus: Int32 = await withCheckedContinuation { cont in
-            process.terminationHandler = { p in
-                if resumeGuard.claim() { cont.resume(returning: p.terminationStatus) }
-            }
-            do {
-                try process.run()
-            } catch {
-                if resumeGuard.claim() { cont.resume(returning: -1) }
-                return
-            }
-            if !process.isRunning, resumeGuard.claim() {
-                cont.resume(returning: process.terminationStatus)
-            }
-        }
-        monitorTask.cancel()
+        let statuses = await Self.localStatuses(of: files, in: dir)
+        let plan = HFDownload.plan(for: files, statuses: statuses)
+        Self.remove(plan.delete, from: dir)
 
-        let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-        let errStr = String(data: errData, encoding: .utf8) ?? ""
-        let outStr = Self.downloadResultJSON(for: process, stderr: errStr)
+        if !plan.fetch.isEmpty {
+            auxiliaryStatusMessage[aux] = "Downloading..."
 
-        if let line = outStr.components(separatedBy: "\n").last(where: { $0.contains("{") }),
-           let data = line.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let errMsg = json["error"] as? String {
-                auxiliaryStatusMessage[aux] = "Error: \(errMsg)"
-                auxiliaryStates[aux] = .error(String(errMsg.prefix(200)))
-                throw MurmurError.transcriptionFailed(errMsg)
+            let transfers = plan.fetch.map {
+                HFDownload.transfer(for: $0, repo: aux.modelRepo, revision: aux.modelRevision, into: dir)
             }
-            if json["status"] as? String == "ok" {
-                auxiliaryStatusMessage[aux] = "Verifying..."
-                auxiliaryStates[aux] = .verifying
-                let valid = try await verifyAuxiliary(aux)
-                guard valid else {
-                    auxiliaryStatusMessage[aux] = "Error: Integrity check failed"
-                    auxiliaryStates[aux] = .corrupt
-                    throw MurmurError.transcriptionFailed("LID model integrity check failed")
+            let process = downloadEnvironment.makeProcess(HFDownload.curlArguments(for: transfers))
+
+            let monitorTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                var lastSize: Int64 = 0
+                var samples: [Int64] = []
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(1))
+                    guard !Task.isCancelled else { break }
+                    let size = self.directorySize(dir)
+                    let instant = size - lastSize
+                    samples.append(instant)
+                    if samples.count > 5 { samples.removeFirst() }
+                    let smoothed = samples.reduce(0, +) / Int64(samples.count)
+                    self.auxiliarySpeed[aux] = smoothed
+                    self.auxiliaryDownloadedBytes[aux] = size
+                    self.auxiliaryStates[aux] = .downloading(progress: -1, bytesPerSec: smoothed)
+                    self.auxiliaryStatusMessage[aux] = "Downloading: \(size / 1_000_000) MB"
+                    lastSize = size
                 }
-                auxiliaryStates[aux] = .ready
-                auxiliaryStatusMessage[aux] = "Ready"
-                return
+            }
+            let (end, stderr) = await run(process)
+            monitorTask.cancel()
+
+            if let message = HFDownload.failureMessage(for: end, stderr: stderr) {
+                throw fail(message)
             }
         }
 
-        if exitStatus != 0 {
-            let short = String(errStr.suffix(200))
-            auxiliaryStatusMessage[aux] = "Error: \(short)"
-            auxiliaryStates[aux] = .error("Download failed")
-            throw MurmurError.transcriptionFailed("LID model download failed: \(short)")
+        auxiliaryStatusMessage[aux] = "Verifying..."
+        auxiliaryStates[aux] = .verifying
+        let fetchedStatuses = await Self.localStatuses(of: plan.fetch, in: dir)
+        let fetched = HFDownload.plan(for: plan.fetch, statuses: fetchedStatuses)
+        Self.remove(fetched.delete, from: dir)
+
+        switch HFDownload.rejection(afterFetch: fetched) {
+        case .corrupt(let message):
+            throw fail(message, state: .corrupt)
+        case .incomplete(let message):
+            throw fail(message)
+        case nil:
+            break
         }
 
-        if auxiliaryModelPath(aux) != nil {
-            auxiliaryStates[aux] = .ready
-            auxiliaryStatusMessage[aux] = "Ready"
-        } else {
-            auxiliaryStates[aux] = .error("Model files missing")
-            auxiliaryStatusMessage[aux] = "Error: Download completed but files missing"
-            throw MurmurError.transcriptionFailed("LID model files missing")
+        // Same manifest format as the primary backend.
+        do {
+            let sha256 = plan.verified.merging(fetched.verified) { $1 }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(Self.manifest(named: aux.rawValue, files: files, sha256: sha256))
+                .write(to: auxiliaryManifestURL(aux), options: .atomic)
+        } catch {
+            throw fail("Could not save the model manifest")
         }
-    }
 
-    /// Hashes every file present under the auxiliary model directory and writes
-    /// a manifest. Returns false if any required file is missing.
-    private func verifyAuxiliary(_ aux: AuxiliaryModel) async throws -> Bool {
-        let dir = auxiliaryModelDirectory(aux)
-        for file in aux.requiredFiles {
-            let p = dir.appendingPathComponent(file).path
-            if !FileManager.default.fileExists(atPath: p) {
-                logger.warning("LID model missing required file: \(file)")
-                return false
-            }
-        }
-        // Build a fresh manifest and write it. Reuse the same struct as the
-        // primary backend so the file format is consistent.
-        let fm = FileManager.default
-        guard let enumerator = fm.enumerator(
-            at: dir,
-            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) else { return false }
-
-        var entries: [String: ManifestFileEntry] = [:]
-        for case let fileURL as URL in enumerator {
-            let values = try fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
-            guard values.isRegularFile == true else { continue }
-            if fileURL.lastPathComponent == ModelManifest.filename { continue }
-            let data = try Data(contentsOf: fileURL)
-            let hash = SHA256.hash(data: data)
-            let hashStr = hash.map { String(format: "%02x", $0) }.joined()
-            let size = Int64(values.fileSize ?? 0)
-            let relative = fileURL.path.replacingOccurrences(of: dir.path + "/", with: "")
-            entries[relative] = ManifestFileEntry(sha256: hashStr, size: size)
-        }
-        let manifest = ModelManifest(
-            version: 1,
-            backend: aux.rawValue,
-            createdAt: ISO8601DateFormatter().string(from: Date()),
-            files: entries
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(manifest).write(to: auxiliaryManifestURL(aux), options: .atomic)
-        return true
+        auxiliaryStates[aux] = .ready
+        auxiliaryStatusMessage[aux] = "Ready"
     }
 
     func deleteAuxiliary(_ aux: AuxiliaryModel) throws {
@@ -1449,6 +1352,22 @@ final class ModelManager: ObservableObject {
     ///
     /// The process must already be running (proc.run() called) before injection.
     /// NEVER call this from non-test code.
+    /// Replace the listing fetcher, the subprocess factory and the stall
+    /// timeout, so tests can run `download()` end to end without a network.
+    ///
+    /// NEVER call this from non-test code.
+    func __testing_setDownloadEnvironment(_ environment: DownloadEnvironment) {
+        assert(
+            NSClassFromString("XCTestCase") != nil,
+            "__testing_setDownloadEnvironment invoked outside XCTest — this is a test seam and must only be called from unit tests"
+        )
+        downloadEnvironment = environment
+    }
+
+    /// True from the launch of `download()`'s subprocess until that
+    /// subprocess is cancelled or has ended.
+    var __testing_hasActiveDownloadProcess: Bool { activeDownloadProcess != nil }
+
     func __testing_injectDownloadProcess(_ proc: Process) {
         assert(
             NSClassFromString("XCTestCase") != nil,
@@ -1489,4 +1408,13 @@ final class ModelManager: ObservableObject {
         await removePartialModelDirectory(modelDir, backend: backend)
     }
 #endif
+}
+
+private extension HFDownload.ProcessEnd {
+    /// The end of a process that has terminated.
+    init(_ process: Process) {
+        self = process.terminationReason == .exit
+            ? .exit(process.terminationStatus)
+            : .signal(process.terminationStatus)
+    }
 }
