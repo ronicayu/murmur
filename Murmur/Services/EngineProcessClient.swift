@@ -27,8 +27,7 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     private let idleSeconds: TimeInterval
     private let logger = Logger(subsystem: "com.murmur.app", category: "engine-process")
 
-    private var process: Process?
-    private var input: FileHandle?
+    private var helper: RunningHelper?
     /// Changes with every start and stop, so that output and the exit of an
     /// earlier process are not taken for the current one's.
     private var generation = 0
@@ -98,7 +97,7 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     }
 
     /// True while the helper process is running. For tests and diagnostics.
-    var isRunning: Bool { process != nil }
+    var isRunning: Bool { helper != nil }
 
     // MARK: - Requests
 
@@ -126,7 +125,7 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
                 do {
                     try startIfNeeded()
                     pending[id] = Pending(continuation: continuation, onProgress: onProgress)
-                    try input?.write(contentsOf: try EngineWire.line(request))
+                    try helper?.send(try EngineWire.line(request))
                 } catch {
                     pending[id] = nil
                     continuation.resume(throwing: error)
@@ -156,32 +155,17 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     // MARK: - The process
 
     private func startIfNeeded() throws {
-        guard process == nil else { return }
-        let process = Process()
-        let toHelper = Pipe()
-        let fromHelper = Pipe()
-        process.executableURL = launch.executable
-        process.arguments = launch.arguments
-        process.standardInput = toHelper
-        process.standardOutput = fromHelper
-        // The speech library logs its configuration there.
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-
+        guard helper == nil else { return }
+        let started = try RunningHelper(launch)
         generation += 1
         let generation = self.generation
-        self.process = process
-        self.input = toHelper.fileHandleForWriting
-        logger.info("Speech engine process started (pid \(process.processIdentifier))")
+        helper = started
+        logger.info("Speech engine process started (pid \(started.processIdentifier))")
 
-        let output = fromHelper.fileHandleForReading
-        Task.detached { [weak self] in
-            do {
-                for try await line in output.bytes.lines {
-                    await self?.receive(line, generation: generation)
-                }
-            } catch {
-                // Treated like the end of the output, below.
+        let lines = started.lines
+        Task { [weak self] in
+            for await line in lines {
+                await self?.receive(line, generation: generation)
             }
             await self?.outputEnded(generation: generation)
         }
@@ -213,10 +197,7 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     private func stop(failingPendingWith error: Error) {
         generation += 1
         idleStop?.cancel()
-        if let process, process.isRunning { process.terminate() }
-        try? input?.close()
-        process = nil
-        input = nil
+        helper = nil   // ends the process
         let waiting = pending
         pending = [:]
         for request in waiting.values { request.continuation.resume(throwing: error) }
@@ -235,8 +216,85 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     }
 
     private func stopIfIdle() {
-        guard process != nil, pending.isEmpty, Date().timeIntervalSince(lastUse) >= idleSeconds else { return }
+        guard helper != nil, pending.isEmpty, Date().timeIntervalSince(lastUse) >= idleSeconds else { return }
         logger.info("Speech engine process ended after \(Int(self.idleSeconds)) s without use")
         stop(failingPendingWith: MurmurError.transcriptionFailed("The speech engine was stopped"))
+    }
+}
+
+/// One run of the helper process. Letting go of this object ends the process,
+/// so a client that goes away cannot leave a helper, and its gigabytes, behind.
+private final class RunningHelper: @unchecked Sendable {
+    /// The helper's output, a line at a time. Ends when the helper closes
+    /// its output: it exited, or it was ended.
+    let lines: AsyncStream<String>
+
+    private let process = Process()
+    private let input: FileHandle
+    private let output: FileHandle
+
+    var processIdentifier: Int32 { process.processIdentifier }
+
+    init(_ launch: EngineProcessClient.Launch) throws {
+        let toHelper = Pipe()
+        let fromHelper = Pipe()
+        process.executableURL = launch.executable
+        process.arguments = launch.arguments
+        process.standardInput = toHelper
+        process.standardOutput = fromHelper
+        // The speech library logs its configuration there.
+        process.standardError = FileHandle.nullDevice
+        input = toHelper.fileHandleForWriting
+        output = fromHelper.fileHandleForReading
+
+        // Not `FileHandle.bytes.lines`: every `AsyncBytes` in a process reads
+        // on one shared serial queue, so a read that waits for this helper
+        // would hold up every other one.
+        let (lines, continuation) = AsyncStream.makeStream(of: String.self)
+        self.lines = lines
+        let splitter = LineSplitter()
+        output.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                continuation.finish()
+                return
+            }
+            for line in splitter.lines(adding: data) { continuation.yield(line) }
+        }
+
+        do {
+            try process.run()
+        } catch {
+            output.readabilityHandler = nil
+            continuation.finish()
+            throw error
+        }
+    }
+
+    func send(_ line: Data) throws {
+        try input.write(contentsOf: line)
+    }
+
+    deinit {
+        if process.isRunning { process.terminate() }
+        try? input.close()
+    }
+}
+
+/// Cuts a stream of bytes into lines. A line can arrive in several pieces.
+final class LineSplitter {
+    private var buffer = Data()
+
+    /// The complete lines that `data` finishes, without their newline.
+    func lines(adding data: Data) -> [String] {
+        buffer.append(data)
+        var lines: [String] = []
+        while let newline = buffer.firstIndex(of: 0x0A) {
+            let line = buffer[buffer.startIndex..<newline]
+            if !line.isEmpty { lines.append(String(decoding: line, as: UTF8.self)) }
+            buffer.removeSubrange(buffer.startIndex...newline)
+        }
+        return lines
     }
 }

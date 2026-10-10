@@ -234,6 +234,54 @@ final class EngineProcessClientTests: XCTestCase {
         XCTAssertEqual(lines.count, 2)
     }
 
+    func test_clientThatGoesAway_endsItsHelper() async throws {
+        let pidFile = directory.appendingPathComponent("pid")
+        var client: EngineProcessClient? = makeClient(#"""
+        echo $$ > "\#(pidFile.path)"
+        while IFS= read -r line; do printf '{"id":%s,"kind":"ready"}\n' "$(id "$line")"; done
+        """#)
+        try await client?.preloadModel()
+        let pid = try XCTUnwrap(Int32(String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        XCTAssertEqual(kill(pid, 0), 0, "Precondition: the helper is running")
+
+        client = nil
+
+        let gone = await eventually { kill(pid, 0) != 0 }
+        XCTAssertTrue(gone, "a helper holds gigabytes; it must not outlive its client")
+    }
+
+    func test_twoClients_doNotHoldEachOtherUp() async throws {
+        // The first helper stays alive and silent while the second one works.
+        let silent = makeClient("while IFS= read -r line; do :; done")
+        let waiting = Task { try await silent.preloadModel() }
+        let answering = makeClient(#"""
+        while IFS= read -r line; do printf '{"id":%s,"kind":"ready"}\n' "$(id "$line")"; done
+        """#)
+
+        try await answering.preloadModel()
+
+        waiting.cancel()
+        _ = try? await waiting.value
+    }
+
+    // MARK: Lines
+
+    func test_lineSplitter_joinsALineThatArrivesInPieces() {
+        let splitter = LineSplitter()
+
+        XCTAssertEqual(splitter.lines(adding: Data("{\"a\":".utf8)), [])
+        XCTAssertEqual(splitter.lines(adding: Data("1}\n{\"b\":2}\n{\"c\"".utf8)), ["{\"a\":1}", "{\"b\":2}"])
+        XCTAssertEqual(splitter.lines(adding: Data(":3}\n".utf8)), ["{\"c\":3}"])
+    }
+
+    func test_lineSplitter_keepsMultibyteCharactersCutBetweenPieces() {
+        let splitter = LineSplitter()
+        let bytes = Array("你好\n".utf8)
+
+        XCTAssertEqual(splitter.lines(adding: Data(bytes[0..<2])), [])
+        XCTAssertEqual(splitter.lines(adding: Data(bytes[2...])), ["你好"])
+    }
+
     // MARK: Finding the helper
 
     func test_helperExecutable_isNil_whenNoHelperIsNextToTheExecutable() {
