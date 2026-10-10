@@ -1,4 +1,3 @@
-import Carbon.HIToolbox
 import Foundation
 
 /// Writing systems the speech model can produce, as far as Murmur needs to
@@ -43,55 +42,57 @@ struct SpokenLanguage: Identifiable, Equatable, Sendable {
     /// Scripts its text is written in, besides Latin, which is always
     /// accepted (names, numbers and borrowed words appear in every language).
     let scripts: Set<WritingScript>
-    /// Whether Murmur has been tested with this language.
-    let isTested: Bool
 
     var id: String { code }
 }
 
 /// The user's "Languages you speak" setting.
 ///
-/// The speech model works out the spoken language by itself and cannot be
-/// told which one to use. This setting therefore selects nothing; it tells
-/// Murmur which writing systems to expect, so a transcript in an unexpected
-/// script can be double-checked before it is typed.
+/// The speech model works out the spoken language by itself, and the
+/// sherpa-onnx API Murmur runs it through has no way to restrict it to some
+/// languages (nor does it report which one it chose). This setting therefore
+/// selects nothing in the model; it tells Murmur which writing systems to
+/// expect, so a transcript in an unexpected script can be double-checked
+/// before it is typed.
+///
+/// Every language is on by default, which expects everything and checks
+/// nothing. Narrowing the list is how a user opts in to the check.
 enum SpokenLanguages {
 
     static let defaultsKey = "spokenLanguages"
 
-    /// Every language Qwen3-ASR lists as supported. Only Chinese and English
-    /// (and mixing the two) have been tested with Murmur.
+    /// Every language Qwen3-ASR lists as supported.
     static let all: [SpokenLanguage] = [
-        SpokenLanguage(code: "zh", name: "中文", scripts: [.han], isTested: true),
-        SpokenLanguage(code: "en", name: "English", scripts: [], isTested: true),
-        SpokenLanguage(code: "yue", name: "粵語", scripts: [.han], isTested: false),
-        SpokenLanguage(code: "ja", name: "日本語", scripts: [.kana, .han], isTested: false),
-        SpokenLanguage(code: "ko", name: "한국어", scripts: [.hangul, .han], isTested: false),
-        SpokenLanguage(code: "fr", name: "Français", scripts: [], isTested: false),
-        SpokenLanguage(code: "de", name: "Deutsch", scripts: [], isTested: false),
-        SpokenLanguage(code: "es", name: "Español", scripts: [], isTested: false),
-        SpokenLanguage(code: "pt", name: "Português", scripts: [], isTested: false),
-        SpokenLanguage(code: "it", name: "Italiano", scripts: [], isTested: false),
-        SpokenLanguage(code: "nl", name: "Nederlands", scripts: [], isTested: false),
-        SpokenLanguage(code: "ru", name: "Русский", scripts: [.cyrillic], isTested: false),
-        SpokenLanguage(code: "ar", name: "العربية", scripts: [.arabic], isTested: false),
-        SpokenLanguage(code: "hi", name: "हिन्दी", scripts: [.devanagari], isTested: false),
-        SpokenLanguage(code: "th", name: "ไทย", scripts: [.thai], isTested: false),
-        SpokenLanguage(code: "vi", name: "Tiếng Việt", scripts: [], isTested: false),
-        SpokenLanguage(code: "id", name: "Bahasa Indonesia", scripts: [], isTested: false),
-        SpokenLanguage(code: "ms", name: "Bahasa Melayu", scripts: [], isTested: false),
-        SpokenLanguage(code: "fil", name: "Filipino", scripts: [], isTested: false),
-        SpokenLanguage(code: "tr", name: "Türkçe", scripts: [], isTested: false),
-        SpokenLanguage(code: "fa", name: "فارسی", scripts: [.arabic], isTested: false),
-        SpokenLanguage(code: "el", name: "Ελληνικά", scripts: [.greek], isTested: false),
-        SpokenLanguage(code: "pl", name: "Polski", scripts: [], isTested: false),
-        SpokenLanguage(code: "cs", name: "Čeština", scripts: [], isTested: false),
-        SpokenLanguage(code: "hu", name: "Magyar", scripts: [], isTested: false),
-        SpokenLanguage(code: "ro", name: "Română", scripts: [], isTested: false),
-        SpokenLanguage(code: "mk", name: "Македонски", scripts: [.cyrillic], isTested: false),
-        SpokenLanguage(code: "sv", name: "Svenska", scripts: [], isTested: false),
-        SpokenLanguage(code: "da", name: "Dansk", scripts: [], isTested: false),
-        SpokenLanguage(code: "fi", name: "Suomi", scripts: [], isTested: false),
+        SpokenLanguage(code: "zh", name: "中文", scripts: [.han]),
+        SpokenLanguage(code: "en", name: "English", scripts: []),
+        SpokenLanguage(code: "yue", name: "粵語", scripts: [.han]),
+        SpokenLanguage(code: "ja", name: "日本語", scripts: [.kana, .han]),
+        SpokenLanguage(code: "ko", name: "한국어", scripts: [.hangul, .han]),
+        SpokenLanguage(code: "fr", name: "Français", scripts: []),
+        SpokenLanguage(code: "de", name: "Deutsch", scripts: []),
+        SpokenLanguage(code: "es", name: "Español", scripts: []),
+        SpokenLanguage(code: "pt", name: "Português", scripts: []),
+        SpokenLanguage(code: "it", name: "Italiano", scripts: []),
+        SpokenLanguage(code: "nl", name: "Nederlands", scripts: []),
+        SpokenLanguage(code: "ru", name: "Русский", scripts: [.cyrillic]),
+        SpokenLanguage(code: "ar", name: "العربية", scripts: [.arabic]),
+        SpokenLanguage(code: "hi", name: "हिन्दी", scripts: [.devanagari]),
+        SpokenLanguage(code: "th", name: "ไทย", scripts: [.thai]),
+        SpokenLanguage(code: "vi", name: "Tiếng Việt", scripts: []),
+        SpokenLanguage(code: "id", name: "Bahasa Indonesia", scripts: []),
+        SpokenLanguage(code: "ms", name: "Bahasa Melayu", scripts: []),
+        SpokenLanguage(code: "fil", name: "Filipino", scripts: []),
+        SpokenLanguage(code: "tr", name: "Türkçe", scripts: []),
+        SpokenLanguage(code: "fa", name: "فارسی", scripts: [.arabic]),
+        SpokenLanguage(code: "el", name: "Ελληνικά", scripts: [.greek]),
+        SpokenLanguage(code: "pl", name: "Polski", scripts: []),
+        SpokenLanguage(code: "cs", name: "Čeština", scripts: []),
+        SpokenLanguage(code: "hu", name: "Magyar", scripts: []),
+        SpokenLanguage(code: "ro", name: "Română", scripts: []),
+        SpokenLanguage(code: "mk", name: "Македонски", scripts: [.cyrillic]),
+        SpokenLanguage(code: "sv", name: "Svenska", scripts: []),
+        SpokenLanguage(code: "da", name: "Dansk", scripts: []),
+        SpokenLanguage(code: "fi", name: "Suomi", scripts: []),
     ]
 
     private static let byCode: [String: SpokenLanguage] =
@@ -99,53 +100,25 @@ enum SpokenLanguages {
 
     // MARK: - Reading and writing the setting
 
-    /// The user's languages, in the order of `all`. Never empty.
+    /// The user's languages, in the order of `all`. Never empty. All of them
+    /// until the user narrows the list — and because that default is not
+    /// written back, a language added to `all` later is included too.
     static func current(defaults: UserDefaults = .standard) -> [String] {
         if let stored = defaults.stringArray(forKey: defaultsKey) {
             let known = normalised(stored)
             if !known.isEmpty { return known }
         }
-        let initial = initialValue(
-            legacySetting: defaults.string(forKey: "transcriptionLanguage"),
-            systemLanguages: systemLanguageIdentifiers()
-        )
-        defaults.set(initial, forKey: defaultsKey)
-        return initial
+        return all.map(\.code)
     }
 
     static func save(_ codes: [String], defaults: UserDefaults = .standard) {
         let known = normalised(codes)
         guard !known.isEmpty else { return }
-        defaults.set(known, forKey: defaultsKey)
-    }
-
-    /// What the setting starts as.
-    ///
-    /// - A language pinned in the old "Language" picker carries over as the
-    ///   only entry: that user told Murmur what they speak.
-    /// - Otherwise (the old "Auto", or a fresh install) the list comes from
-    ///   the Mac's preferred languages and keyboard layouts.
-    /// - If none of those is a language the model supports, English.
-    static func initialValue(legacySetting: String?, systemLanguages: [String]) -> [String] {
-        if let pinned = legacySetting, pinned != "auto", let code = supportedCode(for: pinned) {
-            return [code]
-        }
-        let fromSystem = normalised(systemLanguages.compactMap(supportedCode(for:)))
-        return fromSystem.isEmpty ? ["en"] : fromSystem
-    }
-
-    /// Maps a locale or language identifier (`zh-Hans-CN`, `en_GB`, `yue-HK`)
-    /// to one of the supported codes, or nil.
-    static func supportedCode(for identifier: String) -> String? {
-        let primary = identifier
-            .lowercased()
-            .split(whereSeparator: { $0 == "-" || $0 == "_" })
-            .first
-            .map(String.init) ?? ""
-        switch primary {
-        case "tl": return "fil"       // Tagalog is listed as Filipino
-        case "nb", "no", "nn": return nil
-        default: return byCode[primary] != nil ? primary : nil
+        if known.count == all.count {
+            // Back to the default: stop pinning the list.
+            defaults.removeObject(forKey: defaultsKey)
+        } else {
+            defaults.set(known, forKey: defaultsKey)
         }
     }
 
@@ -153,23 +126,6 @@ enum SpokenLanguages {
     static func normalised(_ codes: [String]) -> [String] {
         let wanted = Set(codes)
         return all.map(\.code).filter(wanted.contains)
-    }
-
-    /// The Mac's preferred languages followed by the languages of its enabled
-    /// keyboard layouts and input methods.
-    static func systemLanguageIdentifiers() -> [String] {
-        var identifiers = Locale.preferredLanguages
-        let filter = [kTISPropertyInputSourceIsEnabled: true] as CFDictionary
-        if let sources = TISCreateInputSourceList(filter, false)?.takeRetainedValue() as? [TISInputSource] {
-            for source in sources {
-                guard let pointer = TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages),
-                      let languages = Unmanaged<CFArray>.fromOpaque(pointer).takeUnretainedValue() as? [String],
-                      let primary = languages.first
-                else { continue }
-                identifiers.append(primary)
-            }
-        }
-        return identifiers
     }
 
     // MARK: - Passing the setting to the engine
@@ -181,17 +137,14 @@ enum SpokenLanguages {
     }
 
     /// Scripts to expect for a hint produced by `hint(for:)`. Latin is always
-    /// expected. An empty or unrecognised hint expects Chinese and English,
-    /// the languages Murmur is tested with.
+    /// expected. A hint that names no known language restricts nothing: every
+    /// script is expected.
     static func expectedScripts(forHint hint: String) -> Set<WritingScript> {
         let codes = hint.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
         let languages = codes.compactMap { byCode[$0] }
         var scripts: Set<WritingScript> = [.latin]
-        if languages.isEmpty {
-            scripts.insert(.han)
-        } else {
-            for language in languages { scripts.formUnion(language.scripts) }
-        }
+        guard !languages.isEmpty else { return Set(WritingScript.allCases) }
+        for language in languages { scripts.formUnion(language.scripts) }
         return scripts
     }
 }

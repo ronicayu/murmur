@@ -10,59 +10,12 @@ final class SpokenLanguagesTests: XCTestCase {
         XCTAssertEqual(Set(codes).count, codes.count)
     }
 
-    func test_onlyChineseAndEnglishAreMarkedTested() {
-        XCTAssertEqual(SpokenLanguages.all.filter(\.isTested).map(\.code), ["zh", "en"])
-    }
-
-    // MARK: - Identifiers from macOS
-
-    func test_supportedCode_stripsRegionAndScript() {
-        XCTAssertEqual(SpokenLanguages.supportedCode(for: "zh-Hans-CN"), "zh")
-        XCTAssertEqual(SpokenLanguages.supportedCode(for: "en_GB"), "en")
-        XCTAssertEqual(SpokenLanguages.supportedCode(for: "yue-HK"), "yue")
-        XCTAssertEqual(SpokenLanguages.supportedCode(for: "JA"), "ja")
-    }
-
-    func test_supportedCode_mapsTagalogToFilipino() {
-        XCTAssertEqual(SpokenLanguages.supportedCode(for: "tl-PH"), "fil")
-    }
-
-    func test_supportedCode_isNilForLanguagesTheModelLacks() {
-        XCTAssertNil(SpokenLanguages.supportedCode(for: "nb-NO"))
-        XCTAssertNil(SpokenLanguages.supportedCode(for: "he-IL"))
-        XCTAssertNil(SpokenLanguages.supportedCode(for: ""))
+    func test_listsTheThirtyLanguagesTheModelSupports() {
+        XCTAssertEqual(SpokenLanguages.all.count, 30)
     }
 
     func test_normalised_dropsUnknownAndDuplicateCodes_andUsesListOrder() {
         XCTAssertEqual(SpokenLanguages.normalised(["ja", "xx", "en", "zh", "en"]), ["zh", "en", "ja"])
-    }
-
-    // MARK: - First value of the setting
-
-    func test_initialValue_freshInstallUsesTheMacsLanguages() {
-        XCTAssertEqual(
-            SpokenLanguages.initialValue(legacySetting: nil, systemLanguages: ["en-US", "zh-Hans-CN", "ja-JP"]),
-            ["zh", "en", "ja"]
-        )
-    }
-
-    func test_initialValue_oldAutoSettingUsesTheMacsLanguages() {
-        XCTAssertEqual(
-            SpokenLanguages.initialValue(legacySetting: "auto", systemLanguages: ["zh-Hans", "en"]),
-            ["zh", "en"]
-        )
-    }
-
-    func test_initialValue_pinnedLanguageCarriesOverAlone() {
-        XCTAssertEqual(
-            SpokenLanguages.initialValue(legacySetting: "ja", systemLanguages: ["en-US", "zh-Hans"]),
-            ["ja"]
-        )
-    }
-
-    func test_initialValue_fallsBackToEnglishWhenNothingIsSupported() {
-        XCTAssertEqual(SpokenLanguages.initialValue(legacySetting: nil, systemLanguages: ["he-IL", "nb"]), ["en"])
-        XCTAssertEqual(SpokenLanguages.initialValue(legacySetting: nil, systemLanguages: []), ["en"])
     }
 
     // MARK: - Stored setting
@@ -74,18 +27,23 @@ final class SpokenLanguagesTests: XCTestCase {
         return defaults
     }
 
+    func test_current_isEveryLanguageUntilTheUserNarrowsIt() {
+        let defaults = makeDefaults()
+        XCTAssertEqual(SpokenLanguages.current(defaults: defaults), SpokenLanguages.all.map(\.code))
+        XCTAssertNil(defaults.stringArray(forKey: SpokenLanguages.defaultsKey),
+                     "the default is not written back, so a language added later is included")
+    }
+
+    func test_current_ignoresTheOldLanguagePickerValue() {
+        let defaults = makeDefaults()
+        defaults.set("zh", forKey: "transcriptionLanguage")
+        XCTAssertEqual(SpokenLanguages.current(defaults: defaults).count, SpokenLanguages.all.count)
+    }
+
     func test_current_returnsWhatWasSaved() {
         let defaults = makeDefaults()
         SpokenLanguages.save(["en", "ko"], defaults: defaults)
         XCTAssertEqual(SpokenLanguages.current(defaults: defaults), ["en", "ko"])
-    }
-
-    func test_current_migratesAPinnedLegacyLanguageOnce() {
-        let defaults = makeDefaults()
-        defaults.set("zh", forKey: "transcriptionLanguage")
-        XCTAssertEqual(SpokenLanguages.current(defaults: defaults), ["zh"])
-        XCTAssertEqual(defaults.stringArray(forKey: SpokenLanguages.defaultsKey), ["zh"],
-                       "the migrated value is stored so later reads do not depend on the old key")
     }
 
     func test_save_ignoresAnEmptySelection() {
@@ -93,6 +51,13 @@ final class SpokenLanguagesTests: XCTestCase {
         SpokenLanguages.save(["zh"], defaults: defaults)
         SpokenLanguages.save([], defaults: defaults)
         XCTAssertEqual(SpokenLanguages.current(defaults: defaults), ["zh"])
+    }
+
+    func test_save_selectingEverythingReturnsToTheDefault() {
+        let defaults = makeDefaults()
+        SpokenLanguages.save(["zh", "en"], defaults: defaults)
+        SpokenLanguages.save(SpokenLanguages.all.map(\.code), defaults: defaults)
+        XCTAssertNil(defaults.stringArray(forKey: SpokenLanguages.defaultsKey))
     }
 
     // MARK: - Hint for the engine
@@ -108,9 +73,15 @@ final class SpokenLanguagesTests: XCTestCase {
         XCTAssertEqual(SpokenLanguages.expectedScripts(forHint: "fr,de"), [.latin])
     }
 
-    func test_expectedScripts_emptyOrUnknownHintExpectsChineseAndEnglish() {
-        XCTAssertEqual(SpokenLanguages.expectedScripts(forHint: ""), [.latin, .han])
-        XCTAssertEqual(SpokenLanguages.expectedScripts(forHint: "auto"), [.latin, .han])
+    func test_expectedScripts_hintWithNoKnownLanguageRestrictsNothing() {
+        XCTAssertEqual(SpokenLanguages.expectedScripts(forHint: ""), Set(WritingScript.allCases))
+        XCTAssertEqual(SpokenLanguages.expectedScripts(forHint: "auto"), Set(WritingScript.allCases))
+    }
+
+    func test_expectedScripts_everyLanguageExpectsEveryNamedScript() {
+        let hint = SpokenLanguages.hint(for: SpokenLanguages.all.map(\.code))
+        XCTAssertEqual(SpokenLanguages.expectedScripts(forHint: hint),
+                       Set(WritingScript.allCases).subtracting([.other]))
     }
 
     // MARK: - Scripts
@@ -137,5 +108,11 @@ final class SpokenLanguagesTests: XCTestCase {
         XCTAssertEqual(SpokenLanguagesSetting.summary(of: ["zh", "en"]), "中文, English")
         XCTAssertEqual(SpokenLanguagesSetting.summary(of: ["zh", "en", "ja", "ko"]), "中文, English +2")
         XCTAssertEqual(SpokenLanguagesSetting.spokenSummary(of: ["zh", "en", "ja"]), "中文, English, 日本語")
+    }
+
+    func test_summary_saysAllLanguagesWhenNothingIsTurnedOff() {
+        let everything = SpokenLanguages.all.map(\.code)
+        XCTAssertEqual(SpokenLanguagesSetting.summary(of: everything), "All languages")
+        XCTAssertEqual(SpokenLanguagesSetting.spokenSummary(of: everything), "All languages")
     }
 }

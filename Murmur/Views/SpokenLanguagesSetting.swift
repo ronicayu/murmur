@@ -12,9 +12,15 @@ struct SpokenLanguagesSetting: View {
         VStack(alignment: .leading, spacing: 4) {
             LabeledContent("Languages you speak") {
                 Menu {
+                    Button("Select All") {
+                        selected = SpokenLanguages.all.map(\.code)
+                        SpokenLanguages.save(selected)
+                    }
+                    .disabled(selected.count == SpokenLanguages.all.count)
+                    Divider()
                     ForEach(SpokenLanguages.all) { language in
                         Toggle(isOn: binding(for: language.code)) {
-                            Text(Self.menuTitle(for: language))
+                            Text(language.name)
                         }
                     }
                 } label: {
@@ -25,8 +31,8 @@ struct SpokenLanguagesSetting: View {
                 .accessibilityValue(Self.spokenSummary(of: selected))
             }
             Text("Murmur recognises the language by itself — there is nothing to switch. "
-                 + "This list tells it which languages to expect, so an odd result can be double-checked. "
-                 + "Chinese and English are tested; other languages may be less accurate.")
+                 + "If you turn off the languages you never speak, a result that comes back "
+                 + "in one of them is double-checked before it is typed.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -56,23 +62,23 @@ struct SpokenLanguagesSetting: View {
         return SpokenLanguages.normalised(Array(codes))
     }
 
-    static func menuTitle(for language: SpokenLanguage) -> String {
-        language.isTested ? language.name : "\(language.name) — not tested"
-    }
-
     private static func names(of codes: [String]) -> [String] {
         SpokenLanguages.all.filter { codes.contains($0.code) }.map(\.name)
     }
 
-    /// Menu button title: up to two names, then a count of the rest.
+    /// Menu button title: "All languages", or up to two names and a count of
+    /// the rest.
     static func summary(of codes: [String]) -> String {
         let names = names(of: codes)
+        if names.count == SpokenLanguages.all.count { return "All languages" }
         guard names.count > 2 else { return names.joined(separator: ", ") }
         return names.prefix(2).joined(separator: ", ") + " +\(names.count - 2)"
     }
 
     /// Every selected language, for VoiceOver.
     static func spokenSummary(of codes: [String]) -> String {
-        names(of: codes).joined(separator: ", ")
+        let names = names(of: codes)
+        if names.count == SpokenLanguages.all.count { return "All languages" }
+        return names.joined(separator: ", ")
     }
 }
