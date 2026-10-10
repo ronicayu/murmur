@@ -196,6 +196,53 @@ final class P1SidebarSearchTests: XCTestCase {
         let result = TranscriptionHistoryFilter.filter(entries, query: "apple")
         XCTAssertEqual(result.map(\.id), [ids[0], ids[2]])
     }
+
+    // MARK: - Multi-field matching (menu-bar Recent window, UAT 041)
+    //
+    // The Recent window searches the injected text AND the pre-correction raw
+    // text, so searching for what you said finds the entry even when the
+    // corrector rewrote it.
+
+    func test_matches_emptyQuery_matchesEverything() {
+        XCTAssertTrue(TranscriptionHistoryFilter.matches(query: "", in: "anything"))
+        XCTAssertTrue(TranscriptionHistoryFilter.matches(query: "  ", in: "anything"))
+    }
+
+    func test_matches_findsTermInPrimaryField() {
+        XCTAssertTrue(TranscriptionHistoryFilter.matches(query: "world", in: "hello world", nil))
+    }
+
+    func test_matches_findsTermInRawTextWhenCorrectorRewroteIt() {
+        // User said "gonna"; the corrector wrote "going to". Searching the
+        // spoken form must still find the entry.
+        XCTAssertTrue(
+            TranscriptionHistoryFilter.matches(
+                query: "gonna",
+                in: "I am going to ship it", "I'm gonna ship it"
+            ),
+            "Searching the raw (spoken) text must match even after correction"
+        )
+    }
+
+    func test_matches_nilRawText_isSkippedNotCrashed() {
+        XCTAssertFalse(TranscriptionHistoryFilter.matches(query: "zzz", in: "hello", nil))
+    }
+
+    func test_matches_isCaseAndDiacriticInsensitive() {
+        XCTAssertTrue(TranscriptionHistoryFilter.matches(query: "CAFE", in: "we met at a café"))
+        XCTAssertTrue(TranscriptionHistoryFilter.matches(query: "café", in: "we met at a CAFE"))
+    }
+
+    func test_matches_cjkSubstring() {
+        XCTAssertTrue(TranscriptionHistoryFilter.matches(query: "对齐", in: "下午三点对齐一下进度"))
+        XCTAssertFalse(TranscriptionHistoryFilter.matches(query: "对齐", in: "完全无关的内容"))
+    }
+
+    func test_matches_noFieldContainsQuery_isFalse() {
+        XCTAssertFalse(
+            TranscriptionHistoryFilter.matches(query: "missing", in: "alpha", "beta")
+        )
+    }
 }
 
 // MARK: - P1-3: .wav upload validation

@@ -31,6 +31,11 @@ struct MurmurApp: App {
         let ts = Qwen3TranscriptionService(modelDirectory: mm.modelDirectory(for: .qwen3))
         let coord = AppCoordinator(transcription: ts)
 
+        // Local-only session metrics: JSON lines in Application Support, so
+        // latency and streaming accuracy are visible while dogfooding.
+        // Nothing leaves the machine.
+        coord.metricsRecorder = SessionMetricsRecorder()
+
         // Silero VAD drives the post-record silence gate and hands-free
         // auto-stop in AudioService — gated by both the user toggle (`useVAD`)
         // and on-disk presence of the model file. ModelManager's init

@@ -168,6 +168,11 @@ final class AppCoordinator: ObservableObject {
 
     private let streamingPreview = StreamingPreviewController()
 
+    /// Local-only session metrics sink. Nil disables recording entirely —
+    /// tests leave it nil so no Application Support file is touched;
+    /// `MurmurApp` wires the real recorder at launch.
+    var metricsRecorder: SessionMetricsRecorder?
+
     /// How often streaming re-transcribes the growing audio window. Qwen3-ASR
     /// handles a full 12 s window in about a second and returns nothing for
     /// silence, so a one-second cadence keeps text a pass or two behind speech.
@@ -605,6 +610,8 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func stopAndTranscribeStreaming() async {
+        // Stop-to-final-text clock starts the moment the user stops speaking.
+        let stopRequestedAt = Date()
         audioLevelTask?.cancel()
         audio.onAutoStop = nil
         // No stop sound: release is user-initiated, already known to the user.
@@ -681,9 +688,13 @@ final class AppCoordinator: ObservableObject {
                 pill.hide(after: 1)
             }
 
+            recordStreamingMetrics(outcome: streamingOutcome(), stopRequestedAt: stopRequestedAt)
         } catch {
             streamingCoordinator?.cancelSession()
             streamingPreview.hide()
+            recordStreamingMetrics(
+                outcome: Self.failureOutcome(for: error), stopRequestedAt: stopRequestedAt
+            )
             handleError(mapError(error))
         }
 
@@ -783,6 +794,7 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func stopAndTranscribeV1() async {
+        let stopRequestedAt = Date()
         audioLevelTask?.cancel()
         audio.onAutoStop = nil
         // No stop sound: release is user-initiated. Success chime on inject
@@ -805,7 +817,22 @@ final class AppCoordinator: ObservableObject {
 
             // Increment V1 usage counter for discovery badge
             V1UsageCounter.increment()
+
+            recordSessionMetrics(SessionMetrics(
+                date: Date(),
+                mode: .v1FullPass,
+                outcome: .injected,
+                language: Self.languageCode(for: result.language) ?? initialLang,
+                stopToFinalTextMs: Self.elapsedMs(since: stopRequestedAt)
+            ))
         } catch {
+            recordSessionMetrics(SessionMetrics(
+                date: Date(),
+                mode: .v1FullPass,
+                outcome: Self.failureOutcome(for: error),
+                language: resolveTranscriptionLanguage(),
+                stopToFinalTextMs: Self.elapsedMs(since: stopRequestedAt)
+            ))
             handleError(mapError(error))
         }
 
@@ -814,6 +841,55 @@ final class AppCoordinator: ObservableObject {
             pendingRecording = false
             await startRecordingFlow()
         }
+    }
+
+    // MARK: - Session metrics
+
+    /// A silence-gated recording is recorded as its own outcome rather than a
+    /// failure: a rising count is the dropped-utterance class of bug.
+    private static func failureOutcome(for error: Error) -> SessionMetrics.Outcome {
+        if case .silenceDetected? = error as? MurmurError { return .silenceGated }
+        return .failed
+    }
+
+    /// Map how the streaming session ended onto a metrics outcome.
+    private func streamingOutcome() -> SessionMetrics.Outcome {
+        switch streamingCoordinator?.cancellationReason {
+        case .focusAbandoned, .backstopTimeout: return .failed
+        case .user: return .cancelled
+        case nil: return .injected
+        }
+    }
+
+    /// Snapshot the streaming coordinator's measurements for this session.
+    /// Must run BEFORE `resetToIdle()` clears them.
+    private func recordStreamingMetrics(outcome: SessionMetrics.Outcome, stopRequestedAt: Date) {
+        let coord = streamingCoordinator
+        recordSessionMetrics(SessionMetrics(
+            date: Date(),
+            mode: .v3Streaming,
+            outcome: outcome,
+            language: resolveTranscriptionLanguage(),
+            stopToFinalTextMs: Self.elapsedMs(since: stopRequestedAt),
+            timeToFirstWordMs: coord?.timeToFirstWordMs,
+            finalizeLatencyMs: coord?.finalizingStartedAt.map(Self.elapsedMs(since:)),
+            editDistanceRatio: coord?.lastEditDistanceRatio,
+            cpuFallback: coord?.didTriggerCPUFallback ?? false,
+            chunkCount: coord?.chunkCount
+        ))
+    }
+
+    /// Persist one session's measurements. Never throws and never blocks the
+    /// dictation flow — metrics are diagnostics, not part of the product path.
+    private func recordSessionMetrics(_ metrics: SessionMetrics) {
+        guard let metricsRecorder else { return }
+        Task.detached(priority: .utility) {
+            metricsRecorder.record(metrics)
+        }
+    }
+
+    static func elapsedMs(since start: Date) -> Int {
+        Int((Date().timeIntervalSince(start) * 1000).rounded())
     }
 
     /// Post-process a finished transcription, insert it at the cursor, record

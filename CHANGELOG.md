@@ -20,6 +20,11 @@ Murmur now runs a single speech model, Qwen3-ASR, and streaming shows a live pre
 - **Settings → Model is one "Speech Model" section** with status, download, re-download and delete. Onboarding downloads the same model (~1 GB instead of ~1.5 GB).
 - **Long files are split at pauses.** File transcription skips silences of 2 s or more and turns them into paragraph breaks, with or without the VAD add-on. The VAD add-on is now used only for the live silence gate and hands-free auto-stop.
 
+### Added
+- **Search in the Recent window.** The menu-bar Recent window has a search field. It matches the inserted text and, when correction changed it, the original transcript too.
+- **Local session metrics.** Each dictation appends one JSON line to `~/Library/Application Support/Murmur/session-metrics.jsonl`: mode, outcome (inserted, silence-gated, cancelled, failed), time from stop to final text, and for streaming the time to the first visible word and how much the streamed text differed from the final pass. Nothing leaves the Mac.
+- **CI runs the test suite** on every pull request and push to `main`.
+
 ### Removed
 - **The Cohere Transcribe ("Standard") and FireRedASR2 engines**, the engine picker, and the "Use FireRed for Chinese" toggle.
 - **The ASR Punctuation add-on** (CT-Transformer). Qwen3-ASR punctuates its own output; the add-on doubled every mark when run on it.
