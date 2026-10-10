@@ -106,13 +106,8 @@ final class AppCoordinator: ObservableObject {
         UserDefaults.standard.bool(forKey: "streamingInputEnabled")
     }
 
-    /// When on (the default), streamed text is shown in a floating bubble and
-    /// only the final text is inserted, once, after recording stops. When off,
-    /// streamed text is typed into the target app as it arrives.
-    private var isStreamingPreviewEnabled: Bool {
-        UserDefaults.standard.object(forKey: "streamingPreviewBubble") as? Bool ?? true
-    }
-
+    /// Shows the streamed text while the user speaks. Only the final text is
+    /// inserted, once, after recording stops.
     private let streamingPreview = StreamingPreviewController()
 
     /// Local-only session metrics sink. Nil disables recording entirely —
@@ -213,8 +208,7 @@ final class AppCoordinator: ObservableObject {
         self.audioFeedback = audioFeedback
         self.pill = pill
         self.streamingCoordinator = StreamingTranscriptionCoordinator(
-            transcription: transcription,
-            injection: injection
+            transcription: transcription
         )
 
         // Defer start to next run loop to ensure StateObject is fully initialized
@@ -512,21 +506,14 @@ final class AppCoordinator: ObservableObject {
 
             try await startAudioCapture()
 
-            // Resolve insertion point before any text is injected (lang already resolved above)
-            let startOffset = resolveCurrentCursorOffset()
-            let targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
             let wavURL = audio.currentRecordingURL ?? FileManager.default.temporaryDirectory
                 .appendingPathComponent("murmur_stream_\(UUID().uuidString).wav")
 
             let acc = streamingCoordinator?.beginSession(
                 language: lang,
-                targetAppPID: targetPID,
-                startOffset: startOffset,
                 fullWavURL: wavURL,
                 incrementalSeconds: Self.streamingPassIntervalSeconds,
-                onPreviewText: isStreamingPreviewEnabled
-                    ? { [weak self] text in self?.streamingPreview.update(text) }
-                    : nil
+                onPreviewText: { [weak self] text in self?.streamingPreview.update(text) }
             )
             streamingAccumulator = acc
 
@@ -572,10 +559,20 @@ final class AppCoordinator: ObservableObject {
 
             // Check how the session ended and show appropriate feedback.
             var outcome = streamingOutcome()
-            if streamingCoordinator?.cancellationReason == nil,
-               let final = streamingCoordinator?.finalResult {
-                // Preview session: nothing has been typed yet. Run the same
-                // post-processing as V1 and insert the final text once.
+            switch streamingCoordinator?.cancellationReason {
+            case .backstopTimeout:
+                handleError(.timeout(operation: "Streaming"))
+            case .user:
+                transition(to: .idle)
+                pill.hide(after: 0.5)
+            case nil:
+                guard let final = streamingCoordinator?.finalResult else {
+                    transition(to: .idle)
+                    pill.hide(after: 1)
+                    break
+                }
+                // Nothing has been typed yet. Run the same post-processing
+                // as V1 and insert the final text once.
                 let language = final.language == .unknown
                     ? Qwen3TranscriptionService.detectLanguage(final.text) : final.language
                 let delivered = try await deliverTranscription(
@@ -589,38 +586,6 @@ final class AppCoordinator: ObservableObject {
                     }
                     outcome = .silenceGated
                 }
-            } else if let reason = streamingCoordinator?.cancellationReason {
-                switch reason {
-                case .focusAbandoned:
-                    // UT-P1: Notify user that session was abandoned due to app switch.
-                    handleError(.sessionAbandoned)
-                case .backstopTimeout:
-                    handleError(.timeout(operation: "Streaming"))
-                case .user:
-                    transition(to: .idle)
-                    pill.hide(after: 0.5)
-                }
-            } else if streamingCoordinator?.didTriggerCPUFallback == true {
-                // UT-P1: Inform user that streaming was paused due to high CPU.
-                // Full-pass still ran, so show result normally but with a note.
-                // Success sound already fired on .finalizing transition (see waitForStreamingDone).
-                if let replacedText = streamingCoordinator?.fullPassReplacedText {
-                    let undoableState = AppState.undoable(text: replacedText, method: .clipboard)
-                    transition(to: undoableState)
-                    pill.show(state: undoableState)
-                    pill.hide(after: 3)
-                } else {
-                    transition(to: .idle)
-                    pill.hide(after: 1)
-                }
-            } else if let replacedText = streamingCoordinator?.fullPassReplacedText {
-                let undoableState = AppState.undoable(text: replacedText, method: .clipboard)
-                transition(to: undoableState)
-                pill.show(state: undoableState)
-                pill.hide(after: 3)
-            } else {
-                transition(to: .idle)
-                pill.hide(after: 1)
             }
 
             recordStreamingMetrics(outcome: outcome, stopRequestedAt: stopRequestedAt)
@@ -646,10 +611,6 @@ final class AppCoordinator: ObservableObject {
             pendingRecording = false
             await startRecordingFlow()
         }
-    }
-
-    private func resolveCurrentCursorOffset() -> Int {
-        resolveAXCursorOffset() ?? 0
     }
 
     // MARK: - V1 Stop & Transcribe (unchanged logic, extracted)
@@ -740,7 +701,7 @@ final class AppCoordinator: ObservableObject {
     /// Map how the streaming session ended onto a metrics outcome.
     private func streamingOutcome() -> SessionMetrics.Outcome {
         switch streamingCoordinator?.cancellationReason {
-        case .focusAbandoned, .backstopTimeout: return .failed
+        case .backstopTimeout: return .failed
         case .user: return .cancelled
         case nil: return .injected
         }

@@ -12,8 +12,6 @@ struct SettingsView: View {
     @AppStorage("launchAtLogin") private var launchAtLogin: Bool = true
     @AppStorage("streamingInputEnabled") private var streamingInputEnabled: Bool = false
     @AppStorage("streamingDiscoveryBadgeDismissed") private var discoveryBadgeDismissed: Bool = false
-    @AppStorage("streamingFocusAbandonSeconds") private var focusAbandonSeconds: Double = 10.0
-    @AppStorage("streamingPreviewBubble") private var streamingPreviewBubble: Bool = true
     @AppStorage("undoAfterTranscription") private var undoAfterTranscription: Bool = false
     @AppStorage("correctTranscription") private var correctTranscription: Bool = false
     @AppStorage("correctionEngine") private var correctionEngine: String = "apple"
@@ -172,37 +170,9 @@ struct SettingsView: View {
                     }
                 }
 
-                if streamingInputEnabled {
-                    LabeledContent("Preview bubble") {
-                        VStack(alignment: .trailing, spacing: 4) {
-                            Toggle("Preview bubble", isOn: $streamingPreviewBubble)
-                                .labelsHidden()
-                                .toggleStyle(.switch)
-                            Text(streamingPreviewBubble
-                                 ? "Text appears in a floating bubble while you speak. The final text is inserted once when you stop."
-                                 : "Text is typed into the app while you speak, then corrected when you stop.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.trailing)
-                        }
-                    }
-                }
-
-                // The focus timeout only applies when text is typed mid-session.
-                if streamingInputEnabled && !streamingPreviewBubble {
-                    LabeledContent("Focus timeout") {
-                        HStack(spacing: 8) {
-                            Slider(value: $focusAbandonSeconds, in: 5...30, step: 5)
-                                .frame(width: 120)
-                                .accessibilityLabel("Focus timeout")
-                                .accessibilityValue("\(Int(focusAbandonSeconds)) seconds")
-                            Text("\(Int(focusAbandonSeconds))s")
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                                .frame(width: 28, alignment: .trailing)
-                        }
-                    }
-                }
+                Text("Text appears in a floating bubble while you speak. The final text is inserted once when you stop.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section {

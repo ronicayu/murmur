@@ -26,6 +26,7 @@
 - **Model checksums are fixed in the app.** The download took the checksums to verify against from the Hugging Face file listing. The app now also holds the checksum of every model file and rejects a listing that disagrees.
 
 ### Removed
+- **Type-as-you-speak streaming.** With the preview bubble off, streaming typed the text into the app while you spoke and corrected it afterwards. That worked only in apps that let Murmur replace text, wrote unconfirmed words into the document, and skipped the correction step. Streaming now always shows the bubble and inserts once. Settings → Experimental no longer has "Preview bubble" and "Focus timeout".
 - Launch no longer writes a manifest for model files that have none. Only a download that passed verification makes a model usable.
 
 ## [0.5.0] — 2026-10-10

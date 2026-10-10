@@ -8,12 +8,10 @@ import AppKit
 // Covers:
 //   1. AudioBufferAccumulator 
 //   2. StreamingTranscriptionCoordinator state machine
-//   3. TextInjectionService streaming extensions (appendText / replaceRange)
 //   4. V1UsageCounter — discovery badge logic
 //   5. Settings streaming toggle — UserDefaults key
 //   6. AppState streaming case — statusText + equality
 //   7. CPULoadMonitor — callback fires on sustained high load (unit-level)
-//   8. InjectedRangeTracker — offset accounting
 //  18. Session identity — one session's late work never reaches another
 
 // MARK: - 1. AudioBufferAccumulator (production file)
@@ -147,15 +145,14 @@ final class StreamingCoordinatorStateMachineTests: XCTestCase {
 
     private var coordinator: StreamingTranscriptionCoordinator!
     private var mockTranscription: MockTranscriptionService!
-    private var mockInjection: MockTextInjectionService!
+    private var preview: PreviewRecorder!
 
     override func setUp() async throws {
         try await super.setUp()
         mockTranscription = MockTranscriptionService()
-        mockInjection = MockTextInjectionService()
+        preview = PreviewRecorder()
         coordinator = await StreamingTranscriptionCoordinator(
-            transcription: mockTranscription,
-            injection: mockInjection
+            transcription: mockTranscription
         )
     }
 
@@ -173,9 +170,8 @@ final class StreamingCoordinatorStateMachineTests: XCTestCase {
             .appendingPathComponent("test_\(UUID().uuidString).wav")
         _ = await coordinator.beginSession(
             language: "en",
-            targetAppPID: getpid(),
-            startOffset: 0,
-            fullWavURL: tempURL
+            fullWavURL: tempURL,
+            onPreviewText: { _ in }
         )
 
         let state = await coordinator.sessionState
@@ -194,9 +190,8 @@ final class StreamingCoordinatorStateMachineTests: XCTestCase {
             .appendingPathComponent("test_\(UUID().uuidString).wav")
         _ = await coordinator.beginSession(
             language: "en",
-            targetAppPID: getpid(),
-            startOffset: 0,
-            fullWavURL: tempURL
+            fullWavURL: tempURL,
+            onPreviewText: { _ in }
         )
 
         await coordinator.cancelSession()
@@ -220,13 +215,11 @@ final class StreamingCoordinatorStateMachineTests: XCTestCase {
             language: .english,
             durationMs: 1000
         )
-        mockInjection.stubbedAppendText = {}
 
         _ = await coordinator.beginSession(
             language: "en",
-            targetAppPID: getpid(),
-            startOffset: 0,
-            fullWavURL: tempURL
+            fullWavURL: tempURL,
+            onPreviewText: { _ in }
         )
         await coordinator.updateFullWavURL(tempURL)
         await coordinator.endSession()
@@ -251,14 +244,14 @@ final class StreamingCoordinatorStateMachineTests: XCTestCase {
             .appendingPathComponent("test_\(UUID().uuidString).wav")
 
         _ = await coordinator.beginSession(
-            language: "en", targetAppPID: getpid(),
-            startOffset: 0, fullWavURL: tempURL
+            language: "en", fullWavURL: tempURL,
+            onPreviewText: { _ in }
         )
 
         // Second call while already streaming must not crash and must return an accumulator
         let acc2 = await coordinator.beginSession(
-            language: "zh", targetAppPID: getpid(),
-            startOffset: 10, fullWavURL: tempURL
+            language: "zh", fullWavURL: tempURL,
+            onPreviewText: { _ in }
         )
         XCTAssertNotNil(acc2)
         let state = await coordinator.sessionState
@@ -279,44 +272,6 @@ final class StreamingCoordinatorStateMachineTests: XCTestCase {
         let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 160)!
         buf.frameLength = 160
         try file.write(from: buf)
-    }
-}
-
-// MARK: - 3. TextInjectionService streaming extensions
-
-final class TextInjectionServiceStreamingTests: XCTestCase {
-
-        // MARK: 3a — appendText with non-empty string records the injection
-
-    func test_appendText_withNonEmptyString_recordsInjection() async throws {
-        let service = MockTextInjectionService()
-        try await service.appendText("hello")
-        XCTAssertEqual(service.appendedTexts, ["hello"],
-            "appendText must record the appended text")
-    }
-
-    // MARK: 3b — appendText with empty string is a no-op
-
-    func test_appendText_withEmptyString_doesNotRecord() async throws {
-        // Use real TextInjectionService; empty guard is in the implementation.
-        // We verify via mock that the call path is silent.
-        let service = MockTextInjectionService()
-        try await service.appendText("")
-        XCTAssertTrue(service.appendedTexts.isEmpty,
-            "appendText with empty string must not record")
-    }
-
-    // MARK: 3c — replaceRange with length=0 calls appendText
-
-    func test_replaceRange_withZeroLength_callsAppendText() async throws {
-        let service = MockTextInjectionService()
-        try await service.replaceRange(start: 5, length: 0, with: "world")
-        // MockTextInjectionService.replaceRange records directly; zero-length delegates to appendText.
-        // Real implementation: zero-length → appendText path. Mock records to replaceRangeCalls.
-        // We verify the mock records at all to confirm routing.
-        XCTAssertFalse(service.replaceRangeCalls.isEmpty,
-            "replaceRange call must be recorded")
-        XCTAssertEqual(service.replaceRangeCalls.first?.text, "world")
     }
 }
 
@@ -450,33 +405,6 @@ final class AppStateStreamingTests: XCTestCase {
 
     func test_streamingState_isNotEqualToRecording() {
         XCTAssertNotEqual(AppState.streaming(chunkCount: 0), AppState.recording)
-    }
-}
-
-// MARK: - 7. InjectedRangeTracker
-
-final class InjectedRangeTrackerTests: XCTestCase {
-
-    func test_tracker_initialRange_hasZeroLength() {
-        let tracker = InjectedRangeTracker(startOffset: 42)
-        XCTAssertEqual(tracker.axRange.location, 42)
-        XCTAssertEqual(tracker.axRange.length, 0)
-    }
-
-    func test_tracker_recordInjection_accumulatesLength() {
-        var tracker = InjectedRangeTracker(startOffset: 10)
-        tracker.recordInjection(length: 5)
-        tracker.recordInjection(length: 7)
-        XCTAssertEqual(tracker.totalLength, 12)
-        XCTAssertEqual(tracker.axRange.location, 10)
-        XCTAssertEqual(tracker.axRange.length, 12)
-    }
-
-    func test_tracker_startOffset_isPreserved() {
-        var tracker = InjectedRangeTracker(startOffset: 100)
-        tracker.recordInjection(length: 20)
-        XCTAssertEqual(tracker.startOffset, 100,
-            "startOffset must never change after construction")
     }
 }
 
@@ -640,23 +568,20 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
 
     private var coordinator: StreamingTranscriptionCoordinator!
     private var mockTranscription: MockTranscriptionService!
-    private var mockInjection: MockTextInjectionService!
+    private var preview: PreviewRecorder!
 
     override func setUp() async throws {
         try await super.setUp()
         mockTranscription = MockTranscriptionService()
-        mockInjection = MockTextInjectionService()
+        preview = PreviewRecorder()
         coordinator = await StreamingTranscriptionCoordinator(
-            transcription: mockTranscription,
-            injection: mockInjection,
-            // No real cursor to read: the mock injection types nothing.
-            cursorOffsetProvider: { nil }
+            transcription: mockTranscription
         )
     }
 
-    // MARK: 9a — Normal 2-chunk session: chunks injected + full-pass replaces when different
+    // MARK: 9a — Normal 2-chunk session: the full-pass text is the final result
 
-    func test_pipeline_twoChunkSession_fullPassReplaces_whenTextDiffers() async throws {
+    func test_pipeline_twoChunkSession_fullPassTextIsTheFinalResult() async throws {
         // Arrange: streaming passes over the growing window mis-hear one word;
         // the full pass over the complete recording gets it right. The mock
         // tells the two apart by URL — the full pass reads the session's WAV,
@@ -680,10 +605,9 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
         // Act: begin session and simulate two chunk completions via the accumulator
         let accumulator = await coordinator.beginSession(
             language: "en",
-            targetAppPID: getpid(),
-            startOffset: 0,
             fullWavURL: wavURL,
-            incrementalSeconds: 3.0
+            incrementalSeconds: 3.0,
+            onPreviewText: { [preview] in preview?.record($0) }
         )
 
         // Feed enough samples to trigger two chunks
@@ -709,25 +633,21 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
         XCTAssertEqual(finalState, .done,
             "Pipeline must reach .done after endSession + full-pass")
 
-        // Assert: full-pass replace was attempted (mocked injection recorded the call)
-        // The full-pass text differs from streaming, so replaceRange should be called.
-        XCTAssertFalse(
-            mockInjection.replaceRangeCalls.isEmpty,
-            "replaceRange must be called when full-pass differs from streaming chunks"
-        )
-        XCTAssertEqual(
-            mockInjection.replaceRangeCalls.first?.text,
-            "hello world how are you",
-            "replaceRange must use the full-pass transcript"
-        )
+        // Assert: the full-pass text is what the owner gets, and the preview
+        // ends on it.
+        let finalText = await coordinator.finalResult?.text
+        XCTAssertEqual(finalText, "hello world how are you")
+        XCTAssertEqual(preview.latest, "hello world how are you")
+        XCTAssertTrue(preview.texts.contains { $0.contains("wurld") },
+            "Precondition: the streamed text differed from the full pass")
     }
 
-    // MARK: 9a-2 — Stable prefix: a one-pass hallucination is never injected
+    // MARK: 9a-2 — Stable prefix: a one-pass hallucination is never shown
 
     func test_pipeline_stablePrefix_suppressesOnePassHallucination() async throws {
         // Growing-window hypotheses: pass 1 carries a phantom English tail ("thank you")
         // on what is really Chinese speech; pass 2 disagrees, so it must never reach the
-        // cursor. Only text two consecutive passes agree on is injected.
+        // preview. Only text two consecutive passes agree on is shown.
         // Thread-safe call counter — onTranscribe may be invoked from detached tasks.
         let lock = NSLock()
         var call = 0
@@ -748,8 +668,9 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: wavURL) }
 
         let acc = await coordinator.beginSession(
-            language: "zh", targetAppPID: getpid(), startOffset: 0, fullWavURL: wavURL,
-            incrementalSeconds: 3.0)
+            language: "zh", fullWavURL: wavURL,
+            incrementalSeconds: 3.0,
+            onPreviewText: { [preview] in preview?.record($0) })
 
         func feedOneChunk() async throws {
             acc.append(makeAudibleBuffer(seconds: 3.0))
@@ -760,71 +681,19 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
         try await feedOneChunk()   // pass 2 -> confirms "你好"
         try await feedOneChunk()   // pass 3 -> confirms "现在"
 
-        // Poll until the confirmed prefix lands (inject hops through extra Tasks).
+        // Poll until the confirmed prefix lands.
         let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline, !mockInjection.appendedTexts.joined().contains("现在") {
+        while Date() < deadline, !preview.latest.contains("现在") {
             try await Task.sleep(for: .milliseconds(50))
         }
 
-        let streamed = mockInjection.appendedTexts.joined()
+        let streamed = preview.latest
         XCTAssertFalse(streamed.lowercased().contains("thank"),
-                       "one-pass hallucination must never reach the cursor; got: '\(streamed)'")
+                       "one-pass hallucination must never reach the preview; got: '\(streamed)'")
         XCTAssertTrue(streamed.contains("你好"),
-                      "confirmed prefix should be injected; got: '\(streamed)'")
+                      "confirmed prefix should be shown; got: '\(streamed)'")
         XCTAssertTrue(streamed.contains("现在"),
-                      "second confirmed token should be injected; got: '\(streamed)'")
-    }
-
-    // MARK: 9b — Tracker invalidated mid-session: full-pass skips replacement
-
-    func test_pipeline_trackerInvalidated_skipsFullPassReplacement() async throws {
-        // Arrange: window passes return one text; the full pass (told apart by
-        // its URL) returns another, which would normally replace it.
-        // But we simulate cursor movement by invalidating the tracker directly.
-        let wavURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("test_invalidated_\(UUID().uuidString).wav")
-        try createMinimalWAV(at: wavURL)
-        defer { try? FileManager.default.removeItem(at: wavURL) }
-
-        mockTranscription.onTranscribe = { url in
-            let text = url == wavURL ? "full pass result different" : "streaming chunk"
-            return TranscriptionResult(text: text, language: .english, durationMs: 500)
-        }
-
-        let accumulator = await coordinator.beginSession(
-            language: "en",
-            targetAppPID: getpid(),
-            startOffset: 0,
-            fullWavURL: wavURL,
-            incrementalSeconds: 3.0
-        )
-
-        // Feed one chunk worth of audio
-        accumulator.append(makeAudibleBuffer(seconds: 3.0))
-        try await Task.sleep(for: .milliseconds(200))
-
-        // Simulate cursor moved mid-session: invalidate the tracker
-        await coordinator.simulateTrackerInvalidation()
-
-        await coordinator.updateFullWavURL(wavURL)
-        await coordinator.endSession()
-
-        // Wait for done
-        let deadline = Date().addingTimeInterval(5)
-        var finalState = await coordinator.sessionState
-        while Date() < deadline {
-            finalState = await coordinator.sessionState
-            if case .done = finalState { break }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-
-        XCTAssertEqual(finalState, .done)
-        XCTAssertEqual(mockInjection.appendedTexts.joined(), "streaming chunk",
-            "Precondition: text was streamed, so only the invalidation stops the replacement")
-        XCTAssertTrue(
-            mockInjection.replaceRangeCalls.isEmpty,
-            "replaceRange must NOT be called when tracker is invalidated (cursor moved mid-session)"
-        )
+                      "second confirmed token should be shown; got: '\(streamed)'")
     }
 
     // MARK: - Private helpers
@@ -838,71 +707,6 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
         let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 160)!
         buf.frameLength = 160
         try file.write(from: buf)
-    }
-}
-
-// MARK: - 10. InjectedRangeTracker — extended edge cases
-
-final class InjectedRangeTrackerEdgeCaseTests: XCTestCase {
-
-    // MARK: 10a — invalidate sets flag; subsequent recordInjection still updates length
-
-    func test_tracker_invalidate_setsFlag() {
-        var tracker = InjectedRangeTracker(startOffset: 0)
-        XCTAssertFalse(tracker.invalidated, "Tracker must not be invalidated on construction")
-        tracker.invalidate()
-        XCTAssertTrue(tracker.invalidated, "invalidate() must set the invalidated flag")
-    }
-
-    // MARK: 10b — invalidate is idempotent
-
-    func test_tracker_invalidate_isIdempotent() {
-        var tracker = InjectedRangeTracker(startOffset: 0)
-        tracker.invalidate()
-        tracker.invalidate()
-        XCTAssertTrue(tracker.invalidated,
-            "Calling invalidate() twice must leave flag as true (not toggle)")
-    }
-
-    // MARK: 10c — expectedNextOffset reflects accumulated length
-
-    func test_tracker_expectedNextOffset_equalStartPlusLength() {
-        var tracker = InjectedRangeTracker(startOffset: 20)
-        tracker.recordInjection(length: 10)
-        tracker.recordInjection(length: 5)
-        XCTAssertEqual(tracker.expectedNextOffset, 35,
-            "expectedNextOffset must equal startOffset + totalLength")
-    }
-
-    // MARK: 10d — expectedNextOffset with zero injections equals startOffset
-
-    func test_tracker_expectedNextOffset_withNoInjections_equalsStartOffset() {
-        let tracker = InjectedRangeTracker(startOffset: 77)
-        XCTAssertEqual(tracker.expectedNextOffset, 77,
-            "expectedNextOffset with no injections must equal startOffset")
-    }
-
-    // MARK: 10e — axRange reflects correct location and length after invalidation
-
-    func test_tracker_axRange_stillReportsCorrectRange_afterInvalidation() {
-        // Invalidation does not alter the range values themselves;
-        // callers check tracker.invalidated separately to decide whether to use the range.
-        var tracker = InjectedRangeTracker(startOffset: 5)
-        tracker.recordInjection(length: 8)
-        tracker.invalidate()
-        XCTAssertEqual(tracker.axRange.location, 5,
-            "axRange.location must be unchanged after invalidation")
-        XCTAssertEqual(tracker.axRange.length, 8,
-            "axRange.length must be unchanged after invalidation")
-    }
-
-    // MARK: 10f — recordInjection with zero length is a no-op
-
-    func test_tracker_recordInjection_withZeroLength_isNoOp() {
-        var tracker = InjectedRangeTracker(startOffset: 10)
-        tracker.recordInjection(length: 0)
-        XCTAssertEqual(tracker.totalLength, 0,
-            "recordInjection(length: 0) must not change totalLength")
     }
 }
 
@@ -968,15 +772,14 @@ final class StreamingCoordinatorExtendedStateMachineTests: XCTestCase {
 
     private var coordinator: StreamingTranscriptionCoordinator!
     private var mockTranscription: MockTranscriptionService!
-    private var mockInjection: MockTextInjectionService!
+    private var preview: PreviewRecorder!
 
     override func setUp() async throws {
         try await super.setUp()
         mockTranscription = MockTranscriptionService()
-        mockInjection = MockTextInjectionService()
+        preview = PreviewRecorder()
         coordinator = await StreamingTranscriptionCoordinator(
-            transcription: mockTranscription,
-            injection: mockInjection
+            transcription: mockTranscription
         )
     }
 
@@ -1009,8 +812,8 @@ final class StreamingCoordinatorExtendedStateMachineTests: XCTestCase {
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("test_\(UUID().uuidString).wav")
         _ = await coordinator.beginSession(
-            language: "en", targetAppPID: getpid(),
-            startOffset: 0, fullWavURL: tempURL
+            language: "en", fullWavURL: tempURL,
+            onPreviewText: { _ in }
         )
         await coordinator.cancelSession()
         await coordinator.cancelSession()
@@ -1026,62 +829,15 @@ final class StreamingCoordinatorExtendedStateMachineTests: XCTestCase {
         XCTAssertFalse(flag, "CPU fallback flag must be false before any session")
     }
 
-    // MARK: 12e — full-pass skipped when text is identical (edit distance = 0)
+    // MARK: 12f — full-pass timeout path: transitions to done
 
-    func test_coordinator_fullPass_doesNotReplace_whenTextIdentical() async throws {
-        let sameText = "hello world"
-        var callCount = 0
-        mockTranscription.onTranscribe = { _ in
-            callCount += 1
-            return TranscriptionResult(text: sameText, language: .english, durationMs: 500)
-        }
-
-        let wavURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("test_identical_\(UUID().uuidString).wav")
-        try createMinimalWAV(at: wavURL)
-        defer { try? FileManager.default.removeItem(at: wavURL) }
-
-        let accumulator = await coordinator.beginSession(
-            language: "en",
-            targetAppPID: getpid(),
-            startOffset: 0,
-            fullWavURL: wavURL,
-            incrementalSeconds: 3.0
-        )
-
-        // Feed one full chunk to trigger a streaming transcription (returns sameText)
-        accumulator.append(makeAudibleBuffer(seconds: 3.0))
-        try await Task.sleep(for: .milliseconds(200))
-
-        // Full-pass will also return sameText — no replacement needed
-        await coordinator.updateFullWavURL(wavURL)
-        await coordinator.endSession()
-
-        let deadline = Date().addingTimeInterval(5)
-        var finalState = await coordinator.sessionState
-        while Date() < deadline {
-            finalState = await coordinator.sessionState
-            if case .done = finalState { break }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-
-        XCTAssertEqual(finalState, .done)
-        XCTAssertTrue(
-            mockInjection.replaceRangeCalls.isEmpty,
-            "replaceRange must NOT be called when full-pass text matches streaming text"
-        )
-    }
-
-    // MARK: 12f — full-pass timeout path: transitions to done without replacement
-
-    func test_coordinator_fullPassTimeout_transitionsToDone_withoutReplacement() async throws {
+    func test_coordinator_fullPassTimeout_transitionsToDone() async throws {
         // The full pass never returns during the test and, like the real
         // decode, cannot be cancelled: the timeout must not wait for it.
         let stuckTranscription = GatedTranscriptionService()
         defer { stuckTranscription.releaseAll() }
         let fastCoordinator = await StreamingTranscriptionCoordinator(
             transcription: stuckTranscription,
-            injection: mockInjection,
             fullPassTimeoutOverride: 0.2   // 200ms — fast timeout for test
         )
 
@@ -1092,9 +848,8 @@ final class StreamingCoordinatorExtendedStateMachineTests: XCTestCase {
 
         _ = await fastCoordinator.beginSession(
             language: "en",
-            targetAppPID: getpid(),
-            startOffset: 0,
-            fullWavURL: wavURL
+            fullWavURL: wavURL,
+            onPreviewText: { _ in }
         )
         await fastCoordinator.updateFullWavURL(wavURL)
         await fastCoordinator.endSession()
@@ -1105,10 +860,8 @@ final class StreamingCoordinatorExtendedStateMachineTests: XCTestCase {
             "Coordinator must reach .done when the full pass times out, without waiting for the decode")
         XCTAssertEqual(stuckTranscription.finishedCount, 0,
             "Precondition: the decode is still running when the session is done")
-        XCTAssertTrue(
-            mockInjection.replaceRangeCalls.isEmpty,
-            "replaceRange must NOT be called when full-pass timed out"
-        )
+        let failed = await fastCoordinator.fullPassFailed
+        XCTAssertTrue(failed, "The owner must be able to tell that the full pass did not finish")
     }
 
     // MARK: 12g — full-pass not run when fullWavURL is nil
@@ -1128,9 +881,8 @@ final class StreamingCoordinatorExtendedStateMachineTests: XCTestCase {
 
         _ = await coordinator.beginSession(
             language: "en",
-            targetAppPID: getpid(),
-            startOffset: 0,
-            fullWavURL: nonexistentURL
+            fullWavURL: nonexistentURL,
+            onPreviewText: { _ in }
         )
         // Do not feed any audio — no chunks, no streaming text
         await coordinator.endSession()
@@ -1143,19 +895,8 @@ final class StreamingCoordinatorExtendedStateMachineTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(50))
         }
 
-        // With no streaming chunks (streamingChunks is empty), full-pass comparison
-        // yields editDistance > 0.01 but totalLength == 0, so replacement is skipped.
         XCTAssertEqual(finalState, .done,
             "Coordinator must always reach .done even with no prior streaming chunks")
-    }
-
-    // MARK: 12h — simulateTrackerInvalidation while idle does not crash
-
-    func test_coordinator_simulateTrackerInvalidation_whileIdle_doesNotCrash() async {
-        // rangeTracker is nil before beginSession; invalidate() on nil is a no-op (optional chaining)
-        await coordinator.simulateTrackerInvalidation()
-        let state = await coordinator.sessionState
-        XCTAssertEqual(state, .idle, "Simulating tracker invalidation while idle must not crash or change state")
     }
 
     // MARK: - Private helpers
@@ -1170,139 +911,6 @@ final class StreamingCoordinatorExtendedStateMachineTests: XCTestCase {
         buf.frameLength = 160
         try file.write(from: buf)
     }
-}
-
-// MARK: - 13. FocusGuard — unit tests (notification-driven logic)
-
-final class FocusGuardTests: XCTestCase {
-
-    // MARK: 13a — secondsSinceFocusLost returns nil before any activation
-
-    func test_focusGuard_secondsSinceFocusLost_nilBeforeAnyEvent() {
-        let guard_ = FocusGuard(targetAppPID: getpid())
-        XCTAssertNil(guard_.secondsSinceFocusLost,
-            "secondsSinceFocusLost must be nil when focus has not been lost")
-    }
-
-    // MARK: 13b — stop clears focusLostAt so secondsSinceFocusLost becomes nil
-
-    func test_focusGuard_stop_clearsFocusTimer() {
-        let guard_ = FocusGuard(targetAppPID: getpid())
-        guard_.start()
-        // Inject a "focus left" by posting a fake didActivateApplication notification
-        // with a different PID so the guard believes focus left.
-        postFakeActivation(pid: getpid() + 9999, to: guard_)
-        XCTAssertNotNil(guard_.secondsSinceFocusLost,
-            "Precondition: guard should record focus loss after other-app activation")
-        guard_.stop()
-        XCTAssertNil(guard_.secondsSinceFocusLost,
-            "stop() must clear the focusLostAt timer")
-    }
-
-    // MARK: 13c — focusReturned event fires after focus-left then target-app activation
-
-    func test_focusGuard_onEvent_firesReturnedAfterLeft() {
-        let guard_ = FocusGuard(targetAppPID: getpid())
-        guard_.start()
-        defer { guard_.stop() }
-
-        var events: [FocusGuard.Event] = []
-        guard_.onEvent = { events.append($0) }
-
-        // Step 1: focus leaves (other app activated)
-        postFakeActivation(pid: getpid() + 9999, to: guard_)
-        // Step 2: focus returns (our app activated)
-        postFakeActivation(pid: getpid(), to: guard_)
-
-        XCTAssertEqual(events.count, 2,
-            "Two events must fire: focusLeft then focusReturned")
-        if case .focusLeft = events.first { /* pass */ } else {
-            XCTFail("First event must be .focusLeft, got \(String(describing: events.first))")
-        }
-        if case .focusReturned = events.last { /* pass */ } else {
-            XCTFail("Second event must be .focusReturned, got \(String(describing: events.last))")
-        }
-    }
-
-    // MARK: 13d — double focus-left (two consecutive other-app activations) fires only once
-
-    func test_focusGuard_doubleFocusLeft_firesOnlyOnce() {
-        let guard_ = FocusGuard(targetAppPID: getpid())
-        guard_.start()
-        defer { guard_.stop() }
-
-        var focusLeftCount = 0
-        guard_.onEvent = { event in
-            if case .focusLeft = event { focusLeftCount += 1 }
-        }
-
-        // Activate two different "other" apps in sequence — guard must only fire once
-        postFakeActivation(pid: getpid() + 1111, to: guard_)
-        postFakeActivation(pid: getpid() + 2222, to: guard_)
-
-        XCTAssertEqual(focusLeftCount, 1,
-            "focusLeft must fire only once for consecutive other-app activations")
-    }
-
-    // MARK: 13e — focusReturned without prior focusLeft fires no event
-
-    func test_focusGuard_focusReturnedWithoutPriorLoss_firesNoEvent() {
-        let guard_ = FocusGuard(targetAppPID: getpid())
-        guard_.start()
-        defer { guard_.stop() }
-
-        var eventCount = 0
-        guard_.onEvent = { _ in eventCount += 1 }
-
-        // Activate target app without first losing focus
-        postFakeActivation(pid: getpid(), to: guard_)
-
-        XCTAssertEqual(eventCount, 0,
-            "focusReturned must not fire when focus was never lost")
-    }
-
-    // MARK: - Private helpers
-
-    /// Simulate NSWorkspace.didActivateApplicationNotification for a given PID.
-    /// We synthesise a fake NSRunningApplication-like object via a mock,
-    /// but since NSRunningApplication is not easily mock-able, we invoke
-    /// the notification directly using a real running app (self process).
-    private func postFakeActivation(pid: pid_t, to guard_: FocusGuard) {
-        // Resolve a running app for the given PID if available; fall back to current app
-        // with PID substituted via a subclass trick.
-        let app: NSRunningApplication
-        if let real = NSRunningApplication(processIdentifier: pid) {
-            app = real
-        } else {
-            // No real app at that PID — use a FakeRunningApp stand-in
-            app = FakeRunningApp(fakePID: pid)
-        }
-        NSWorkspace.shared.notificationCenter.post(
-            name: NSWorkspace.didActivateApplicationNotification,
-            object: NSWorkspace.shared,
-            userInfo: [NSWorkspace.applicationUserInfoKey: app]
-        )
-    }
-}
-
-// MARK: - Helper: FakeRunningApp
-
-/// Minimal NSRunningApplication subclass that overrides processIdentifier for testing.
-///
-/// NSRunningApplication is documented as not subclassable, but in practice
-/// `processIdentifier` is overridable via @objc override for test purposes.
-/// If the override is not honoured (strict runtime enforcement), the test
-/// falls back gracefully — see 13d/13e where the exact PID matching drives behaviour.
-private final class FakeRunningApp: NSRunningApplication {
-    private let _pid: pid_t
-    init(fakePID: pid_t) {
-        self._pid = fakePID
-        // Designated init of NSRunningApplication takes a bundle URL; we skip it
-        // by calling the no-arg NSObject init instead. This is test-only.
-        super.init()
-    }
-    required init?(coder: NSCoder) { fatalError("not used in tests") }
-    override var processIdentifier: pid_t { _pid }
 }
 
 // MARK: - 14. CPULoadMonitor — edge cases
@@ -1345,100 +953,6 @@ final class CPULoadMonitorEdgeCaseTests: XCTestCase {
         await MainActor.run { monitor.stop() }
         XCTAssertTrue(firedSecond,
             "Second start cycle must fire again after a prior stop")
-    }
-}
-
-// MARK: - 15. TextInjectionService — Electron blocklist (via mock + real service logic)
-
-final class ElectronBlocklistTests: XCTestCase {
-
-    // MARK: 15a — known Electron bundle IDs are blocked
-    //
-    // We test the blocklist lookup logic by exercising the bundle-ID prefix matching
-    // in isolation through a testable subclass hook.
-
-    func test_bundleIDPrefixMatch_vsCode_isBlocked() {
-        XCTAssertTrue(
-            bundleIDIsIncompatible("com.microsoft.VSCode"),
-            "VSCode must be in the incompatible blocklist"
-        )
-    }
-
-    func test_bundleIDPrefixMatch_obsidian_isBlocked() {
-        XCTAssertTrue(
-            bundleIDIsIncompatible("md.obsidian"),
-            "Obsidian must be in the incompatible blocklist"
-        )
-    }
-
-    func test_bundleIDPrefixMatch_slack_isBlocked() {
-        XCTAssertTrue(
-            bundleIDIsIncompatible("com.slack.Slack"),
-            "Slack must be in the incompatible blocklist"
-        )
-    }
-
-    func test_bundleIDPrefixMatch_discord_isBlocked() {
-        XCTAssertTrue(
-            bundleIDIsIncompatible("com.discord.DiscordApp"),
-            "Discord (prefix com.discord) must be in the incompatible blocklist"
-        )
-    }
-
-    func test_bundleIDPrefixMatch_todesktop_isBlocked() {
-        XCTAssertTrue(
-            bundleIDIsIncompatible("com.todesktop.someElectronApp"),
-            "com.todesktop.* prefix must be in the incompatible blocklist"
-        )
-    }
-
-    func test_bundleIDPrefixMatch_figma_isBlocked() {
-        XCTAssertTrue(
-            bundleIDIsIncompatible("com.figma.desktop"),
-            "Figma must be in the incompatible blocklist"
-        )
-    }
-
-    // MARK: 15b — non-Electron apps are allowed
-
-    func test_bundleIDPrefixMatch_safari_isAllowed() {
-        XCTAssertFalse(
-            bundleIDIsIncompatible("com.apple.Safari"),
-            "Safari must NOT be in the incompatible blocklist"
-        )
-    }
-
-    func test_bundleIDPrefixMatch_xcode_isAllowed() {
-        XCTAssertFalse(
-            bundleIDIsIncompatible("com.apple.dt.Xcode"),
-            "Xcode must NOT be in the incompatible blocklist"
-        )
-    }
-
-    func test_bundleIDPrefixMatch_emptyBundleID_isAllowed() {
-        XCTAssertFalse(
-            bundleIDIsIncompatible(""),
-            "Empty bundle ID must not match any blocked prefix"
-        )
-    }
-
-    // MARK: - Private helper: mirrors isFrontmostAppIncompatibleWithAXReplace logic
-
-    private func bundleIDIsIncompatible(_ bundleID: String) -> Bool {
-        let incompatibleBundleIDPrefixes: [String] = [
-            "com.microsoft.VSCode",
-            "md.obsidian",
-            "com.todesktop.",
-            "com.github.GitHubDesktop",
-            "com.figma.desktop",
-            "com.slack.Slack",
-            "com.tinyspeck.slackmacgap",
-            "com.discord",
-        ]
-        for prefix in incompatibleBundleIDPrefixes {
-            if bundleID.hasPrefix(prefix) { return true }
-        }
-        return false
     }
 }
 
@@ -1668,12 +1182,10 @@ final class AudioBufferAccumulatorEdgeCaseTests: XCTestCase {
 @MainActor
 final class StreamingCoordinatorSessionIdentityTests: XCTestCase {
 
-    private var injection: MockTextInjectionService!
     private var wavURL: URL!
 
     override func setUp() async throws {
         try await super.setUp()
-        injection = MockTextInjectionService()
         wavURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("test_session_\(UUID().uuidString).wav")
         try makeAudibleWAV(at: wavURL)
@@ -1690,20 +1202,17 @@ final class StreamingCoordinatorSessionIdentityTests: XCTestCase {
     ) -> StreamingTranscriptionCoordinator {
         StreamingTranscriptionCoordinator(
             transcription: transcription,
-            injection: injection,
-            fullPassTimeoutOverride: fullPassTimeout,
-            // No real cursor to read: the mock injection types nothing.
-            cursorOffsetProvider: { nil }
+            fullPassTimeoutOverride: fullPassTimeout
         )
     }
 
     private func begin(
         _ coordinator: StreamingTranscriptionCoordinator,
         incrementalSeconds: Double = 1.0,
-        onPreviewText: ((String) -> Void)? = nil
+        onPreviewText: @escaping (String) -> Void = { _ in }
     ) -> AudioBufferAccumulator {
         coordinator.beginSession(
-            language: "en", targetAppPID: getpid(), startOffset: 0, fullWavURL: wavURL,
+            language: "en", fullWavURL: wavURL,
             incrementalSeconds: incrementalSeconds, onPreviewText: onPreviewText
         )
     }
@@ -1781,7 +1290,6 @@ final class StreamingCoordinatorSessionIdentityTests: XCTestCase {
         XCTAssertEqual(coordinator.sessionState, .idle)
         XCTAssertNil(coordinator.finalResult)
         XCTAssertNil(coordinator.finalizingStartedAt)
-        XCTAssertNil(coordinator.fullPassReplacedText)
         XCTAssertNil(coordinator.cancellationReason)
         XCTAssertNil(coordinator.sessionStartedAt)
     }
@@ -1811,7 +1319,7 @@ final class StreamingCoordinatorSessionIdentityTests: XCTestCase {
         XCTAssertEqual(gate.finishedCount, 0)
     }
 
-    func test_previewSession_fullPassTimeout_endsWithTheStreamedText() async throws {
+    func test_fullPassTimeout_endsWithTheStreamedText() async throws {
         let transcription = GatedTranscriptionService()
         defer { transcription.releaseAll() }
         transcription.textForCall = { _ in "hello world" }
@@ -1909,7 +1417,8 @@ final class StreamingCoordinatorSessionIdentityTests: XCTestCase {
         coordinator.cancelSession()
         coordinator.resetToIdle()
 
-        let second = begin(coordinator)
+        var previews: [String] = []
+        let second = begin(coordinator, onPreviewText: { previews.append($0) })
         second.append(makeAudibleBuffer(seconds: 1.0))
         let secondPassStarted = await pollUntil { transcription.startedCount == 2 }
         XCTAssertTrue(secondPassStarted, "A pass left over from the last session must not hold this one up")
@@ -1923,7 +1432,7 @@ final class StreamingCoordinatorSessionIdentityTests: XCTestCase {
         try await letQueuedWorkRun()
 
         XCTAssertEqual(coordinator.chunkCount, 0)
-        XCTAssertTrue(injection.appendedTexts.isEmpty,
+        XCTAssertTrue(previews.isEmpty,
             "Nothing is confirmed after a single pass of the new session")
     }
 
@@ -1956,7 +1465,7 @@ final class StreamingCoordinatorSessionIdentityTests: XCTestCase {
 
     // MARK: 18e — stopping starts no pass whose result is thrown away (S7)
 
-    func test_endSession_preview_transcribesOnlyTheFullRecording() async {
+    func test_endSession_transcribesOnlyTheFullRecording() async {
         let transcription = MockTranscriptionService()
         let windowPasses = LockedCounter()
         let fullURL = wavURL!
@@ -1976,26 +1485,6 @@ final class StreamingCoordinatorSessionIdentityTests: XCTestCase {
         XCTAssertEqual(coordinator.finalResult?.text, "full text")
         XCTAssertEqual(windowPasses.value, 0,
             "The tail must not get a window pass of its own in front of the full pass")
-    }
-
-    func test_endSession_typing_transcribesTheTailOnce_andTypesIt() async {
-        let transcription = MockTranscriptionService()
-        let windowPasses = LockedCounter()
-        let fullURL = wavURL!
-        transcription.onTranscribe = { url in
-            if url != fullURL { windowPasses.increment() }
-            return TranscriptionResult(text: "tail words", language: .english, durationMs: 1)
-        }
-        let coordinator = makeCoordinator(transcription)
-
-        let accumulator = begin(coordinator)
-        accumulator.append(makeAudibleBuffer(seconds: 0.5))
-        coordinator.endSession()
-        let done = await pollUntil(timeout: 5) { coordinator.sessionState == .done }
-
-        XCTAssertTrue(done)
-        XCTAssertEqual(windowPasses.value, 1, "The final window is transcribed once, not twice")
-        XCTAssertEqual(injection.appendedTexts.joined(), "tail words")
     }
 }
 
