@@ -548,22 +548,25 @@ final class StreamingPipelineIntegrationTests: XCTestCase {
     // MARK: 9a — Normal 2-chunk session: chunks injected + full-pass replaces when different
 
     func test_pipeline_twoChunkSession_fullPassReplaces_whenTextDiffers() async throws {
-        // Arrange: chunk transcriptions return two chunks; full-pass returns a cleaner version.
-        var transcribeCallURLs: [URL] = []
-        mockTranscription.onTranscribe = { url in
-            transcribeCallURLs.append(url)
-            // First two calls are chunk transcriptions; third is full-pass.
-            switch transcribeCallURLs.count {
-            case 1: return TranscriptionResult(text: "hello wurld", language: .english, durationMs: 500)
-            case 2: return TranscriptionResult(text: "how are you", language: .english, durationMs: 500)
-            default: return TranscriptionResult(text: "hello world how are you", language: .english, durationMs: 1000)
-            }
-        }
-
+        // Arrange: streaming passes over the growing window mis-hear one word;
+        // the full pass over the complete recording gets it right. The mock
+        // tells the two apart by URL — the full pass reads the session's WAV,
+        // window passes read temp files — not by call order, which depends on
+        // how many window passes the coordinator chooses to run.
         let wavURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("test_integration_\(UUID().uuidString).wav")
         try createMinimalWAV(at: wavURL)
         defer { try? FileManager.default.removeItem(at: wavURL) }
+
+        let windowPasses = LockedCounter()
+        mockTranscription.onTranscribe = { url in
+            if url == wavURL {
+                return TranscriptionResult(text: "hello world how are you", language: .english, durationMs: 1000)
+            }
+            windowPasses.increment()
+            let text = windowPasses.value == 1 ? "hello wurld" : "hello wurld how are you"
+            return TranscriptionResult(text: text, language: .english, durationMs: 500)
+        }
 
         // Act: begin session and simulate two chunk completions via the accumulator
         let accumulator = await coordinator.beginSession(

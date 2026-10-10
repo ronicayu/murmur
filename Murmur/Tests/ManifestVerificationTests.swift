@@ -90,16 +90,17 @@ final class ManifestBuildAndValidationTests: XCTestCase {
     }
 
     func test_buildManifest_includesFilesInSubdirectories() throws {
-        // Arrange — plant a file nested under onnx/
-        let onnxSub = tempDir.appendingPathComponent("qwen3")
-        let nested = onnxSub.appendingPathComponent("encoder_model_q4f16.onnx")
-        try Data("onnx model bytes".utf8).write(to: nested)
+        // Arrange — plant a file nested under tokenizer/
+        let subdirectory = tempDir.appendingPathComponent("tokenizer")
+        try FileManager.default.createDirectory(at: subdirectory, withIntermediateDirectories: true)
+        let nested = subdirectory.appendingPathComponent("vocab.json")
+        try Data("vocabulary bytes".utf8).write(to: nested)
 
         // Act
         let manifest = try manager.buildManifest(for: .qwen3)
 
         // Assert — relative path uses forward slash separators
-        let key = "onnx/encoder_model_q4f16.onnx"
+        let key = "tokenizer/vocab.json"
         XCTAssertNotNil(manifest.files[key],
                         "Nested files must be recorded with their relative path including subdirectory")
     }
@@ -230,11 +231,8 @@ final class ManifestVerifyCorruptionTests: XCTestCase {
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         manager.__testing_setModelDirectory(tempDir, for: .qwen3)
 
-        // Plant the three ONNX required files so verify() doesn't fail at the
+        // Plant the required model files so verify() doesn't fail at the
         // existence-check stage before reaching hash comparison.
-        let onnxSub = tempDir.appendingPathComponent("qwen3")
-        try FileManager.default.createDirectory(at: onnxSub, withIntermediateDirectories: true)
-
         for file in ModelBackend.qwen3.requiredFiles {
             let url = tempDir.appendingPathComponent(file)
             try FileManager.default.createDirectory(
@@ -258,9 +256,9 @@ final class ManifestVerifyCorruptionTests: XCTestCase {
         let manifest = try manager.buildManifest(for: .qwen3)
         try manager.writeManifest(manifest, for: .qwen3)
 
-        // Corrupt config.json after manifest was written
-        let configPath = tempDir.appendingPathComponent("config.json")
-        try Data("CORRUPTED CONTENT".utf8).write(to: configPath)
+        // Corrupt a required file after the manifest was written
+        let corruptedPath = tempDir.appendingPathComponent("tokenizer/vocab.json")
+        try Data("CORRUPTED CONTENT".utf8).write(to: corruptedPath)
 
         // Act
         manager.__testing_setState(.notDownloaded) // reset so verify() can set .verifying
@@ -307,8 +305,8 @@ final class ManifestVerifyCorruptionTests: XCTestCase {
         let manifest = try manager.buildManifest(for: .qwen3)
         try manager.writeManifest(manifest, for: .qwen3)
 
-        let configPath = tempDir.appendingPathComponent("config.json")
-        try FileManager.default.removeItem(at: configPath)
+        let removedPath = tempDir.appendingPathComponent("tokenizer/vocab.json")
+        try FileManager.default.removeItem(at: removedPath)
 
         // Act
         manager.__testing_setState(.notDownloaded)
