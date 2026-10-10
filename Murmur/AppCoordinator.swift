@@ -74,59 +74,18 @@ final class AppCoordinator: ObservableObject {
     let audioFeedback: AudioFeedbackService
     let pill: any PillControlling
 
-    /// Optional ASR error-correction service. When non-nil and the
-    /// `correctTranscription` UserDefault is on, runs on the raw transcribed
-    /// text before it is inserted. Concrete implementation is chosen by
-    /// `reconfigureCorrectionEngine()` based on the `correctionEngine`
-    /// UserDefault: `"apple"` → `FoundationModelsCorrector` (or NoOp on
-    /// older systems), `"ollama"` → `OllamaCorrector`. Re-wired whenever
-    /// Settings changes the picker values.
-    var correction: (any TranscriptionCorrection)?
+    /// The optional ASR error-correction step that runs on the transcribed
+    /// text before it is inserted.
+    let correctionStep = CorrectionStep()
 
-    /// Re-reads `correctionEngine`, `localLLMBaseURL`, `localLLMModel`, and
-    /// `localLLMAPIKey` from UserDefaults and wires the appropriate concrete
-    /// corrector into `self.correction`. Safe to call repeatedly — each call
-    /// is cheap. Invoke from MurmurApp at launch and from Settings whenever
-    /// the engine picker / URL / model fields change.
-    func reconfigureCorrectionEngine() {
-        let defaults = UserDefaults.standard
-        let engine = defaults.string(forKey: "correctionEngine") ?? "apple"
-
-        switch engine {
-        case "local":
-            // Any OpenAI-compatible local server (Ollama, LM Studio, llamafile, …).
-            // User fills in the full base URL including `/v1`.
-            let urlString = defaults.string(forKey: "localLLMBaseURL") ?? "http://localhost:11434/v1"
-            let model = defaults.string(forKey: "localLLMModel") ?? "qwen2.5:3b-instruct"
-            let apiKey = defaults.string(forKey: "localLLMAPIKey")
-            if let url = URL(string: urlString) {
-                self.correction = OpenAICompatibleCorrector(
-                    baseURL: url,
-                    modelName: model,
-                    apiKey: (apiKey?.isEmpty ?? true) ? nil : apiKey
-                )
-                Self.log.info("correction engine: local @ \(urlString, privacy: .public) (\(model, privacy: .public))")
-            } else {
-                Self.log.error("correction engine: invalid local URL \(urlString, privacy: .public); falling back to NoOp")
-                self.correction = NoOpCorrector()
-            }
-
-        default:
-            // "apple" or unknown — prefer Foundation Models when available.
-            #if canImport(FoundationModels)
-            if #available(macOS 26.0, *), FoundationModelsCorrector.isSystemModelAvailable {
-                self.correction = FoundationModelsCorrector()
-                Self.log.info("correction engine: apple on-device")
-                return
-            }
-            #endif
-            self.correction = NoOpCorrector()
-            Self.log.info("correction engine: noop (apple unavailable)")
-        }
+    /// The correction engine in use; see `CorrectionStep`.
+    var correction: (any TranscriptionCorrection)? {
+        get { correctionStep.engine }
+        set { correctionStep.engine = newValue }
     }
 
-    private var correctionEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "correctTranscription")
+    func reconfigureCorrectionEngine() {
+        correctionStep.reconfigure()
     }
 
     /// Language code for the post-processing rules, from the language the
@@ -228,10 +187,9 @@ final class AppCoordinator: ObservableObject {
     /// call returns — which, for a start that timed out, is later than the
     /// error the user saw.
     private var audioStartInFlight = false
-    private var undoTimer: Task<Void, Never>?
+    private let undoWindow = UndoWindow()
     private var hotkeyTask: Task<Void, Never>?
     private var audioLevelTask: Task<Void, Never>?
-    private var undoMonitor: Any?
     private static let log = Logger(subsystem: "com.murmur.app", category: "coordinator")
 
     init(
@@ -408,7 +366,7 @@ final class AppCoordinator: ObservableObject {
     private func startRecordingFlow() async {
         // The undo window of the previous dictation ends here; its timer
         // must not put a live recording back to idle.
-        cancelUndoWindow()
+        undoWindow.cancel()
         if isStreamingEnabled {
             await startStreamingRecordingFlow()
         } else {
@@ -609,7 +567,7 @@ final class AppCoordinator: ObservableObject {
             streamingCoordinator?.endSession()
 
             // Wait for coordinator to reach done/cancelled/failed
-            await waitForStreamingDone()
+            await streamingCoordinator?.waitUntilEnded()
             streamingPreview.hide()
 
             // Check how the session ended and show appropriate feedback.
@@ -687,90 +645,6 @@ final class AppCoordinator: ObservableObject {
         if pendingRecording {
             pendingRecording = false
             await startRecordingFlow()
-        }
-    }
-
-    /// Hard backstop timeout for waitForStreamingDone, independent of state emissions.
-    /// Prevents UI hang if coordinator gets stuck without emitting new state (NEW-P1-2).
-    private static let streamingDoneBackstopSeconds: TimeInterval = 50
-    /// Soft deadline of the same wait. Both sit above the coordinator's own
-    /// 30 s full-pass timeout (plus up to ~5 s to finish the streamed text),
-    /// so the coordinator ends the session with what it has before the owner
-    /// gives up on it.
-    private static let streamingDoneDeadlineSeconds: TimeInterval = 45
-
-    private func waitForStreamingDone() async {
-        guard let coordinator = streamingCoordinator else { return }
-
-        // NEW-P1-2: Wrap the entire Combine-based wait in a backstop timeout.
-        // If the coordinator stalls with no state emission (task starvation, deadlock),
-        // the for-await loop never evaluates the deadline check. This outer timeout
-        // guarantees we always return within a bounded time.
-        await withTaskGroup(of: Void.self) { group in
-            // Backstop: cancel the group after the hard deadline.
-            group.addTask {
-                try? await Task.sleep(for: .seconds(Self.streamingDoneBackstopSeconds))
-                guard !Task.isCancelled else { return }
-                Self.log.warning("waitForStreamingDone: backstop timeout (\(Self.streamingDoneBackstopSeconds)s) — forcing cancel")
-                await MainActor.run {
-                    // The session may have finished just as the deadline hit;
-                    // do not turn a delivered result into a timeout error.
-                    switch coordinator.sessionState {
-                    case .streaming, .finalizing:
-                        coordinator.cancellationReason = .backstopTimeout
-                        coordinator.cancelSession()
-                    default:
-                        break
-                    }
-                }
-            }
-
-            // Main wait: subscribe to state changes.
-            group.addTask { @MainActor in
-                let stream = AsyncStream<StreamingSessionState> { continuation in
-                    let cancellable = coordinator.$sessionState.sink { state in
-                        continuation.yield(state)
-                    }
-                    continuation.onTermination = { _ in
-                        cancellable.cancel()
-                    }
-                }
-
-                let deadline = Date().addingTimeInterval(Self.streamingDoneDeadlineSeconds)
-                var warningSent = false
-
-                for await state in stream {
-                    switch state {
-                    case .done, .cancelled, .failed:
-                        return
-                    case .finalizing:
-                        // Deliberately no success chime on the streaming path.
-                        // Text appears progressively during recording, the stop
-                        // sound already plays on hotkey release, and the pill's
-                        // "Inserted" label covers the visual confirmation. A
-                        // chime here either fires before the tail chunk's text
-                        // (sound → text gap) or after the full-pass (text →
-                        // sound gap, originally 1–15s) — both felt off in
-                        // testing.
-                        if !warningSent,
-                           let startedAt = coordinator.finalizingStartedAt,
-                           Date().timeIntervalSince(startedAt) >= StreamingTranscriptionCoordinator.fullPassWarningSeconds {
-                            warningSent = true
-                            Self.log.info("waitForStreamingDone: full-pass taking >15s, user notified via pill")
-                        }
-                        if Date() >= deadline {
-                            coordinator.cancelSession()
-                            return
-                        }
-                    default:
-                        break
-                    }
-                }
-            }
-
-            // Whichever finishes first cancels the other.
-            await group.next()
-            group.cancelAll()
         }
     }
 
@@ -930,7 +804,7 @@ final class AppCoordinator: ObservableObject {
         // Pipeline: transcribe → correction (LLM, 2.5 s cap) → inject. The
         // correction step silently falls back to its input on timeout or error.
         let rawTranscribed = result.text
-        let textToInject = await applyCorrectionIfEnabled(text: rawTranscribed, language: lang)
+        let textToInject = await correctionStep.apply(to: rawTranscribed, language: lang)
 
         transition(to: .injecting)
         pill.show(state: .injecting)
@@ -962,27 +836,6 @@ final class AppCoordinator: ObservableObject {
         // Undo timer + Cmd+Z monitor set up automatically by transition(to: .undoable)
         return true
     }
-
-    /// Runs the ASR-error correction service if the toggle is on and a service
-    /// is wired in. Silent fallback to `rawText` on timeout, throw, toggle-off,
-    /// or if the safety rails in `TranscriptionCorrection` reject the candidate.
-    private func applyCorrectionIfEnabled(text rawText: String, language: String) async -> String {
-        guard correctionEnabled, let correction else { return rawText }
-        do {
-            let corrected = try await withTimeout(seconds: Self.correctionTimeoutSeconds, operation: "correction") {
-                try await correction.correct(rawText, language: language)
-            }
-            return corrected
-        } catch {
-            Self.log.warning("Correction failed, using raw text: \(String(describing: error), privacy: .public)")
-            return rawText
-        }
-    }
-
-    /// Hard cap for ASR-error correction. 2.5 s accommodates Apple Foundation
-    /// Models first-token + generation on M-series; shorter would cause a
-    /// fallback on nearly every invocation when the session is cold.
-    private static let correctionTimeoutSeconds: TimeInterval = 2.5
 
 #if DEBUG
     /// Testable entry-point that bypasses audio I/O. Runs the real transcribe →
@@ -1097,29 +950,13 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func showCriticalErrorAlert(for err: MurmurError) {
-        // Murmur is LSUIElement (menu-bar only); without an explicit activate,
-        // runModal() can appear behind the focused app or ignore the event.
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = err.alertTitle
-        alert.informativeText = err.errorDescription ?? ""
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
-        _ = alert.runModal()
+        ErrorAlerts.showCritical(err)
         state = .idle
         pill.hide()
     }
 
     private func showPermissionAlert(for permission: MurmurError.Permission) {
-        let alert = NSAlert()
-        alert.messageText = "\(permission.rawValue.capitalized) Permission Required"
-        alert.informativeText = "Murmur needs \(permission.rawValue) access to work. Please grant it in System Settings."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Open Settings")
-        alert.addButton(withTitle: "Dismiss")
-
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
+        if ErrorAlerts.askToOpenSettings(for: permission) {
             permissions.openAccessibilitySettings()
         }
         state = .idle
@@ -1127,44 +964,20 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func setupUndoAutoRecovery() {
-        cancelUndoWindow()
-        undoMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self,
-                  event.modifierFlags.contains(.command),
-                  event.keyCode == 0x06 /* Z */ else { return }
-            Task { @MainActor in
-                guard case .undoable = self.state else { return }
-                // A global monitor only observes: the user's own Cmd+Z has
-                // already reached the target app and undone the insertion.
-                // Posting another one would also undo the edit before it.
-                self.cancelUndoWindow()
+        undoWindow.open(
+            onUndoSeen: { [weak self] in
+                guard let self, case .undoable = self.state else { return }
+                self.undoWindow.cancel()
                 self.transition(to: .idle)
                 Self.log.info("Undo seen (Cmd+Z)")
+            },
+            onExpire: { [weak self] in
+                // Only leave the undo window. If a recording started meanwhile,
+                // going idle here would strand a running engine.
+                guard let self, case .undoable = self.state else { return }
+                self.transition(to: .idle)
             }
-        }
-        undoTimer = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(5))
-            guard let self, !Task.isCancelled else { return }
-            self.removeUndoMonitor()
-            // Only leave the undo window. If a recording started meanwhile,
-            // going idle here would strand a running engine.
-            guard case .undoable = self.state else { return }
-            self.transition(to: .idle)
-        }
-    }
-
-    /// End the undo window: stop its timer and its Cmd+Z monitor.
-    private func cancelUndoWindow() {
-        undoTimer?.cancel()
-        undoTimer = nil
-        removeUndoMonitor()
-    }
-
-    private func removeUndoMonitor() {
-        if let monitor = undoMonitor {
-            NSEvent.removeMonitor(monitor)
-            undoMonitor = nil
-        }
+        )
     }
 
     /// The user's "Languages you speak" as the engine's language hint.
