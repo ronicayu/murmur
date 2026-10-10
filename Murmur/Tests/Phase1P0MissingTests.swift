@@ -453,8 +453,9 @@ final class OrphanM4AScanTests: XCTestCase {
                        "inProgress entry with missing m4a must be marked .failed (EC-010)")
     }
 
-    /// m4a實際存在的inProgress entry不應被掃描干擾（假設crash前文件仍存在）。
-    func test_scanAndRecoverOrphans_existingM4A_entryRemainsInProgress() throws {
+    /// Nothing can be in progress at launch: an interrupted entry is marked
+    /// failed even when its recording survived, and the recording is kept.
+    func test_scanAndRecoverOrphans_existingM4A_marksEntryFailed_andKeepsTheAudio() throws {
         // Arrange — 建立真實臨時文件
         let tempM4A = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString).m4a")
@@ -475,9 +476,12 @@ final class OrphanM4AScanTests: XCTestCase {
         // Act
         sut.scanAndRecoverOrphans()
 
-        // Assert — m4a存在，entry應維持inProgress
-        XCTAssertEqual(sut.getAll()[0].status, .inProgress,
-                       "inProgress entry with existing m4a must not be changed")
+        // Assert
+        XCTAssertEqual(sut.getAll()[0].status, .failed,
+                       "an entry still inProgress at launch was interrupted")
+        XCTAssertEqual(sut.getAll()[0].m4aPath, tempM4A.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempM4A.path),
+                      "the recording is kept for a retry")
     }
 
     /// 有對應history entry（failed狀態）的m4a不應被scanAndRecoverOrphans干擾 (EC-011)。

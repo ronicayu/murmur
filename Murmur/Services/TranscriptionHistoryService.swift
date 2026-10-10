@@ -33,12 +33,19 @@ final class TranscriptionHistoryService: ObservableObject {
     @Published private(set) var entries: [TranscriptionEntry] = []
 
     private let storeURL: URL
+    /// Where Murmur's own recordings live. An entry's audio is deleted with
+    /// the entry only when the file is directly inside this directory.
+    private let recordingsDirectory: URL
 
     // MARK: - Init
 
     /// Designated initialiser — accepts any URL for testability.
-    init(storeURL: URL) {
+    /// `recordingsDirectory` defaults to `Recordings` next to the store file,
+    /// which is where `LongRecordingService()` writes.
+    init(storeURL: URL, recordingsDirectory: URL? = nil) {
         self.storeURL = storeURL
+        self.recordingsDirectory = recordingsDirectory
+            ?? storeURL.deletingLastPathComponent().appendingPathComponent("Recordings", isDirectory: true)
         // Ensure parent directory exists before any read/write
         let dir = storeURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -67,6 +74,7 @@ final class TranscriptionHistoryService: ObservableObject {
     func add(_ entry: TranscriptionEntry) throws {
         entries.insert(entry, at: 0)
         if entries.count > Self.maxEntryCount {
+            removeOwnedAudio(of: entries.suffix(from: Self.maxEntryCount))
             entries = Array(entries.prefix(Self.maxEntryCount))
         }
         try persist()
@@ -74,14 +82,30 @@ final class TranscriptionHistoryService: ObservableObject {
 
     /// Removes the entry with the given id. No-op if not found.
     func delete(id: UUID) throws {
+        removeOwnedAudio(of: entries.filter { $0.id == id })
         entries.removeAll { $0.id == id }
         try persist()
     }
 
     /// Removes all entries.
     func clearAll() throws {
+        removeOwnedAudio(of: entries)
         entries = []
         try persist()
+    }
+
+    /// Deletes the recordings kept for entries that are going away (a failed
+    /// transcription keeps its audio for a retry). Once the entry is gone
+    /// nothing refers to the file any more. Only files directly inside the
+    /// recordings directory are touched; `m4aPath` never holds a user's file,
+    /// and this check holds even if it one day did.
+    private func removeOwnedAudio<S: Sequence>(of removed: S) where S.Element == TranscriptionEntry {
+        for entry in removed {
+            guard let path = entry.m4aPath else { continue }
+            let url = URL(fileURLWithPath: path)
+            guard LongRecordingService.isFile(url, directlyInside: recordingsDirectory) else { continue }
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     /// Updates only the `status` field of an existing entry.
@@ -122,22 +146,14 @@ final class TranscriptionHistoryService: ObservableObject {
 
     // MARK: - Orphan scan
 
-    /// Called on app launch. Marks any inProgress entry whose m4a file no longer exists as failed.
-    /// This handles crashes or force-quits that left entries stuck in inProgress.
+    /// Called on app launch. Nothing can still be in progress then, so every
+    /// `inProgress` entry is one a crash or quit interrupted: mark it failed.
+    /// Its recording, if any, is kept so the audio is not lost.
     func scanAndRecoverOrphans() {
         var changed = false
-        for idx in entries.indices {
-            guard entries[idx].status == .inProgress else { continue }
-            if let path = entries[idx].m4aPath {
-                if !FileManager.default.fileExists(atPath: path) {
-                    entries[idx].status = .failed
-                    changed = true
-                }
-            } else {
-                // inProgress with no m4aPath is also orphaned
-                entries[idx].status = .failed
-                changed = true
-            }
+        for idx in entries.indices where entries[idx].status == .inProgress {
+            entries[idx].status = .failed
+            changed = true
         }
         if changed {
             try? persist()

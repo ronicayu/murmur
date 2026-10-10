@@ -67,6 +67,10 @@ struct TranscriptionWindowView: View {
             .buttonStyle(.plain)
             .foregroundStyle(Color.accentColor)
             .padding(.top, 8)
+            // "New" would hide a running recording or transcription with no
+            // way back to it.
+            .disabled(windowModel.hasActiveSession)
+            .help(windowModel.hasActiveSession ? "Finish or cancel the current recording or transcription first." : "")
 
             Divider()
 

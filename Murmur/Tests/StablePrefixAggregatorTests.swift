@@ -242,4 +242,27 @@ final class StablePrefixAggregatorRevisionTests: XCTestCase {
         XCTAssertEqual(agg.ingest("a b a b c d"), "")
         XCTAssertEqual(agg.ingest("a b a b c d"), " c d")
     }
+
+    // MARK: - A word inserted before the last emitted word
+
+    private func streamed(_ hypotheses: [String]) -> String {
+        var agg = StablePrefixAggregator()
+        var text = ""
+        for hypothesis in hypotheses { text += agg.ingest(hypothesis) }
+        return text + agg.flushAndReset()
+    }
+
+    func test_wordInsertedBeforeTheLastEmittedWord_doesNotRepeatThatWord_english() {
+        let text = streamed([
+            "the quick brown fox", "the quick brown fox",
+            "the quick brown red fox jumps",
+            "the quick brown red fox jumps over", "the quick brown red fox jumps over",
+        ])
+        XCTAssertEqual(text, "the quick brown fox jumps over")
+    }
+
+    func test_wordInsertedBeforeTheLastEmittedWord_doesNotRepeatThatWord_chinese() {
+        let text = streamed(["我们今天去", "我们今天去", "我们今天要去公园", "我们今天要去公园玩", "我们今天要去公园玩"])
+        XCTAssertEqual(text, "我们今天去公园玩")
+    }
 }

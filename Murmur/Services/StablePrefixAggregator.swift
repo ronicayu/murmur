@@ -129,7 +129,9 @@ struct StablePrefixAggregator {
     /// run that ends with it can match again. The run just before it is then
     /// searched for, and the word that replaced it is stepped over: it stands
     /// where a word was already emitted, so emitting it would repeat that word.
-    /// Up to `maxRevisedWords` trailing words are given up this way.
+    /// Up to `maxRevisedWords` trailing words are given up this way. If those
+    /// words turn out to be present after all, a little further on (the model
+    /// inserted a word before them), the continuation starts after them.
     ///
     /// Returns nil when the hypothesis shares no such run with the emitted words.
     private func continuationStart(in tokens: [Token]) -> Int? {
@@ -157,8 +159,26 @@ struct StablePrefixAggregator {
                         }
                     }
                 }
-                // A hypothesis that ends inside the revised words has nothing new.
-                if let best { return min(best + length + revised, tokens.count) }
+                if let best {
+                    let afterAnchor = best + length
+                    // The given-up words may not have been revised at all: the
+                    // model may have inserted a word in front of them ("brown
+                    // fox" -> "brown red fox"). If they still follow the anchor
+                    // within a few words, continue after them. Stepping over a
+                    // fixed count instead would land on "fox" and emit it twice.
+                    if revised > 0 {
+                        let dropped = Array(confirmedValues.suffix(revised))
+                        let lastStart = min(afterAnchor + 2, tokens.count - revised)
+                        if lastStart >= afterAnchor {
+                            for start in afterAnchor...lastStart
+                            where zip(dropped, tokens[start..<(start + revised)]).allSatisfy({ $0 == $1.value }) {
+                                return start + revised
+                            }
+                        }
+                    }
+                    // A hypothesis that ends inside the revised words has nothing new.
+                    return min(afterAnchor + revised, tokens.count)
+                }
                 length -= 1
             }
         }

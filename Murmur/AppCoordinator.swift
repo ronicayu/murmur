@@ -619,7 +619,14 @@ final class AppCoordinator: ObservableObject {
                 let delivered = try await deliverTranscription(
                     TranscriptionResult(text: final.text, language: language, durationMs: final.durationMs)
                 )
-                if !delivered { outcome = .silenceGated }
+                if !delivered {
+                    // Empty because the final pass broke, not because nothing
+                    // was said: say so instead of quietly hiding the pill.
+                    if streamingCoordinator?.fullPassFailed == true {
+                        throw MurmurError.transcriptionFailed("Final transcription pass failed")
+                    }
+                    outcome = .silenceGated
+                }
             } else if let reason = streamingCoordinator?.cancellationReason {
                 switch reason {
                 case .focusAbandoned:
@@ -681,7 +688,12 @@ final class AppCoordinator: ObservableObject {
 
     /// Hard backstop timeout for waitForStreamingDone, independent of state emissions.
     /// Prevents UI hang if coordinator gets stuck without emitting new state (NEW-P1-2).
-    private static let streamingDoneBackstopSeconds: TimeInterval = 35
+    private static let streamingDoneBackstopSeconds: TimeInterval = 50
+    /// Soft deadline of the same wait. Both sit above the coordinator's own
+    /// 30 s full-pass timeout (plus up to ~5 s to finish the streamed text),
+    /// so the coordinator ends the session with what it has before the owner
+    /// gives up on it.
+    private static let streamingDoneDeadlineSeconds: TimeInterval = 45
 
     private func waitForStreamingDone() async {
         guard let coordinator = streamingCoordinator else { return }
@@ -697,8 +709,15 @@ final class AppCoordinator: ObservableObject {
                 guard !Task.isCancelled else { return }
                 Self.log.warning("waitForStreamingDone: backstop timeout (\(Self.streamingDoneBackstopSeconds)s) — forcing cancel")
                 await MainActor.run {
-                    coordinator.cancellationReason = .backstopTimeout
-                    coordinator.cancelSession()
+                    // The session may have finished just as the deadline hit;
+                    // do not turn a delivered result into a timeout error.
+                    switch coordinator.sessionState {
+                    case .streaming, .finalizing:
+                        coordinator.cancellationReason = .backstopTimeout
+                        coordinator.cancelSession()
+                    default:
+                        break
+                    }
                 }
             }
 
@@ -713,7 +732,7 @@ final class AppCoordinator: ObservableObject {
                     }
                 }
 
-                let deadline = Date().addingTimeInterval(30)
+                let deadline = Date().addingTimeInterval(Self.streamingDoneDeadlineSeconds)
                 var warningSent = false
 
                 for await state in stream {

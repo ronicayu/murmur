@@ -396,6 +396,10 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     /// Preview sessions only: the text to insert once the session reaches `.done` —
     /// the full-pass transcription, or the streamed text if the full pass failed.
     private(set) var finalResult: TranscriptionResult?
+    /// True when the closing full pass failed or timed out, so whatever text
+    /// the session ended with is the streamed preview at best. Lets the owner
+    /// tell "nothing was said" from "the transcription broke".
+    private(set) var fullPassFailed = false
     var isPreviewSession: Bool { onPreviewText != nil }
 
     // MARK: - Session measurements
@@ -529,7 +533,14 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         if onPreviewText == nil {
             setupFocusGuard(targetAppPID: targetAppPID)
         }
-        setupCPUMonitor()
+        // The CPU fallback stops the streaming passes and relies on the full
+        // pass for the text. A preview session inserts that full pass, so
+        // nothing is lost. A typing session can only *replace* what it typed,
+        // and where the replacement is not possible the speech after the
+        // fallback would be gone — so typing sessions keep streaming instead.
+        if onPreviewText != nil {
+            setupCPUMonitor()
+        }
         transition(to: .streaming(chunkCount: 0))
         logger.info("StreamingCoordinator: session started (lang=\(language), pid=\(targetAppPID))")
         return acc
@@ -631,6 +642,9 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     func resetToIdle() {
         switch sessionState {
         case .idle:
+            // The owner can set `cancellationReason` on an idle coordinator
+            // (its backstop does); leave nothing behind for the next read.
+            cancellationReason = nil
             return
         case .streaming, .finalizing:
             logger.warning("resetToIdle called during a session — cancelling first")
@@ -703,6 +717,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         pendingInjections = []
         onPreviewText = nil
         finalResult = nil
+        fullPassFailed = false
         sessionStartedAt = nil
         firstDeltaAt = nil
         lastEditDistanceRatio = nil
@@ -1012,12 +1027,14 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         switch passResult {
         case .timedOut:
             logger.warning("StreamingCoordinator: full-pass exceeded \(Int(timeoutSeconds))s — keeping streaming version")
+            fullPassFailed = true
             // The abandoned decode still holds the engine, so the final
             // window cannot be transcribed either.
             await finishWithStreamedText(generation: generation, transcribeFinalWindow: false)
             return
         case .failed:
             logger.warning("StreamingCoordinator: full-pass transcription failed — keeping streaming version")
+            fullPassFailed = true
             await finishWithStreamedText(generation: generation)
             return
         case .transcribed(let r):

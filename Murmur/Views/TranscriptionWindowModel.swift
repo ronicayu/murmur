@@ -133,6 +133,13 @@ final class TranscriptionWindowModel: ObservableObject {
     // MARK: - Idle
 
     func transitionToIdle() {
+        // Leaving the confirm screen without Start or Discard would otherwise
+        // strand the recording: its entry would stay "in progress" for ever.
+        // Keep the audio and mark the entry failed, like any unfinished one.
+        if case .recordingConfirm = windowState, let recording = pendingRecording {
+            pendingRecording = nil
+            try? historyService.updateStatus(id: recording.entryID, status: .failed)
+        }
         windowState = .idle
     }
 
@@ -292,9 +299,15 @@ final class TranscriptionWindowModel: ObservableObject {
     // MARK: - Transcription
 
     func beginTranscription(audioURL: URL) {
-        // Only one transcription is tracked at a time.
-        if activeTranscription != nil {
-            cancelTranscription()
+        // Only one transcription is tracked at a time. Starting another one
+        // supersedes the earlier task, but that is not the user discarding it:
+        // its entry is marked failed and its audio is kept, as for any
+        // transcription that did not finish.
+        if let superseded = activeTranscription {
+            transcriptionTask?.cancel()
+            transcriptionTask = nil
+            activeTranscription = nil
+            try? historyService.updateStatus(id: superseded.entryID, status: .failed)
         }
 
         // The model detects the language; the user's "Languages you speak"
