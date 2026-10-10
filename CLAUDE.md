@@ -4,17 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Input** is a macOS voice input app (similar to 闪电说). It uses the local Cohere Transcribe model for speech-to-text, with no cloud dependency after initial model download.
+**Murmur** is a macOS voice input app (similar to 闪电说). It runs the Qwen3-ASR-0.6B model locally through the vendored sherpa-onnx library for speech-to-text, with no cloud dependency after initial model download.
 
 Key requirements:
 - macOS native app (Swift, AppKit/SwiftUI)
-- Local-only transcription via Cohere Transcribe
+- Local-only transcription via Qwen3-ASR (single engine; no Python)
 - Onboarding flow that includes model download
 - Acts as a system-wide input method
 
 ## Status
 
-v0.2.0 released. Core features working: voice input (V1 + V3 streaming), audio transcription, native ONNX backend. See `CHANGELOG.md` for details.
+Core features working: voice input (full-pass and streaming with a live preview bubble) and audio file transcription. See `CHANGELOG.md` for details.
 
 ## Team
 

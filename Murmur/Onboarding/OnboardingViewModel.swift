@@ -66,8 +66,7 @@ final class OnboardingViewModel: ObservableObject {
             step = .accessibility
             nextStep()
         case .modelChoice:
-            // Always use ONNX during onboarding — advanced backends (FireRed) are in Settings
-            modelManager.setActiveBackend(.onnx)
+            // One speech model — nothing to choose.
             step = .modelChoice
             nextStep()
         case .modelDownload where modelManager.state == .ready:
@@ -78,9 +77,6 @@ final class OnboardingViewModel: ObservableObject {
         }
     }
 
-    func selectBackend(_ backend: ModelBackend) {
-        modelManager.setActiveBackend(backend)
-    }
 
     func requestMicrophone() async {
         micGranted = await coordinator.permissions.requestMicrophone()

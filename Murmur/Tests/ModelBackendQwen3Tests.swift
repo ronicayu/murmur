@@ -49,7 +49,4 @@ final class ModelBackendQwen3Tests: XCTestCase {
                        "test_wavs/* should be excluded to save bandwidth")
     }
 
-    func test_qwen3_isSmallerThanFireRed() {
-        XCTAssertLessThan(ModelBackend.qwen3.requiredDiskSpace, ModelBackend.fireRed.requiredDiskSpace)
-    }
 }

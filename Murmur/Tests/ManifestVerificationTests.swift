@@ -24,20 +24,20 @@ final class ManifestBuildAndValidationTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
+        UserDefaults.standard.set(ModelBackend.qwen3.rawValue, forKey: "modelBackend")
         manager = ModelManager()
 
         // Redirect the ONNX model directory to an isolated temp dir so nothing
-        // touches ~/Library/Application Support/Murmur/Models-ONNX/. This
+        // touches ~/Library/Application Support/Murmur/Models-Qwen3ASR/. This
         // replaces the earlier XCTSkipIf-on-real-model guard — tests now
         // always run and never risk deleting a user's installed model.
         tempDir = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
             .appendingPathComponent("manifest-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        manager.__testing_setModelDirectory(tempDir, for: .onnx)
+        manager.__testing_setModelDirectory(tempDir, for: .qwen3)
 
-        let onnxSub = tempDir.appendingPathComponent("onnx")
+        let onnxSub = tempDir.appendingPathComponent("qwen3")
         try FileManager.default.createDirectory(at: onnxSub, withIntermediateDirectories: true)
     }
 
@@ -58,7 +58,7 @@ final class ManifestBuildAndValidationTests: XCTestCase {
         try content.write(to: filePath)
 
         // Act
-        let manifest = try manager.buildManifest(for: .onnx)
+        let manifest = try manager.buildManifest(for: .qwen3)
 
         // Assert
         guard let entry = manifest.files["config.json"] else {
@@ -82,7 +82,7 @@ final class ManifestBuildAndValidationTests: XCTestCase {
         try Data("{}".utf8).write(to: manifestPath)
 
         // Act
-        let manifest = try manager.buildManifest(for: .onnx)
+        let manifest = try manager.buildManifest(for: .qwen3)
 
         // Assert
         XCTAssertNil(manifest.files[ModelManager.ModelManifest.filename],
@@ -91,12 +91,12 @@ final class ManifestBuildAndValidationTests: XCTestCase {
 
     func test_buildManifest_includesFilesInSubdirectories() throws {
         // Arrange — plant a file nested under onnx/
-        let onnxSub = tempDir.appendingPathComponent("onnx")
+        let onnxSub = tempDir.appendingPathComponent("qwen3")
         let nested = onnxSub.appendingPathComponent("encoder_model_q4f16.onnx")
         try Data("onnx model bytes".utf8).write(to: nested)
 
         // Act
-        let manifest = try manager.buildManifest(for: .onnx)
+        let manifest = try manager.buildManifest(for: .qwen3)
 
         // Assert — relative path uses forward slash separators
         let key = "onnx/encoder_model_q4f16.onnx"
@@ -112,11 +112,11 @@ final class ManifestBuildAndValidationTests: XCTestCase {
         let filePath = tempDir.appendingPathComponent("config.json")
         try content.write(to: filePath)
 
-        let manifest = try manager.buildManifest(for: .onnx)
-        try manager.writeManifest(manifest, for: .onnx)
+        let manifest = try manager.buildManifest(for: .qwen3)
+        try manager.writeManifest(manifest, for: .qwen3)
 
         // Act + Assert
-        XCTAssertTrue(manager.manifestIsValid(for: .onnx),
+        XCTAssertTrue(manager.manifestIsValid(for: .qwen3),
                       "manifestIsValid must return true when manifest exists and sizes match")
     }
 
@@ -126,10 +126,10 @@ final class ManifestBuildAndValidationTests: XCTestCase {
         try Data("some data".utf8).write(to: filePath)
 
         // Ensure no manifest exists
-        try? FileManager.default.removeItem(at: manager.manifestURL(for: .onnx))
+        try? FileManager.default.removeItem(at: manager.manifestURL(for: .qwen3))
 
         // Act + Assert
-        XCTAssertFalse(manager.manifestIsValid(for: .onnx),
+        XCTAssertFalse(manager.manifestIsValid(for: .qwen3),
                        "manifestIsValid must return false when manifest.json is absent")
     }
 
@@ -138,14 +138,14 @@ final class ManifestBuildAndValidationTests: XCTestCase {
         let filePath = tempDir.appendingPathComponent("config.json")
         try Data("some data".utf8).write(to: filePath)
 
-        let manifest = try manager.buildManifest(for: .onnx)
-        try manager.writeManifest(manifest, for: .onnx)
+        let manifest = try manager.buildManifest(for: .qwen3)
+        try manager.writeManifest(manifest, for: .qwen3)
 
         // Delete the file the manifest references
         try FileManager.default.removeItem(at: filePath)
 
         // Act + Assert
-        XCTAssertFalse(manager.manifestIsValid(for: .onnx),
+        XCTAssertFalse(manager.manifestIsValid(for: .qwen3),
                        "manifestIsValid must return false when a listed file is missing")
     }
 
@@ -155,15 +155,15 @@ final class ManifestBuildAndValidationTests: XCTestCase {
         let filePath = tempDir.appendingPathComponent("config.json")
         try original.write(to: filePath)
 
-        let manifest = try manager.buildManifest(for: .onnx)
-        try manager.writeManifest(manifest, for: .onnx)
+        let manifest = try manager.buildManifest(for: .qwen3)
+        try manager.writeManifest(manifest, for: .qwen3)
 
         // Overwrite with fewer bytes — size will mismatch
         let truncated = Data("short".utf8)
         try truncated.write(to: filePath)
 
         // Act + Assert
-        XCTAssertFalse(manager.manifestIsValid(for: .onnx),
+        XCTAssertFalse(manager.manifestIsValid(for: .qwen3),
                        "manifestIsValid must return false when a file has been truncated (size mismatch)")
     }
 
@@ -171,38 +171,38 @@ final class ManifestBuildAndValidationTests: XCTestCase {
 
     func test_isModelDownloaded_falseWhenNoManifest() throws {
         // Arrange — plant all required files but no manifest
-        for file in ModelBackend.onnx.requiredFiles {
+        for file in ModelBackend.qwen3.requiredFiles {
             let url = tempDir.appendingPathComponent(file)
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data("stub".utf8).write(to: url)
         }
-        try? FileManager.default.removeItem(at: manager.manifestURL(for: .onnx))
+        try? FileManager.default.removeItem(at: manager.manifestURL(for: .qwen3))
 
         manager.refreshState()
 
         // Act + Assert — no manifest means not considered downloaded
-        XCTAssertFalse(manager.isModelDownloaded(for: .onnx),
+        XCTAssertFalse(manager.isModelDownloaded(for: .qwen3),
                        "isModelDownloaded must return false when manifest.json is absent, even if files exist")
     }
 
     func test_isModelDownloaded_trueWhenManifestAndSizesMatch() throws {
         // Arrange — plant required files and write a valid manifest
-        for file in ModelBackend.onnx.requiredFiles {
+        for file in ModelBackend.qwen3.requiredFiles {
             let url = tempDir.appendingPathComponent(file)
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data("stub".utf8).write(to: url)
         }
-        let manifest = try manager.buildManifest(for: .onnx)
-        try manager.writeManifest(manifest, for: .onnx)
+        let manifest = try manager.buildManifest(for: .qwen3)
+        try manager.writeManifest(manifest, for: .qwen3)
 
         manager.refreshState()
         // After refreshState() with a valid manifest, state should be .ready
         XCTAssertEqual(manager.state, .ready, "Precondition: state must be .ready")
 
         // Act + Assert
-        XCTAssertTrue(manager.isModelDownloaded(for: .onnx),
+        XCTAssertTrue(manager.isModelDownloaded(for: .qwen3),
                       "isModelDownloaded must return true with a valid manifest")
     }
 }
@@ -219,7 +219,7 @@ final class ManifestVerifyCorruptionTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
+        UserDefaults.standard.set(ModelBackend.qwen3.rawValue, forKey: "modelBackend")
         manager = ModelManager()
 
         // Redirect to an isolated temp dir before any write — see
@@ -228,14 +228,14 @@ final class ManifestVerifyCorruptionTests: XCTestCase {
             .resolvingSymlinksInPath()
             .appendingPathComponent("manifest-corrupt-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        manager.__testing_setModelDirectory(tempDir, for: .onnx)
+        manager.__testing_setModelDirectory(tempDir, for: .qwen3)
 
         // Plant the three ONNX required files so verify() doesn't fail at the
         // existence-check stage before reaching hash comparison.
-        let onnxSub = tempDir.appendingPathComponent("onnx")
+        let onnxSub = tempDir.appendingPathComponent("qwen3")
         try FileManager.default.createDirectory(at: onnxSub, withIntermediateDirectories: true)
 
-        for file in ModelBackend.onnx.requiredFiles {
+        for file in ModelBackend.qwen3.requiredFiles {
             let url = tempDir.appendingPathComponent(file)
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -255,8 +255,8 @@ final class ManifestVerifyCorruptionTests: XCTestCase {
 
     func test_verify_setsCorruptState_whenFileSHA256Mismatch() async throws {
         // Arrange — write a manifest with known hashes, then corrupt a file
-        let manifest = try manager.buildManifest(for: .onnx)
-        try manager.writeManifest(manifest, for: .onnx)
+        let manifest = try manager.buildManifest(for: .qwen3)
+        try manager.writeManifest(manifest, for: .qwen3)
 
         // Corrupt config.json after manifest was written
         let configPath = tempDir.appendingPathComponent("config.json")
@@ -274,8 +274,8 @@ final class ManifestVerifyCorruptionTests: XCTestCase {
 
     func test_verify_returnsTrueAndSetsReady_whenAllHashesMatch() async throws {
         // Arrange — write manifest matching the on-disk files (no corruption)
-        let manifest = try manager.buildManifest(for: .onnx)
-        try manager.writeManifest(manifest, for: .onnx)
+        let manifest = try manager.buildManifest(for: .qwen3)
+        try manager.writeManifest(manifest, for: .qwen3)
 
         // Act
         manager.__testing_setState(.notDownloaded)
@@ -289,8 +289,8 @@ final class ManifestVerifyCorruptionTests: XCTestCase {
 
     func test_verify_writesManifest_whenNoneExists() async throws {
         // Arrange — ensure no manifest exists (only required files on disk)
-        try? FileManager.default.removeItem(at: manager.manifestURL(for: .onnx))
-        XCTAssertNil(manager.loadManifest(for: .onnx), "Precondition: no manifest")
+        try? FileManager.default.removeItem(at: manager.manifestURL(for: .qwen3))
+        XCTAssertNil(manager.loadManifest(for: .qwen3), "Precondition: no manifest")
 
         // Act
         manager.__testing_setState(.notDownloaded)
@@ -298,14 +298,14 @@ final class ManifestVerifyCorruptionTests: XCTestCase {
 
         // Assert — verify() writes the manifest when none exists (first-time flow)
         XCTAssertTrue(result, "verify() must pass when files exist and no prior manifest")
-        XCTAssertNotNil(manager.loadManifest(for: .onnx),
+        XCTAssertNotNil(manager.loadManifest(for: .qwen3),
                         "verify() must write manifest.json when none exists")
     }
 
     func test_verify_setsCorrupt_whenRequiredFileMissing() async throws {
         // Arrange — plant manifest, then remove a required file
-        let manifest = try manager.buildManifest(for: .onnx)
-        try manager.writeManifest(manifest, for: .onnx)
+        let manifest = try manager.buildManifest(for: .qwen3)
+        try manager.writeManifest(manifest, for: .qwen3)
 
         let configPath = tempDir.appendingPathComponent("config.json")
         try FileManager.default.removeItem(at: configPath)
@@ -332,7 +332,7 @@ final class ManifestMigrationTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        UserDefaults.standard.set(ModelBackend.onnx.rawValue, forKey: "modelBackend")
+        UserDefaults.standard.set(ModelBackend.qwen3.rawValue, forKey: "modelBackend")
 
         // Create an isolated temp dir and redirect the manager to it BEFORE
         // we call `migrateToManifestIfNeeded(for:)` in each test. The previous
@@ -350,12 +350,12 @@ final class ManifestMigrationTests: XCTestCase {
             .resolvingSymlinksInPath()
             .appendingPathComponent("migration-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        manager.__testing_setModelDirectory(tempDir, for: .onnx)
+        manager.__testing_setModelDirectory(tempDir, for: .qwen3)
 
         // Plant required files without a manifest to simulate a pre-manifest install.
-        let onnxSub = tempDir.appendingPathComponent("onnx")
+        let onnxSub = tempDir.appendingPathComponent("qwen3")
         try FileManager.default.createDirectory(at: onnxSub, withIntermediateDirectories: true)
-        for file in ModelBackend.onnx.requiredFiles {
+        for file in ModelBackend.qwen3.requiredFiles {
             let url = tempDir.appendingPathComponent(file)
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -381,7 +381,7 @@ final class ManifestMigrationTests: XCTestCase {
         // Act — explicit migration call post-init (init-time invocation was
         // before the redirect, so it ran against an empty real directory and
         // was effectively a no-op).
-        manager.migrateToManifestIfNeeded(for: .onnx)
+        manager.migrateToManifestIfNeeded(for: .qwen3)
 
         let manifestURL = tempDir.appendingPathComponent(ModelManager.ModelManifest.filename)
 
@@ -389,7 +389,7 @@ final class ManifestMigrationTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: manifestURL.path),
                       "Migration must write manifest.json when required files exist but no manifest does")
 
-        let manifest = manager.loadManifest(for: .onnx)
+        let manifest = manager.loadManifest(for: .qwen3)
         XCTAssertNotNil(manifest, "loadManifest must return the newly-written manifest")
         XCTAssertGreaterThan(manifest?.files.count ?? 0, 0,
                              "Migrated manifest must contain at least one file entry")
@@ -397,7 +397,7 @@ final class ManifestMigrationTests: XCTestCase {
 
     func test_migration_setsStateReady_afterManifestGenerated() throws {
         // Act — explicit migration + refreshState.
-        manager.migrateToManifestIfNeeded(for: .onnx)
+        manager.migrateToManifestIfNeeded(for: .qwen3)
         manager.refreshState()
 
         XCTAssertEqual(manager.state, .ready,
@@ -406,7 +406,7 @@ final class ManifestMigrationTests: XCTestCase {
 
     func test_migration_isIdempotent_doesNotOverwriteExistingManifest() throws {
         // Arrange — run migration once.
-        manager.migrateToManifestIfNeeded(for: .onnx)
+        manager.migrateToManifestIfNeeded(for: .qwen3)
         let manifestURL = tempDir.appendingPathComponent(ModelManager.ModelManifest.filename)
 
         let attrs = try FileManager.default.attributesOfItem(atPath: manifestURL.path)
@@ -415,7 +415,7 @@ final class ManifestMigrationTests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.05)
 
         // Act — run migration again; manifest exists, must not be rewritten.
-        manager.migrateToManifestIfNeeded(for: .onnx)
+        manager.migrateToManifestIfNeeded(for: .qwen3)
 
         let attrs2 = try FileManager.default.attributesOfItem(atPath: manifestURL.path)
         let secondDate = attrs2[.modificationDate] as? Date
@@ -431,7 +431,7 @@ final class ManifestMigrationTests: XCTestCase {
         let manifestURL = tempDir.appendingPathComponent(ModelManager.ModelManifest.filename)
 
         // Act
-        manager.migrateToManifestIfNeeded(for: .onnx)
+        manager.migrateToManifestIfNeeded(for: .qwen3)
 
         // Assert
         XCTAssertFalse(FileManager.default.fileExists(atPath: manifestURL.path),

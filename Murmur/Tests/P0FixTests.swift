@@ -1,72 +1,6 @@
 import XCTest
 @testable import Murmur
 
-// MARK: - P0 Fix 1: modelConfigHash per-backend key
-
-final class ModelConfigHashTests: XCTestCase {
-
-    override func tearDown() {
-        // Clean up any test keys
-        for backend in ModelBackend.allCases {
-            UserDefaults.standard.removeObject(forKey: "modelConfigHash_\(backend.rawValue)")
-        }
-        UserDefaults.standard.removeObject(forKey: "modelConfigHash")
-        super.tearDown()
-    }
-
-    func testHashKeyIsPerBackend() {
-        // The old bug: a single "modelConfigHash" key was shared across all backends.
-        // After fix: each backend uses "modelConfigHash_<backend>" key.
-        let onnxKey = "modelConfigHash_onnx"
-        let hfKey = "modelConfigHash_huggingface"
-        let whisperKey = "modelConfigHash_whisper"
-
-        // Simulate storing hashes for different backends
-        UserDefaults.standard.set("abc123", forKey: onnxKey)
-        UserDefaults.standard.set("def456", forKey: hfKey)
-
-        // They should not interfere with each other
-        XCTAssertEqual(UserDefaults.standard.string(forKey: onnxKey), "abc123")
-        XCTAssertEqual(UserDefaults.standard.string(forKey: hfKey), "def456")
-        XCTAssertNil(UserDefaults.standard.string(forKey: whisperKey))
-
-        // Old key should not exist
-        XCTAssertNil(UserDefaults.standard.string(forKey: "modelConfigHash"))
-    }
-
-    func testBackendKeysAreDistinct() {
-        let keys = ModelBackend.allCases.map { "modelConfigHash_\($0.rawValue)" }
-        XCTAssertEqual(keys.count, Set(keys).count, "Backend hash keys must be unique")
-    }
-}
-
-// MARK: - P0 Fix 3: TranscriptionService TOCTOU race
-
-final class TranscriptionServiceLockTests: XCTestCase {
-
-    func testConcurrentEnsureProcessAndKillDoesNotCrash() async {
-        // Actor isolation serializes access — verify no crashes under concurrent calls.
-        let service = TranscriptionService(
-            modelPath: URL(fileURLWithPath: "/nonexistent"),
-            pythonPath: URL(fileURLWithPath: "/nonexistent"),
-            scriptPath: URL(fileURLWithPath: "/nonexistent")
-        )
-
-        await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<100 {
-                group.addTask {
-                    await service.killProcess()
-                }
-                group.addTask {
-                    await service.setModelPath(URL(fileURLWithPath: "/tmp/test_\(Int.random(in: 0...100))"))
-                }
-            }
-        }
-
-        XCTAssertFalse(service.isModelLoaded)
-    }
-}
-
 // MARK: - P0 Fix 4: Auto language detection default
 
 final class AutoLanguageDefaultTests: XCTestCase {
@@ -95,24 +29,6 @@ final class AutoLanguageDefaultTests: XCTestCase {
     }
 }
 
-// MARK: - Python script language parameter tests
-
-final class TranscribePyLanguageTests: XCTestCase {
-
-    func testAutoLanguageOmitsParameterInOnnx() throws {
-        // Read the transcribe.py and verify the auto-detect logic
-        let scriptURL = Bundle.module.url(forResource: "transcribe", withExtension: "py", subdirectory: "Resources")
-            ?? Bundle.main.url(forResource: "transcribe", withExtension: "py")
-
-        // If we can find the script, verify the auto-detect code exists
-        if let url = scriptURL {
-            let content = try String(contentsOf: url)
-            XCTAssert(content.contains("language != \"auto\""),
-                      "transcribe.py should check for 'auto' language to skip explicit language parameter")
-        }
-    }
-}
-
 // MARK: - ModelBackend tests
 
 final class ModelBackendTests: XCTestCase {
@@ -127,12 +43,7 @@ final class ModelBackendTests: XCTestCase {
         XCTAssertEqual(rawValues.count, Set(rawValues).count, "Backends must have unique raw values")
     }
 
-    func testOnnxDoesNotRequireHFLogin() {
-        XCTAssertFalse(ModelBackend.onnx.requiresHFLogin)
+    func testSpeechModelDoesNotRequireHFLogin() {
+        XCTAssertFalse(ModelBackend.qwen3.requiresHFLogin)
     }
-
-    // The HuggingFace backend was removed in v0.3.1; `requiresHFLogin` is now
-    // a hard-coded `false` for all remaining backends, asserted in
-    // `testOnnxDoesNotRequireHFLogin` above. The Chinese-first FireRed
-    // backend's repo is also public so no per-backend gate is needed.
 }

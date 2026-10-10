@@ -10,9 +10,7 @@ cd "$(dirname "$0")/.."
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)
 echo "Building Murmur v${VERSION}..."
 
-# 1. Patch ORT + build release binary
-echo "→ Patching ORT for Float16..."
-bash Scripts/patch-ort-float16.sh
+# 1. Build release binary
 echo "→ Compiling..."
 swift build -c release 2>&1 | tail -3
 
@@ -37,8 +35,6 @@ cp Info.plist "$APP/Contents/Info.plist"
 
 # Copy resources
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
-cp Resources/transcribe.py "$APP/Contents/Resources/"
-cp Resources/requirements.txt "$APP/Contents/Resources/"
 
 # Copy SPM resource bundle if it exists (contains bundled resources)
 BUNDLE=".build/arm64-apple-macosx/release/Murmur_Murmur.bundle"

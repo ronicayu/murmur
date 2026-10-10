@@ -11,7 +11,6 @@ struct SettingsView: View {
     @AppStorage("soundEffects") private var soundEffects: Bool = true
     @AppStorage("launchAtLogin") private var launchAtLogin: Bool = true
     @AppStorage("transcriptionLanguage") private var transcriptionLanguage: String = "auto"
-    @AppStorage("autoDetectLanguage") private var autoDetectLanguage: Bool = false
     @AppStorage("streamingInputEnabled") private var streamingInputEnabled: Bool = false
     @AppStorage("streamingDiscoveryBadgeDismissed") private var discoveryBadgeDismissed: Bool = false
     @AppStorage("streamingFocusAbandonSeconds") private var focusAbandonSeconds: Double = 10.0
@@ -27,6 +26,7 @@ struct SettingsView: View {
 
     @State private var useRightCommand: Bool = true
     @State private var showDeleteConfirmation = false
+    @State private var legacyDataBytes: Int64 = 0
     @State private var showCancelDownloadConfirmation = false
     @State private var hotkeyKey: Key = .space
     @State private var hotkeyModifiers: NSEvent.ModifierFlags = .command
@@ -128,7 +128,7 @@ struct SettingsView: View {
                             .foregroundStyle(.orange)
                     }
                 }
-                LabeledContent(autoDetectLanguage ? "Fallback language" : "Language") {
+                LabeledContent("Language") {
                     Picker("", selection: $transcriptionLanguage) {
                         Text("Auto").tag("auto")
                         Divider()
@@ -151,28 +151,9 @@ struct SettingsView: View {
                     .labelsHidden()
                     .frame(width: 160)
                 }
-                if autoDetectLanguage {
-                    Text("Used as the initial guess. If the transcription comes back in another language, it's automatically re-transcribed.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                LabeledContent {
-                    Toggle("", isOn: $autoDetectLanguage)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Auto-detect language")
-                        Text("If the transcription engine reports a different language than the initial guess (above), Murmur re-transcribes once with the detected language. No extra model download.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if streamingInputEnabled {
-                            Text("Streaming voice input always uses the language above — re-transcribe applies to V1 full-pass only.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
+                Text("A hint only — the speech model recognises the language you speak by itself. Auto follows your keyboard layout.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 LabeledContent("Sound effects") {
                     Toggle("", isOn: $soundEffects)
                         .labelsHidden()
@@ -270,26 +251,14 @@ struct SettingsView: View {
 
     private var modelTab: some View {
         Form {
-            Section("Speech Engine") {
-                engineRow(.onnx)
-                if modelManager.activeBackend == .onnx {
-                    fireRedToggleRow
+            Section("Speech Model") {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(ModelBackend.qwen3.displayName) · \(ModelBackend.qwen3.sizeDescription)")
+                    Text(ModelBackend.qwen3.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
-                engineRow(.fireRed)
-
-                engineRow(.qwen3)
-            }
-
-            Section("ASR Punctuation") {
-                asrPunctuationToggleRow
-            }
-
-            Section("Voice Activity Detection") {
-                vadToggleRow
-            }
-
-            Section("Model — \(modelManager.activeBackend.shortName)") {
                 LabeledContent("Status") {
                     modelStatusBadge
                 }
@@ -379,6 +348,28 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Voice Activity Detection") {
+                vadToggleRow
+            }
+
+            if legacyDataBytes > 0 {
+                Section("Old Models") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Free up \(Self.formatBytes(legacyDataBytes))")
+                            Text("Models from earlier versions of Murmur are still on disk and are no longer used.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Remove", role: .destructive) {
+                            modelManager.deleteLegacyData()
+                            legacyDataBytes = modelManager.legacyDataSize()
+                        }
+                    }
+                }
+            }
+
             Section("Transcription Correction") {
                 transcriptionCorrectionRow
             }
@@ -404,6 +395,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear { legacyDataBytes = modelManager.legacyDataSize() }
     }
 
     @ViewBuilder
@@ -586,180 +578,12 @@ struct SettingsView: View {
         }
     }
 
-    private func engineRow(_ backend: ModelBackend) -> some View {
-        let isActive: Bool = modelManager.activeBackend == backend
-        let isDownloaded: Bool = modelManager.isModelDownloaded(for: backend)
-        let switchLocked: Bool = modelManager.isDownloadActive
-        let isLocked: Bool = switchLocked && !isActive
-        return Button {
-            modelManager.setActiveBackend(backend)
-        } label: {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(backend.displayName)
-                        .font(.body)
-                        .foregroundStyle(.primary)
-                    HStack(spacing: 6) {
-                        Text(backend.sizeDescription)
-                        if isDownloaded {
-                            Text("Downloaded")
-                                .foregroundStyle(.green)
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    if isLocked {
-                        Text("Locked during download")
-                            .font(.caption)
-                            .foregroundStyle(Color.secondary)
-                    }
-                }
-                Spacer()
-                if isActive {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color.accentColor)
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        // Disable switching backends while a download or verification is running.
-        // The didSet guard in ModelManager is the authoritative lock; this is a
-        // defense-in-depth layer that also gives the user a visual affordance.
-        .disabled(isLocked)
-        .help(isLocked ? "Locked during download — wait for it to finish or cancel first." : "")
-    }
-
-    /// Sub-toggle visible under Cohere ONNX or HF backends. Routes Chinese
-    /// audio to FireRed when ON. Triggers a download if the FireRed model is
-    /// not yet on disk.
-    @ViewBuilder
-    private var fireRedToggleRow: some View {
-        let isOn = modelManager.useFireRedForChinese
-        let fireRedReady = modelManager.isModelDownloaded(for: .fireRed)
-        let isDownloadingFireRed = (modelManager.statusMessage.contains("FireRed"))
-            && (modelManager.isDownloadActive)
-
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle(isOn: Binding(
-                get: { isOn },
-                set: { newValue in
-                    if newValue && !fireRedReady {
-                        Task { await downloadFireRedFromToggle() }
-                    } else {
-                        _ = modelManager.setUseFireRedForChinese(newValue)
-                    }
-                }
-            )) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Use FireRed for Chinese transcription")
-                        .font(.body)
-                    Text("\(ModelBackend.fireRed.sizeDescription) additional · "
-                         + "Routes Chinese audio to FireRed for better accuracy. "
-                         + "Other languages stay on Cohere. V1 only.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .disabled(modelManager.isDownloadActive && !isDownloadingFireRed)
-
-            if isDownloadingFireRed {
-                ProgressView().controlSize(.small)
-            }
-        }
-        .padding(.leading, 24)
-    }
-
-    /// Download the FireRed model on behalf of a user enabling the toggle.
-    /// On success, set the toggle ON. On failure or cancellation, leave it OFF.
-    ///
-    /// Note: `ModelManager.statusMessage` is `@Published private(set)` so we
-    /// cannot set a custom "Downloading FireRed model..." string from here.
-    /// The user-facing label comes from the existing `statusMessage` writes
-    /// inside `download()` (e.g. "Downloading speech model...", "Downloading:
-    /// X MB"). The Model Status section already reflects active backend, so
-    /// the in-progress download is attributed to FireRed via the section
-    /// header. The `isDownloadingFireRed` heuristic above looks for "FireRed"
-    /// in the status string — see `engineRow(.fireRed)` style if richer state
-    /// signaling becomes needed.
-    private func downloadFireRedFromToggle() async {
-        let savedBackend = modelManager.activeBackend
-        // Temporarily flip activeBackend to .fireRed so download() targets it.
-        // Restore after the download completes (success or failure).
-        guard modelManager.setActiveBackend(.fireRed) else {
-            return
-        }
-        do {
-            try await modelManager.download()
-            _ = modelManager.setActiveBackend(savedBackend)
-            _ = modelManager.setUseFireRedForChinese(true)
-        } catch {
-            _ = modelManager.setActiveBackend(savedBackend)
-            // Error alert is handled by the existing ModelManager status path.
-        }
-    }
-
-    /// Toggle row for the CT-Transformer ASR-punctuation aux model.
-    /// Always visible (independent of active backend), since it works as
-    /// a post-processor for any backend's bare transcript.
-    @ViewBuilder
-    private var asrPunctuationToggleRow: some View {
-        let isOn = modelManager.useASRPunctuation
-        let auxState = modelManager.auxiliaryState(for: .punctuationCT)
-        let isReady: Bool = {
-            if case .ready = auxState { return true }
-            return false
-        }()
-        let isDownloading: Bool = {
-            if case .downloading = auxState { return true }
-            return false
-        }()
-
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle(isOn: Binding(
-                get: { isOn },
-                set: { newValue in
-                    if newValue && !isReady {
-                        Task { await downloadASRPuncFromToggle() }
-                    } else {
-                        _ = modelManager.setUseASRPunctuation(newValue)
-                    }
-                }
-            )) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Add punctuation to ASR transcripts")
-                        .font(.body)
-                    Text("\(AuxiliaryModel.punctuationCT.sizeDescription) additional · "
-                         + "Adds ，。？！ to bare ASR output (FireRed never emits punctuation; "
-                         + "Cohere's punctuation is preserved unchanged). Skipped for English. "
-                         + "~1 ms per clip.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .disabled(isDownloading)
-
-            if isDownloading,
-               let progress = modelManager.auxiliaryProgress[.punctuationCT] {
-                ProgressView(value: progress).controlSize(.small)
-            }
-        }
-    }
-
-    /// Download the punctuation aux model on behalf of a user enabling the
-    /// toggle. On success, commit the toggle ON; on failure, leave OFF.
-    private func downloadASRPuncFromToggle() async {
-        do {
-            try await modelManager.downloadAuxiliary(.punctuationCT)
-            _ = modelManager.setUseASRPunctuation(true)
-        } catch {
-            // Error surfaces via auxiliary state; toggle simply stays OFF.
-        }
+    private static func formatBytes(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     /// Toggle row for the Silero VAD aux model. When ON, drives the live
-    /// silence gate, hands-free auto-stop, V3 streaming chunk
-    /// boundaries, and long-audio chunking + paragraph breaks.
+    /// silence gate and hands-free auto-stop.
     @ViewBuilder
     private var vadToggleRow: some View {
         let isOn = modelManager.useVAD
@@ -788,9 +612,8 @@ struct SettingsView: View {
                     Text("Use Silero voice activity detection")
                         .font(.body)
                     Text("\(AuxiliaryModel.sileroVad.sizeDescription) additional · "
-                         + "Replaces the peak-RMS silence gate, drives hands-free "
-                         + "auto-stop and streaming chunk boundaries, and inserts "
-                         + "paragraph breaks in long-audio transcripts.")
+                         + "More reliable silence detection, and required for "
+                         + "hands-free auto-stop.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
