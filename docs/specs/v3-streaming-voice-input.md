@@ -1,7 +1,7 @@
 # V3 — Streaming Voice Input
 
 **Author:** @PM
-**Status:** GO
+**Status:** SUPERSEDED (2026-10-10). The app no longer types text into the target app during a recording or replaces it afterwards. Streaming shows the text in a preview bubble and inserts once at the end. The sections on chunk injection, AX replace and the focus guard describe code that was removed in 0.5.1.
 **Created:** 2026-04-10
 **Revision:** 4 (Phase 0 GO — spike實測裁定、chunk=3s確定、AX replace TBD)
 **Depends on:** V2 Audio Transcription (chunked pipeline)
