@@ -11,7 +11,7 @@ final class OnboardingViewModelTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        coordinator = AppCoordinator(
+        coordinator = makeTestCoordinator(
             transcription: SpyTranscriptionService(),
             pill: SpyPillController()
         )
@@ -19,7 +19,7 @@ final class OnboardingViewModelTests: XCTestCase {
         appliedHotkeys = []
         viewModel = OnboardingViewModel(
             coordinator: coordinator,
-            modelManager: ModelManager(),
+            modelManager: makeTestModelManager(),
             loadHotkey: { [unowned self] in self.savedHotkey },
             applyHotkey: { [unowned self] in self.appliedHotkeys.append($0) }
         )

@@ -169,7 +169,7 @@ final class CoordinatorCorrectionTests: XCTestCase {
         spyTranscription = SpyTranscriptionService()
         spyPill = SpyPillController()
         spyCorrection = SpyCorrector()
-        coordinator = AppCoordinator(
+        coordinator = makeTestCoordinator(
             transcription: spyTranscription,
             pill: spyPill
         )

@@ -216,7 +216,7 @@ final class ModelManager: ObservableObject {
         }
 
         useVAD = newValue
-        UserDefaults.standard.set(newValue, forKey: "useVAD")
+        defaults.set(newValue, forKey: "useVAD")
         committedUseVADChange.send(newValue)
         return true
     }
@@ -276,8 +276,7 @@ final class ModelManager: ObservableObject {
             return override
         }
         #endif
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(backend.modelSubdirectory)
+        return applicationSupport.appendingPathComponent(backend.modelSubdirectory)
     }
 
     var modelPath: URL? {
@@ -428,19 +427,33 @@ final class ModelManager: ObservableObject {
         return manifestIsValid(for: backend)
     }
 
-    init() {
+    /// The user's Application Support directory. Model folders are below it.
+    private let applicationSupport: URL
+    /// Where the VAD toggle is stored.
+    private let defaults: UserDefaults
+
+    /// The app uses the defaults. Tests pass a temporary directory and their
+    /// own `UserDefaults`, so that nothing here reads or changes the models
+    /// and settings of the person who runs them.
+    init(
+        applicationSupport: URL = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0],
+        defaults: UserDefaults = .standard
+    ) {
+        self.applicationSupport = applicationSupport
+        self.defaults = defaults
+
         // Downgrade the VAD toggle to OFF if its model is not actually on disk —
         // guards against stale state when the folder was deleted by hand.
-        let persistedVAD = UserDefaults.standard.bool(forKey: "useVAD")
-        let vadDir = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let persistedVAD = defaults.bool(forKey: "useVAD")
+        let vadDir = applicationSupport
             .appendingPathComponent(AuxiliaryModel.sileroVad.modelSubdirectory)
         let vadFilesPresent = AuxiliaryModel.sileroVad.requiredFiles.allSatisfy {
             FileManager.default.fileExists(atPath: vadDir.appendingPathComponent($0).path)
         }
         let effectiveVAD = persistedVAD && vadFilesPresent
         if persistedVAD && !effectiveVAD {
-            UserDefaults.standard.set(false, forKey: "useVAD")
+            defaults.set(false, forKey: "useVAD")
         }
         self.useVAD = effectiveVAD
 
@@ -815,7 +828,7 @@ final class ModelManager: ObservableObject {
     // MARK: - Leftovers from removed engines
 
     private var legacyURLs: [URL] {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let appSupport = applicationSupport
         return ModelBackend.legacySubdirectories.map { appSupport.appendingPathComponent($0) }
             + [appSupport.appendingPathComponent("Murmur/cabundle.pem")]
     }
@@ -1051,8 +1064,7 @@ final class ModelManager: ObservableObject {
             return override
         }
         #endif
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(aux.modelSubdirectory)
+        return applicationSupport.appendingPathComponent(aux.modelSubdirectory)
     }
 
     /// Manifest path for an auxiliary model — stored inside its own directory

@@ -29,7 +29,7 @@ final class M4AAutoDeleteTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString)
             .appendingPathComponent("history.json")
         historyService = TranscriptionHistoryService(storeURL: storeURL)
-        coordinator = AppCoordinator()
+        coordinator = makeTestCoordinator()
 
         // 建立一個真實的臨時文件模擬m4a
         fakeAudioURL = FileManager.default.temporaryDirectory
@@ -152,7 +152,7 @@ final class CancelM4ACleanupTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString)
             .appendingPathComponent("history.json")
         historyService = TranscriptionHistoryService(storeURL: storeURL)
-        coordinator = AppCoordinator()
+        coordinator = makeTestCoordinator()
 
         fakeAudioURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString).m4a")
@@ -296,7 +296,7 @@ final class PythonCrashHistoryFailedTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString)
             .appendingPathComponent("history.json")
         historyService = TranscriptionHistoryService(storeURL: storeURL)
-        coordinator = AppCoordinator()
+        coordinator = makeTestCoordinator()
 
         fakeAudioURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString).m4a")
@@ -549,7 +549,7 @@ final class M4APathLifecycleTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString)
             .appendingPathComponent("history.json")
         historyService = TranscriptionHistoryService(storeURL: storeURL)
-        coordinator = AppCoordinator()
+        coordinator = makeTestCoordinator()
     }
 
     override func tearDownWithError() throws {

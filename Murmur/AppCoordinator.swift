@@ -73,6 +73,9 @@ final class AppCoordinator: ObservableObject {
     let permissions: PermissionsService
     let audioFeedback: AudioFeedbackService
     let pill: any PillControlling
+    /// False in tests: a test must not take a system-wide key from the
+    /// person who runs it. Events sent with `hotkey.emit` still arrive.
+    private let registersGlobalHotkey: Bool
 
     /// The optional ASR error-correction step that runs on the transcribed
     /// text before it is inserted.
@@ -198,8 +201,10 @@ final class AppCoordinator: ObservableObject {
         injection: TextInjectionService = TextInjectionService(),
         permissions: PermissionsService = PermissionsService(),
         audioFeedback: AudioFeedbackService = AudioFeedbackService(),
-        pill: any PillControlling = FloatingPillController()
+        pill: any PillControlling = FloatingPillController(),
+        registersGlobalHotkey: Bool = true
     ) {
+        self.registersGlobalHotkey = registersGlobalHotkey
         self.hotkey = hotkey
         self.audio = audio
         self.transcription = transcription
@@ -224,12 +229,8 @@ final class AppCoordinator: ObservableObject {
         applyRecordingMode(savedMode)
 
         // Load saved hotkey or use default (right command)
-        if let keyCode = UserDefaults.standard.object(forKey: "hotkeyKeyCode") as? Int,
-           let modsRaw = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? UInt,
-           let key = Key(carbonKeyCode: UInt32(keyCode)) {
-            hotkey.register(trigger: .keyCombo(key: key, modifiers: NSEvent.ModifierFlags(rawValue: modsRaw)))
-        } else {
-            hotkey.register(trigger: .rightCommand)
+        if registersGlobalHotkey {
+            hotkey.register(trigger: HotkeyPreference.load())
         }
 
         hotkeyTask = Task { [weak self] in

@@ -183,7 +183,7 @@ final class CoordinatorDeliveryTests: XCTestCase {
 
     @MainActor
     func test_text_isPastedOnce_andRecordedInHistory() async {
-        let coordinator = AppCoordinator(transcription: StubDictationEngine(text: "hello world"), pill: pill)
+        let coordinator = makeTestCoordinator(transcription: StubDictationEngine(text: "hello world"), pill: pill)
         let pasted = LockedList<String>()
 
         await coordinator.stopAndTranscribeV1ForTesting(wav: wav, lang: "en") { text in
@@ -199,7 +199,7 @@ final class CoordinatorDeliveryTests: XCTestCase {
 
     @MainActor
     func test_emptyTranscript_isNotPasted_andNotRecorded() async {
-        let coordinator = AppCoordinator(transcription: StubDictationEngine(text: " \n"), pill: pill)
+        let coordinator = makeTestCoordinator(transcription: StubDictationEngine(text: " \n"), pill: pill)
         let pasted = LockedList<String>()
 
         await coordinator.stopAndTranscribeV1ForTesting(wav: wav, lang: "en") { text in
@@ -216,7 +216,7 @@ final class CoordinatorDeliveryTests: XCTestCase {
 
     @MainActor
     func test_failedPaste_entersErrorState_andRecordsNothing() async {
-        let coordinator = AppCoordinator(transcription: StubDictationEngine(text: "hello world"), pill: pill)
+        let coordinator = makeTestCoordinator(transcription: StubDictationEngine(text: "hello world"), pill: pill)
 
         await coordinator.stopAndTranscribeV1ForTesting(wav: wav, lang: "en") { _ in
             throw MurmurError.injectionFailed("no target")
@@ -228,7 +228,7 @@ final class CoordinatorDeliveryTests: XCTestCase {
 
     @MainActor
     func test_recording_isDeleted_afterSuccessfulTranscription() async {
-        let coordinator = AppCoordinator(transcription: StubDictationEngine(text: "hello world"), pill: pill)
+        let coordinator = makeTestCoordinator(transcription: StubDictationEngine(text: "hello world"), pill: pill)
 
         await coordinator.stopAndTranscribeV1ForTesting(wav: wav, lang: "en")
 
@@ -238,7 +238,7 @@ final class CoordinatorDeliveryTests: XCTestCase {
 
     @MainActor
     func test_recording_isDeleted_afterFailedTranscription() async {
-        let coordinator = AppCoordinator(
+        let coordinator = makeTestCoordinator(
             transcription: StubDictationEngine(error: MurmurError.transcriptionFailed("boom")),
             pill: pill
         )
@@ -259,7 +259,7 @@ final class CoordinatorHotkeySyncTests: XCTestCase {
     /// coordinator decides. When the coordinator refuses to start, the next
     /// press must be another start, not a swallowed "stop".
     func test_refusedStart_leavesTheNextPressAStart() async {
-        let coordinator = AppCoordinator(transcription: StubDictationEngine(text: ""), pill: SpyPillController())
+        let coordinator = makeTestCoordinator(transcription: StubDictationEngine(text: ""), pill: SpyPillController())
         let attempts = LockedCounter()
         coordinator.startPreflightOverride = {
             attempts.increment()
@@ -281,7 +281,7 @@ final class CoordinatorHotkeySyncTests: XCTestCase {
     /// transcription must drop it, or the microphone opens by itself after
     /// the next, unrelated dictation.
     func test_endWindowTranscription_dropsTheQueuedRecording() async {
-        let coordinator = AppCoordinator(transcription: StubDictationEngine(text: ""), pill: SpyPillController())
+        let coordinator = makeTestCoordinator(transcription: StubDictationEngine(text: ""), pill: SpyPillController())
         let attempts = LockedCounter()
         coordinator.startPreflightOverride = {
             attempts.increment()
@@ -307,7 +307,7 @@ final class CoordinatorHotkeySyncTests: XCTestCase {
     }
 
     func test_stopEvent_takesBackTheQueuedRecording() async {
-        let coordinator = AppCoordinator(transcription: StubDictationEngine(text: ""), pill: SpyPillController())
+        let coordinator = makeTestCoordinator(transcription: StubDictationEngine(text: ""), pill: SpyPillController())
         coordinator.startPreflightOverride = { nil }
 
         coordinator.beginWindowTranscription()
@@ -333,7 +333,7 @@ final class CoordinatorSleepTests: XCTestCase {
     /// notification center only; an observer on the default center never runs.
     func test_modelIsUnloaded_whenTheWorkspaceAnnouncesSleep() async {
         let engine = StubDictationEngine(text: "")
-        let coordinator = AppCoordinator(transcription: engine, pill: SpyPillController())
+        let coordinator = makeTestCoordinator(transcription: engine, pill: SpyPillController())
 
         // The coordinator registers its observers on the next main-actor
         // turn, so keep announcing until one of them has run.
