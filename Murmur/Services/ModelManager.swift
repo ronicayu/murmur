@@ -348,10 +348,9 @@ final class ModelManager: ObservableObject {
             // Skip the manifest file itself
             guard fileURL.lastPathComponent != ModelManifest.filename else { continue }
 
-            let data = try Data(contentsOf: fileURL)
-            let hash = SHA256.hash(data: data)
-            let hashStr = hash.map { String(format: "%02x", $0) }.joined()
             let size = Int64(values.fileSize ?? 0)
+            // Hashed in pieces: a model file is up to 750 MB.
+            let hashStr = try HFDownload.digests(of: fileURL, gitBlobSize: size).sha256
             let resolvedPath = fileURL.resolvingSymlinksInPath().path
             let relative: String
             if resolvedPath.hasPrefix(rootPrefix) {

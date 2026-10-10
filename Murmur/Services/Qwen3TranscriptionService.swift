@@ -9,13 +9,20 @@ import os
 /// session is not thread-safe, so all transcribe calls serialise here.
 ///
 /// Lifetime: the recognizer is created on first use (or `preloadModel`) and
-/// kept until `unloadModel`. Loading the three ONNX graphs takes ~1 s on a Mac
-/// M-series, so it is not reloaded per request.
+/// kept until `unloadModel` or until it has been idle for `idleUnloadSeconds`.
+/// Loading the three ONNX graphs takes ~1 s on a Mac M-series, so it is not
+/// reloaded per request.
 actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
 
     private let logger = Logger(subsystem: "com.murmur.app", category: "qwen3")
     private let modelDirectory: URL
     private var recognizer: SherpaOnnxOfflineRecognizer?
+
+    /// The loaded model holds 2–4 GB. It is released when nothing has used
+    /// it for this long, and loaded again (about a second) at the next use.
+    private let idleUnloadSeconds: TimeInterval
+    private var idleUnload: IdleTrigger?
+    private var lastUse = Date.distantPast
 
     /// A silence this long becomes a paragraph break in `transcribeLong` output.
     static let paragraphBreakGapSeconds: Double = 2.0
@@ -29,18 +36,40 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
     ///   `csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25` HF repo. It
     ///   does not need to exist yet; loading fails with `modelNotFound` until
     ///   the model has been downloaded.
-    init(modelDirectory: URL) {
+    init(modelDirectory: URL, idleUnloadSeconds: TimeInterval = 300) {
         self.modelDirectory = modelDirectory
+        self.idleUnloadSeconds = idleUnloadSeconds
     }
 
     // MARK: - TranscriptionServiceProtocol
 
     func preloadModel() async throws {
+        defer { noteUse() }
         _ = try loadedRecognizer()
     }
 
     func unloadModel() async {
+        idleUnload?.cancel()
         recognizer = nil
+    }
+
+    /// Restarts the idle countdown. Called when a use of the model ends.
+    private func noteUse() {
+        lastUse = Date()
+        if idleUnload == nil {
+            idleUnload = IdleTrigger(seconds: idleUnloadSeconds) { [weak self] in
+                await self?.unloadIfIdle()
+            }
+        }
+        idleUnload?.touch()
+    }
+
+    /// The countdown can end while a long transcription holds the actor;
+    /// this then runs after it, when the model has just been used.
+    private func unloadIfIdle() {
+        guard recognizer != nil, Date().timeIntervalSince(lastUse) >= idleUnloadSeconds else { return }
+        recognizer = nil
+        logger.info("Qwen3-ASR model unloaded after \(Int(self.idleUnloadSeconds)) s without use")
     }
 
     func killProcess() async {
@@ -51,6 +80,7 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
     /// produced by `SpokenLanguages.hint(for:)`. The model detects the spoken
     /// language itself; the hint only says which scripts to expect (see `judge`).
     func transcribe(audioURL: URL, language: String) async throws -> TranscriptionResult {
+        defer { noteUse() }
         let start = CFAbsoluteTimeGetCurrent()
         let samples = try Self.loadAudio(url: audioURL)
         let text = try decode(samples: samples, language: language)
@@ -60,21 +90,28 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
 
     /// Transcribe a long file, reporting progress after each piece. Long
     /// silences are skipped and become paragraph breaks.
+    ///
+    /// The file stays on disk: one pass finds the loud stretches, a second
+    /// finds where to cut, and each piece is read only to be decoded. At most
+    /// one piece (`maxSegmentSeconds`) is in memory at a time.
     func transcribeLong(
         audioURL: URL,
         language: String,
         onProgress: @escaping (TranscriptionProgress) -> Void
     ) async throws -> TranscriptionResult {
+        defer { noteUse() }
         let start = CFAbsoluteTimeGetCurrent()
         let recognizer = try loadedRecognizer()
-        let samples = try Self.loadAudio(url: audioURL)
-        let sampleRate = 16_000
+        let source = try LongAudioSource(url: audioURL)
+        let sampleRate = LongAudioSource.sampleRate
 
         // Paragraphs first (split at long silences), then each paragraph into
         // pieces short enough for one decode.
-        let paragraphs = Self.paragraphRanges(samples: samples, sampleRate: sampleRate).map { paragraph in
-            Self.segmentRanges(samples: Array(samples[paragraph]), sampleRate: sampleRate)
-                .map { (paragraph.lowerBound + $0.lowerBound)..<(paragraph.lowerBound + $0.upperBound) }
+        let loud = try Self.loudFrames(of: source)
+        var paragraphs: [[Range<Int>]] = []
+        for paragraph in Self.paragraphRanges(loud: loud, sampleCount: source.count, sampleRate: sampleRate) {
+            try Task.checkCancellation()
+            paragraphs.append(try Self.segmentRanges(of: paragraph, in: source))
         }
         let totalPieces = paragraphs.reduce(0) { $0 + $1.count }
 
@@ -84,7 +121,7 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
             var texts: [String] = []
             for range in pieces {
                 try Task.checkCancellation()
-                let piece = decodeWithRetry(Array(samples[range]), sampleRate: sampleRate, language: language, recognizer: recognizer)
+                let piece = decodeWithRetry(try source.read(range), sampleRate: sampleRate, language: language, recognizer: recognizer)
                 if !piece.isEmpty { texts.append(piece) }
                 done += 1
                 let partial = (paragraphTexts + [Self.joined(texts)]).filter { !$0.isEmpty }.joined(separator: "\n\n")
@@ -103,6 +140,7 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
     func transcribe(samples: [Float], sampleRate: Int, language: String = "") async throws -> String {
         precondition(sampleRate == 16000,
                      "Qwen3TranscriptionService requires 16 kHz audio; got \(sampleRate)")
+        defer { noteUse() }
         return try decode(samples: samples, language: language)
     }
 
@@ -383,30 +421,59 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
         let maxLength = Int(maxSegmentSeconds * Double(sampleRate))
         guard samples.count > maxLength else { return [0..<samples.count] }
 
-        let search = Int(splitSearchSeconds * Double(sampleRate))
-        let frame = max(1, sampleRate * 3 / 10)
-        let hop = max(1, frame / 3)
         var ranges: [Range<Int>] = []
         var start = 0
         while samples.count - start > maxLength {
-            let limit = start + maxLength
-            var bestCut = limit
-            var bestEnergy = Float.greatestFiniteMagnitude
-            var position = limit - search
-            while position + frame <= limit {
-                var energy: Float = 0
-                for i in position..<(position + frame) { energy += samples[i] * samples[i] }
-                if energy < bestEnergy {
-                    bestEnergy = energy
-                    bestCut = position + frame / 2
-                }
-                position += hop
-            }
-            ranges.append(start..<bestCut)
-            start = bestCut
+            let cut = start + quietestCut(in: samples[start..<(start + maxLength)], sampleRate: sampleRate)
+            ranges.append(start..<cut)
+            start = cut
         }
         ranges.append(start..<samples.count)
         return ranges
+    }
+
+    /// The same split as `segmentRanges(samples:sampleRate:)` for the part
+    /// `range` of a recording on disk. Reads one `maxSegmentSeconds` window at
+    /// a time.
+    nonisolated static func segmentRanges(of range: Range<Int>, in source: LongAudioSource) throws -> [Range<Int>] {
+        let sampleRate = LongAudioSource.sampleRate
+        let maxLength = Int(maxSegmentSeconds * Double(sampleRate))
+        var ranges: [Range<Int>] = []
+        var start = range.lowerBound
+        while range.upperBound - start > maxLength {
+            let window = try source.read(start..<(start + maxLength))
+            // A file shorter than its header says: stop instead of looping.
+            guard window.count == maxLength else { break }
+            let cut = start + quietestCut(in: window[...], sampleRate: sampleRate)
+            ranges.append(start..<cut)
+            start = cut
+        }
+        if start < range.upperBound { ranges.append(start..<range.upperBound) }
+        return ranges
+    }
+
+    /// Where to cut a window that is exactly `maxSegmentSeconds` long: the
+    /// middle of its quietest 0.3 s within the last `splitSearchSeconds`, as
+    /// an offset from the start of the window.
+    private nonisolated static func quietestCut(in window: ArraySlice<Float>, sampleRate: Int) -> Int {
+        let search = Int(splitSearchSeconds * Double(sampleRate))
+        let frame = max(1, sampleRate * 3 / 10)
+        let hop = max(1, frame / 3)
+        let base = window.startIndex
+        let limit = window.count
+        var bestCut = limit
+        var bestEnergy = Float.greatestFiniteMagnitude
+        var position = limit - search
+        while position + frame <= limit {
+            var energy: Float = 0
+            for i in position..<(position + frame) { energy += window[base + i] * window[base + i] }
+            if energy < bestEnergy {
+                bestEnergy = energy
+                bestCut = position + frame / 2
+            }
+            position += hop
+        }
+        return bestCut
     }
 
     /// Joins per-segment transcripts. A space is added only between two Latin
@@ -432,16 +499,41 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
     /// is kept on each side so no word edge is clipped). Audio with no such
     /// silence comes back as one range; all-silent audio as none.
     nonisolated static func paragraphRanges(samples: [Float], sampleRate: Int) -> [Range<Int>] {
+        var loud: [Bool] = []
+        appendLoudFrames(of: samples, sampleRate: sampleRate, to: &loud)
+        return paragraphRanges(loud: loud, sampleCount: samples.count, sampleRate: sampleRate)
+    }
+
+    /// Whether each 100 ms frame of a recording on disk reaches whisper level.
+    nonisolated static func loudFrames(of source: LongAudioSource) throws -> [Bool] {
+        let sampleRate = LongAudioSource.sampleRate
         let frame = max(1, sampleRate / 10)
-        let frameCount = (samples.count + frame - 1) / frame
-        var loud = [Bool](repeating: false, count: frameCount)
-        for index in 0..<frameCount {
-            let start = index * frame
+        var loud: [Bool] = []
+        loud.reserveCapacity(source.count / frame + 1)
+        // Blocks are a whole number of frames, so frame edges fall where they
+        // would in one pass over all the samples.
+        try source.forEachBlock(of: frame * 100) { block in
+            appendLoudFrames(of: block, sampleRate: sampleRate, to: &loud)
+        }
+        return loud
+    }
+
+    private nonisolated static func appendLoudFrames(of samples: [Float], sampleRate: Int, to loud: inout [Bool]) {
+        let frame = max(1, sampleRate / 10)
+        var start = 0
+        while start < samples.count {
             let end = min(start + frame, samples.count)
             var sum: Float = 0
             for i in start..<end { sum += samples[i] * samples[i] }
-            loud[index] = (sum / Float(end - start)).squareRoot() >= 0.00316
+            loud.append((sum / Float(end - start)).squareRoot() >= 0.00316)
+            start = end
         }
+    }
+
+    /// `paragraphRanges(samples:sampleRate:)` from the per-frame loudness.
+    nonisolated static func paragraphRanges(loud: [Bool], sampleCount: Int, sampleRate: Int) -> [Range<Int>] {
+        let frame = max(1, sampleRate / 10)
+        let frameCount = loud.count
 
         let gapFrames = Int(paragraphBreakGapSeconds * 10)
         let margin = 3  // 0.3 s of the silence kept around speech
@@ -461,7 +553,7 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
 
         return ranges.map { frames in
             let start = max(0, frames.lowerBound - margin) * frame
-            let end = min(samples.count, (frames.upperBound + margin) * frame)
+            let end = min(sampleCount, (frames.upperBound + margin) * frame)
             return start..<end
         }
     }

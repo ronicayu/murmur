@@ -11,6 +11,10 @@
 ### Added
 - **Retry for a failed file transcription.** When transcription of a recording made in the Transcription window fails, the recording is kept. The history context menu and the result view now have Retry, which transcribes it again into the same entry.
 
+### Changed
+- **Murmur uses much less memory when you are not dictating.** The speech model holds 1.7 GB when loaded and up to about 4 GB after use. It was loaded at launch and kept for good. It is now loaded when a recording starts, while you speak, and released after 5 minutes without use. Measured with the engine alone: 3 MB at launch instead of 1.7 GB, and about 0.8 GB after an idle period instead of about 3 GB.
+- **File transcription reads the file from disk a piece at a time.** A two-hour file took 440 MB for the whole run and 880 MB while it loaded; now at most one 40-second piece is in memory. A file that is not 16 kHz mono WAV is converted once to a temporary file, which is deleted when the transcription ends. The transcript of a WAV file is unchanged. The transcript of a compressed file can differ in a few words, because its audio is now decoded in pieces and the samples differ in their last bit.
+
 ### Accessibility
 - **VoiceOver hears the end of a dictation.** The pill never takes focus, so VoiceOver did not read it. Murmur now announces "Transcribing", "Inserted" and errors. Nothing is announced while the microphone is open.
 - **Escape leaves the shortcut recorder.** Before, the only way out with the keyboard was to record a new shortcut.
