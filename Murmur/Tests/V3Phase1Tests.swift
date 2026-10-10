@@ -487,16 +487,14 @@ final class CPULoadMonitorTests: XCTestCase {
             sustainedSeconds: 0.5,
             pollInterval: 0.1
         )
-        var callbackFired = false
+        let fires = LockedCounter()
         await MainActor.run {
-            monitor.onSustainedHighLoad = { callbackFired = true }
+            monitor.onSustainedHighLoad = { fires.increment() }
         }
         monitor.start()
         try await Task.sleep(for: .seconds(1))
-        let fired = await MainActor.run { () -> Bool in
-            monitor.stop()
-            return callbackFired
-        }
+        await MainActor.run { monitor.stop() }
+        let fired = fires.value > 0
 
         XCTAssertFalse(fired,
             "Callback must not fire when CPU load never exceeds the threshold")
@@ -509,20 +507,21 @@ final class CPULoadMonitorTests: XCTestCase {
             sustainedSeconds: 0.1,
             pollInterval: 0.05
         )
-        var callbackCount = 0
+        let fires = LockedCounter()
         await MainActor.run {
-            monitor.onSustainedHighLoad = { callbackCount += 1 }
+            monitor.onSustainedHighLoad = { fires.increment() }
         }
         monitor.start()
         try await Task.sleep(for: .seconds(0.5))
-        let countAtStop = await MainActor.run { () -> Int in
-            monitor.stop()
-            return callbackCount
-        }
+        await MainActor.run { monitor.stop() }
+        // Let a callback that was already in flight when stop() ran land
+        // before taking the baseline.
+        try await Task.sleep(for: .seconds(0.1))
+        let countAtStop = fires.value
         try await Task.sleep(for: .seconds(0.3))
 
         // After stop, count must not increase
-        let finalCount = await MainActor.run { callbackCount }
+        let finalCount = fires.value
         XCTAssertEqual(finalCount, countAtStop,
             "stop() must prevent further callbacks")
     }
@@ -1241,47 +1240,47 @@ final class CPULoadMonitorEdgeCaseTests: XCTestCase {
             sustainedSeconds: 0.1,
             pollInterval: 0.05
         )
-        var fired = false
-        await MainActor.run { monitor.onSustainedHighLoad = { fired = true } }
+        let fires = LockedCounter()
+        await MainActor.run { monitor.onSustainedHighLoad = { fires.increment() } }
         monitor.start()
         try await Task.sleep(for: .seconds(0.4))
         await MainActor.run { monitor.stop() }
 
-        XCTAssertFalse(fired,
+        XCTAssertFalse(fires.value > 0,
             "onSustainedHighLoad must not fire when load never exceeds impossible threshold")
     }
 
     // MARK: 14b — multiple start/stop cycles do not cause double-firing
 
     func test_cpuMonitor_startStop_multipleCycles_noDoubleFire() async throws {
-        var fireCount = 0
+        let fires = LockedCounter()
         let monitor = CPULoadMonitor(
             threshold: 0.0,
             sustainedSeconds: 0.05,
             pollInterval: 0.02
         )
-        await MainActor.run { monitor.onSustainedHighLoad = { fireCount += 1 } }
+        await MainActor.run { monitor.onSustainedHighLoad = { fires.increment() } }
 
         // First cycle: with threshold 0.0 the monitor detects sustained load
         // and fires exactly once (evaluate() self-stops on fire). Poll for the
         // fire rather than sleeping a fixed window — under machine load the
         // detached poller can be starved past any fixed budget.
         monitor.start()
-        let firedFirst = await pollUntil { fireCount >= 1 }
+        let firedFirst = await pollUntil { fires.value >= 1 }
         XCTAssertTrue(firedFirst,
             "With threshold=0.0, callback must fire at least once during start")
-        let firstCount = await MainActor.run { fireCount }
+        let firstCount = fires.value
 
         // After an explicit stop, the count must not advance.
         await MainActor.run { monitor.stop() }
         try await Task.sleep(for: .seconds(0.1))
-        let countAfterStop = await MainActor.run { fireCount }
+        let countAfterStop = fires.value
         XCTAssertEqual(firstCount, countAfterStop,
             "stop() must freeze the callback count — no fires in the stopped gap")
 
         // Second cycle fires again — start/stop is reusable.
         monitor.start()
-        let firedSecond = await pollUntil { fireCount > firstCount }
+        let firedSecond = await pollUntil { fires.value > firstCount }
         await MainActor.run { monitor.stop() }
         XCTAssertTrue(firedSecond,
             "Second start cycle must fire again after a prior stop")
