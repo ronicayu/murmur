@@ -8,7 +8,7 @@ import os
 enum AppState: Equatable, Sendable {
     case idle
     case recording
-    /// V3: recording + streaming chunk injection in progress.
+    /// Recording with streaming on; the preview has `chunkCount` pieces of text.
     case streaming(chunkCount: Int)
     case transcribing
     case injecting
@@ -741,7 +741,7 @@ final class AppCoordinator: ObservableObject {
 
     /// Post-process a finished transcription, insert it at the cursor, record
     /// it in history and show the "Inserted" pill. Shared by the V1 full-pass
-    /// path and streaming preview sessions, which both insert the text once.
+    /// path and streaming sessions, which both insert the text once.
     ///
     /// Returns false, and inserts and records nothing, when there is no text:
     /// pasting an empty string would replace the user's selection with
