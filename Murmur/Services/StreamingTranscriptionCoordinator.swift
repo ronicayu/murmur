@@ -345,6 +345,12 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     private var windowDirty = false
     /// After a window force-reset, the next Latin-leading delta gets a separating space.
     private var pendingWindowSeparator = false
+    /// Text confirmed but not yet pasted. Pastes run one at a time: each goes
+    /// through the clipboard and a synthetic Cmd+V, so two overlapping pastes
+    /// would both insert whichever text reached the clipboard last — one delta
+    /// typed twice and the other lost.
+    private var pendingInjections: [String] = []
+    private var isDrainingInjections = false
     /// Incremental mode: the window is re-transcribed on a fixed short cadence
     /// over *all* captured audio instead of once per closed VAD segment. Only
     /// worth it with an engine fast enough to keep up (see `beginSession`).
@@ -448,6 +454,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         self.windowDirty = false
         self.pendingWindowSeparator = false
         self.incrementalMode = incrementalSeconds != nil
+        self.pendingInjections = []
 
         // Build a fresh per-session VAD if a model is configured.
         // minSilenceDurationSeconds: 0.8 — Silero's 0.25 s default closes
@@ -518,22 +525,54 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         }
         accumulator = nil
 
-        // Emit whatever the aggregator has confirmed/withheld so the streamed preview is
-        // complete before the full-pass replaces it. This also covers the short
-        // single-utterance case: LocalAgreement-2 emits nothing until a second pass
-        // agrees, so without this flush a one-phrase dictation would have streamed
-        // nothing — and the full-pass only *replaces* existing streamed text, never
-        // inserts from empty.
-        let pendingTail = aggregator.flushAndReset()
-        if !pendingTail.isEmpty { injectDelta(pendingTail) }
-
         finalizingStartedAt = Date()
         transition(to: .finalizing)
         logger.info("StreamingCoordinator: session ending, starting full-pass")
 
         Task { @MainActor [weak self] in
+            await self?.finishStreamedText()
             await self?.runFullPass()
         }
+    }
+
+    /// Bring the streamed text up to the end of the recording before the full pass.
+    ///
+    /// The last hypothesis the aggregator saw predates the final stretch of audio
+    /// (anything captured after the last pass started), so flushing it as-is drops
+    /// the closing words. Transcribe the final window once more and emit everything
+    /// after the already-typed words. This matters most where the full-pass
+    /// replacement cannot run (apps without AX range replace): there the streamed
+    /// text is the final text.
+    ///
+    /// It also covers the short single-utterance case: LocalAgreement-2 emits
+    /// nothing until a second pass agrees, and the full pass only *replaces*
+    /// streamed text — it never inserts from empty.
+    private func finishStreamedText() async {
+        // Let a pass that was already running finish; its result is ignored
+        // (the session is no longer `.streaming`) but it holds the model.
+        let deadline = Date().addingTimeInterval(5)
+        while transcriptionInFlight && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+
+        if !windowSamples.isEmpty,
+           !(incrementalMode && Self.isSilent(windowSamples)),
+           let wavURL = writeSamplesToTempWAV(windowSamples) {
+            let transcription = self.transcription
+            let lang = self.language
+            let text = try? await transcription.transcribe(audioURL: wavURL, language: lang).text
+            try? FileManager.default.removeItem(at: wavURL)
+            if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let delta = aggregator.ingest(text)
+                if !delta.isEmpty { injectDelta(delta) }
+            }
+        }
+        windowSamples.removeAll()
+
+        let pendingTail = aggregator.flushAndReset()
+        if !pendingTail.isEmpty { injectDelta(pendingTail) }
+
+        await waitForInjectionsToDrain()
     }
 
     /// Reset the coordinator to idle so it can be reused for the next session.
@@ -561,6 +600,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         focusAbandonTask = nil
         cpuMonitor.stop()
         accumulator = nil
+        pendingInjections.removeAll()
         transition(to: .cancelled)
         logger.info("StreamingCoordinator: session cancelled")
     }
@@ -656,7 +696,12 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
             && windowSamples.count >= Int(Self.chunkSampleRate * Self.minPauseResetSeconds)
 
         if windowSamples.count >= Self.maxWindowSamples || pausedAtBoundary {
-            let tail = aggregator.flushAndReset()
+            var tail = aggregator.flushAndReset()
+            if !pausedAtBoundary {
+                // The cap cut mid-speech; a punctuating model still ends the
+                // partial hypothesis with a full stop that nobody spoke.
+                tail = Self.droppingTrailingSentenceEnd(tail)
+            }
             if !tail.isEmpty { injectDelta(tail) }
             windowSamples.removeAll(keepingCapacity: true)
             pendingWindowSeparator = true
@@ -686,41 +731,73 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
             transition(to: .streaming(chunkCount: chunkCount))
         }
 
+        pendingInjections.append(textToInject)
+        drainInjectionsIfIdle()
+    }
+
+    /// Paste queued deltas one at a time, coalescing whatever accumulated while
+    /// the previous paste was in progress into a single paste.
+    private func drainInjectionsIfIdle() {
+        guard !isDrainingInjections else { return }
+        isDrainingInjections = true
         Task { @MainActor [weak self] in
             guard let self else { return }
+            while !self.pendingInjections.isEmpty {
+                let text = self.pendingInjections.joined()
+                self.pendingInjections.removeAll()
+                await self.performInjection(text)
+            }
+            self.isDrainingInjections = false
+        }
+    }
 
-            // DA-P0-2: Verify AX cursor has not moved mid-session before injecting.
-            // If the cursor offset differs from our expectation, the user edited mid-session;
-            // invalidate the tracker so full-pass replacement is skipped (spec §5 rule 3).
+    /// Resolves once every queued delta has been pasted (or after a short cap).
+    private func waitForInjectionsToDrain() async {
+        let deadline = Date().addingTimeInterval(3)
+        while (isDrainingInjections || !pendingInjections.isEmpty) && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+    }
+
+    private func performInjection(_ textToInject: String) async {
+        // DA-P0-2: Verify AX cursor has not moved mid-session before injecting.
+        // If the cursor offset differs from our expectation, the user edited mid-session;
+        // invalidate the tracker so full-pass replacement is skipped (spec §5 rule 3).
+        if let expectedNext = self.rangeTracker?.expectedNextOffset {
+            let actualOffset = self.resolveCurrentCursorOffsetAX()
+            if actualOffset != nil && actualOffset != expectedNext {
+                self.rangeTracker?.invalidate()
+                self.logger.warning("StreamingCoordinator: cursor mismatch (expected=\(expectedNext), actual=\(actualOffset!)) — tracker invalidated, replacement will be skipped")
+            }
+        }
+
+        do {
+            try await self.injection.appendText(textToInject)
+            // Use UTF-16 code unit count to match AX kAXSelectedTextRangeAttribute units.
+            self.rangeTracker?.recordInjection(length: textToInject.utf16.count)
+
+            // NEW-P1-1: Post-inject cursor verification.
+            // appendText involves a ~1500ms clipboard round-trip; the user may move the cursor
+            // during that window. Check again after injection lands to catch late edits.
             if let expectedNext = self.rangeTracker?.expectedNextOffset {
                 let actualOffset = self.resolveCurrentCursorOffsetAX()
                 if actualOffset != nil && actualOffset != expectedNext {
                     self.rangeTracker?.invalidate()
-                    self.logger.warning("StreamingCoordinator: cursor mismatch (expected=\(expectedNext), actual=\(actualOffset!)) — tracker invalidated, replacement will be skipped")
+                    self.logger.warning("StreamingCoordinator: post-inject cursor mismatch (expected=\(expectedNext), actual=\(actualOffset!)) — tracker invalidated")
                 }
             }
 
-            do {
-                try await self.injection.appendText(textToInject)
-                // Use UTF-16 code unit count to match AX kAXSelectedTextRangeAttribute units.
-                self.rangeTracker?.recordInjection(length: textToInject.utf16.count)
-
-                // NEW-P1-1: Post-inject cursor verification.
-                // appendText involves a ~1500ms clipboard round-trip; the user may move the cursor
-                // during that window. Check again after injection lands to catch late edits.
-                if let expectedNext = self.rangeTracker?.expectedNextOffset {
-                    let actualOffset = self.resolveCurrentCursorOffsetAX()
-                    if actualOffset != nil && actualOffset != expectedNext {
-                        self.rangeTracker?.invalidate()
-                        self.logger.warning("StreamingCoordinator: post-inject cursor mismatch (expected=\(expectedNext), actual=\(actualOffset!)) — tracker invalidated")
-                    }
-                }
-
-                self.logger.info("StreamingCoordinator: delta \(self.chunkCount) injected (\(textToInject.utf16.count) UTF-16 units)")
-            } catch {
-                self.logger.warning("StreamingCoordinator: append failed: \(error)")
-            }
+            self.logger.info("StreamingCoordinator: delta \(self.chunkCount) injected (\(textToInject.utf16.count) UTF-16 units)")
+        } catch {
+            self.logger.warning("StreamingCoordinator: append failed: \(error)")
         }
+    }
+
+    /// Removes one trailing sentence-ending mark (and surrounding whitespace).
+    nonisolated static func droppingTrailingSentenceEnd(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let last = trimmed.last, "。.！!？?".contains(last) else { return text }
+        return String(trimmed.dropLast())
     }
 
     // MARK: - Full-pass

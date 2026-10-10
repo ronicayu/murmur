@@ -143,9 +143,30 @@ final class StablePrefixAggregatorPunctuationTests: XCTestCase {
         var agg = StablePrefixAggregator()
         _ = agg.ingest("成为科隆群岛")
         XCTAssertEqual(agg.ingest("成为科隆群岛主要"), "成为科隆群岛")
-        // A homophone flips inside the already-confirmed part; the new words agree.
-        _ = agg.ingest("成为克隆群岛主要的食草")
-        XCTAssertEqual(agg.ingest("成为科隆群岛主要的食草动物"), "主要的食草")
+        // A homophone flips inside the already-confirmed part; the words after it still agree.
+        XCTAssertEqual(agg.ingest("成为克隆群岛主要的食草"), "主要")
+        XCTAssertEqual(agg.ingest("成为科隆群岛主要的食草动物"), "的食草")
         XCTAssertEqual(agg.confirmedText, "成为科隆群岛主要的食草")
+    }
+
+    func test_wordInsertedBeforeConfirmedText_doesNotRepeatTypedWords() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("会丢掉一些词")
+        XCTAssertEqual(agg.ingest("会丢掉一些词这段"), "会丢掉一些词")
+        // Later passes hear an extra phrase at the start, shifting every position.
+        XCTAssertEqual(agg.ingest("有时候会丢掉一些词这段话就是"), "这段",
+                       "must continue after the typed words, not re-emit them")
+        XCTAssertEqual(agg.ingest("有时候会丢掉一些词这段话就是我"), "话就是")
+        XCTAssertEqual(agg.confirmedText, "会丢掉一些词这段话就是")
+    }
+
+    func test_hypothesisThatDropsTheTypedWords_emitsNothingAndFlushesNothing() {
+        var agg = StablePrefixAggregator()
+        _ = agg.ingest("今天天气很好")
+        _ = agg.ingest("今天天气很好")
+        // The next passes share nothing with what was typed: there is no safe place to continue from.
+        XCTAssertEqual(agg.ingest("完全不同的内容"), "")
+        XCTAssertEqual(agg.ingest("完全不同的内容"), "")
+        XCTAssertEqual(agg.flushAndReset(), "")
     }
 }

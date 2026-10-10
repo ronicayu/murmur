@@ -32,46 +32,62 @@ struct StablePrefixAggregator {
     /// offset (in Characters) of its span in the hypothesis it was tokenised from.
     private struct Token { let value: String; let charEnd: Int }
 
-    /// Count of word tokens confirmed (already emitted). Locked — only ever extended
-    /// within a window.
-    private var confirmedCount = 0
+    /// Words already emitted in this window, in order. Locked — only ever extended.
+    private var confirmedValues: [String] = []
     /// Confirmed text accumulated for the current window (== concatenation of deltas).
     private(set) var confirmedText = ""
     /// Previous hypothesis tokens (for the LocalAgreement comparison).
     private var previousTokens: [Token] = []
+    /// Index in `previousTokens` of the first word not yet emitted, or nil when
+    /// the previous hypothesis could not be lined up with the emitted words.
+    private var previousContinuation: Int? = 0
     /// Previous hypothesis as a Character array (for tail slicing on flush).
     private var previousChars: [Character] = []
     /// True when the latest pass matched the one before it word for word — the
     /// speaker has paused, so the window can be closed without cutting a word.
     private(set) var lastPassFullyAgreed = false
 
+    /// How many trailing emitted words are searched for in a new hypothesis to
+    /// find where its not-yet-emitted part begins.
+    private static let anchorLength = 5
+
     // MARK: - API
 
     /// Feed the latest full-window hypothesis. Returns the text newly confirmed by
     /// this pass (empty if nothing new stabilised — always empty on the first pass,
     /// since LocalAgreement-2 needs two passes to agree).
+    ///
+    /// Each hypothesis is lined up with the words already emitted by *content*
+    /// (the last few emitted words are located in it), not by word count. A later
+    /// pass often revises earlier audio — inserts, drops or merges a word — and
+    /// counting positions would then re-emit words already typed or skip new ones.
     @discardableResult
     mutating func ingest(_ hypothesis: String) -> String {
         let chars = Array(hypothesis)
         let current = Self.tokenize(chars)
+        let continuation = continuationStart(in: current)
 
-        // Confirmed words are locked, so only the words after them need to agree.
-        // Comparing the locked region again would let a homophone flip there
-        // (科隆 / 克隆) block everything that follows it.
-        let locked = min(confirmedCount, previousTokens.count, current.count)
-        let agreed = locked + Self.commonPrefixLength(
-            previousTokens[locked...], current[locked...]
-        )
-        lastPassFullyAgreed = !current.isEmpty
-            && agreed == current.count && agreed == previousTokens.count
-        let newConfirmed = min(max(confirmedCount, agreed), current.count)
+        var delta = ""
+        var agreed = 0
+        var fullyAgreed = false
+        if let continuation, let previousContinuation {
+            let previousRest = previousTokens[previousContinuation...]
+            let currentRest = current[continuation...]
+            agreed = Self.commonPrefixLength(previousRest, currentRest)
+            fullyAgreed = !current.isEmpty
+                && agreed == currentRest.count && agreed == previousRest.count
+            if agreed > 0 {
+                let startChar = continuation == 0 ? 0 : current[continuation - 1].charEnd
+                let endChar = current[continuation + agreed - 1].charEnd
+                delta = String(chars[startChar..<endChar])
+                confirmedValues += current[continuation..<(continuation + agreed)].map(\.value)
+            }
+        }
 
-        let delta = Self.slice(chars: chars, tokens: current,
-                               from: confirmedCount, to: newConfirmed)
-
-        confirmedCount = newConfirmed
+        lastPassFullyAgreed = fullyAgreed
         confirmedText += delta
         previousTokens = current
+        previousContinuation = continuation.map { $0 + agreed }
         previousChars = chars
         return delta
     }
@@ -81,32 +97,58 @@ struct StablePrefixAggregator {
     /// next window. Returns the tail text to inject.
     @discardableResult
     mutating func flushAndReset() -> String {
-        // Everything after the last confirmed word, including trailing punctuation.
+        // Everything after the last emitted word, including trailing punctuation.
+        // If the last hypothesis could not be lined up with the emitted words,
+        // nothing is flushed: guessing a position risks repeating typed text.
         var tail = ""
-        if confirmedCount <= previousTokens.count {
-            let startChar = confirmedCount == 0 ? 0 : previousTokens[confirmedCount - 1].charEnd
+        if let start = previousContinuation {
+            let startChar = start == 0 ? 0 : previousTokens[start - 1].charEnd
             var endChar = previousChars.count
             while endChar > startChar && previousChars[endChar - 1].isWhitespace { endChar -= 1 }
             if startChar < endChar { tail = String(previousChars[startChar..<endChar]) }
         }
         lastPassFullyAgreed = false
-        confirmedCount = 0
+        confirmedValues = []
         confirmedText = ""
         previousTokens = []
+        previousContinuation = 0
         previousChars = []
         return tail
     }
 
-    // MARK: - Tokenisation + slicing
-
-    private static func slice(chars: [Character], tokens: [Token],
-                              from: Int, to: Int) -> String {
-        guard to > from, from >= 0, to <= tokens.count else { return "" }
-        let startChar = from == 0 ? 0 : tokens[from - 1].charEnd
-        let endChar = tokens[to - 1].charEnd
-        guard startChar <= endChar, endChar <= chars.count else { return "" }
-        return String(chars[startChar..<endChar])
+    /// Index in `tokens` of the first word after the already-emitted ones, found
+    /// by locating the last few emitted words in `tokens`. Tries a shorter run
+    /// when the full one is absent (the model revised one of those words), and
+    /// prefers the match nearest to where the emitted words would end by count.
+    /// Returns nil when no run of at least two emitted words can be found.
+    private func continuationStart(in tokens: [Token]) -> Int? {
+        if confirmedValues.isEmpty { return 0 }
+        let longest = min(Self.anchorLength, confirmedValues.count)
+        let shortest = min(2, confirmedValues.count)
+        var length = longest
+        while length >= shortest {
+            let needle = confirmedValues.suffix(length)
+            let expected = confirmedValues.count - length
+            var best: Int?
+            if tokens.count >= length {
+                for start in 0...(tokens.count - length) {
+                    var matches = true
+                    for (offset, value) in needle.enumerated() where tokens[start + offset].value != value {
+                        matches = false
+                        break
+                    }
+                    if matches, best == nil || abs(start - expected) < abs(best! - expected) {
+                        best = start
+                    }
+                }
+            }
+            if let best { return best + length }
+            length -= 1
+        }
+        return nil
     }
+
+    // MARK: - Tokenisation + slicing
 
     private static func commonPrefixLength(_ a: ArraySlice<Token>, _ b: ArraySlice<Token>) -> Int {
         var i = 0

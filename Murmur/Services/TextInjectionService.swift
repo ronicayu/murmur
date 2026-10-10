@@ -106,8 +106,88 @@ final class TextInjectionService: TextInjectionServiceProtocol, StreamingTextInj
     /// - Parameter text: Text to append.
     func appendText(_ text: String) async throws {
         guard !text.isEmpty else { return }
-        _ = try await inject(text: text)
+        do {
+            try await pasteForStreaming(text)
+            lastInjectionMethod = .clipboard
+        } catch {
+            log.warning("Streaming paste failed: \(error.localizedDescription), falling back to inject")
+            _ = try await inject(text: text)
+        }
         log.info("appendText: appended \(text.count) chars via streaming path")
+    }
+
+    // MARK: Streaming paste
+
+    /// The user's clipboard as it was before the current run of streaming pastes.
+    private var streamingSavedItems: [[(String, Data)]]?
+    /// `changeCount` right after our latest streaming paste wrote the clipboard.
+    private var streamingChangeCount: Int?
+    private var streamingRestoreTask: Task<Void, Never>?
+
+    /// How long the target app gets to read the clipboard after Cmd+V is posted.
+    /// The key event is handled asynchronously; returning sooner lets the next
+    /// paste overwrite the clipboard first (the same text is then pasted twice
+    /// and this one is lost) and makes the caller's cursor check run before the
+    /// text has landed.
+    private static let pasteSettleMilliseconds = 150
+
+    /// Clipboard paste tuned for a run of closely spaced appends.
+    ///
+    /// `injectViaClipboard` saves and restores the user's clipboard around every
+    /// paste, 1.5 s later. With appends arriving about once a second that would
+    /// save a previous delta as "the user's clipboard" and restore it. Here the
+    /// clipboard is saved once, before the first paste of a run, and restored
+    /// once, 1.5 s after the last.
+    @MainActor
+    private func pasteForStreaming(_ text: String) async throws {
+        let pasteboard = NSPasteboard.general
+
+        // Anything on the clipboard that we did not put there is the user's.
+        if streamingSavedItems == nil || pasteboard.changeCount != streamingChangeCount {
+            streamingSavedItems = pasteboard.pasteboardItems?.map { item -> [(String, Data)] in
+                item.types.compactMap { type in
+                    guard let data = item.data(forType: type) else { return nil }
+                    return (type.rawValue, data)
+                }
+            } ?? []
+        }
+        streamingRestoreTask?.cancel()
+
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        streamingChangeCount = pasteboard.changeCount
+
+        let source = CGEventSource(stateID: .hidSystemState)
+        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false) else {
+            throw MurmurError.injectionFailed("Failed to create paste event")
+        }
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+
+        try? await Task.sleep(for: .milliseconds(Self.pasteSettleMilliseconds))
+
+        streamingRestoreTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(1500))
+            guard !Task.isCancelled, let self else { return }
+            defer {
+                self.streamingSavedItems = nil
+                self.streamingChangeCount = nil
+            }
+            // Skip the restore if the user or another app has copied something since.
+            guard pasteboard.changeCount == self.streamingChangeCount,
+                  let saved = self.streamingSavedItems else { return }
+            pasteboard.clearContents()
+            for itemTypes in saved {
+                let item = NSPasteboardItem()
+                for (typeStr, data) in itemTypes {
+                    item.setData(data, forType: NSPasteboard.PasteboardType(typeStr))
+                }
+                pasteboard.writeObjects([item])
+            }
+        }
     }
 
     /// Select a character range in the focused AX element and replace it with new text.

@@ -55,6 +55,41 @@ actor Qwen3TranscriptionService {
         self.recognizer = SherpaOnnxOfflineRecognizer(config: &config)
     }
 
+    /// Strips chat-template debris from raw model output.
+    ///
+    /// Qwen3-ASR is a language model that answers in the form
+    /// `language Chinese<asr_text>…text…<|im_end|>`. sherpa-onnx normally returns
+    /// only the text, but on some clips the scaffolding leaks through — e.g.
+    /// `<asr_text>system没有…` — and would be typed at the cursor.
+    nonisolated static func cleaned(_ raw: String) -> String {
+        var text = raw
+        // Generation past an end marker is the model continuing on its own.
+        for endMarker in ["<|im_end|>", "<|endoftext|>"] {
+            if let range = text.range(of: endMarker) {
+                text = String(text[..<range.lowerBound])
+            }
+        }
+        var sawScaffolding = false
+        if let range = text.range(of: "<asr_text>", options: .backwards) {
+            text = String(text[range.upperBound...])
+            sawScaffolding = true
+        }
+        let tagPattern = "<\\|[^|>]*\\|>|</?asr_text>"
+        if text.range(of: tagPattern, options: .regularExpression) != nil {
+            text = text.replacingOccurrences(of: tagPattern, with: "", options: .regularExpression)
+            sawScaffolding = true
+        }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A chat role name left stranded where a marker was removed.
+        if sawScaffolding {
+            for role in ["system", "assistant", "user"] where text.hasPrefix(role) {
+                text = String(text.dropFirst(role.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                break
+            }
+        }
+        return text
+    }
+
     /// Transcribe a clip and return text. Unlike FireRed, Qwen3-ASR emits
     /// punctuation and natural casing itself, so the output is returned as-is
     /// apart from trimming.
@@ -63,7 +98,7 @@ actor Qwen3TranscriptionService {
                      "Qwen3TranscriptionService requires 16 kHz audio; got \(sampleRate)")
 
         let result = recognizer.decode(samples: samples, sampleRate: sampleRate)
-        let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = Self.cleaned(result.text)
         logger.info("Qwen3 text: \(text.prefix(200), privacy: .public)")
         return text
     }
