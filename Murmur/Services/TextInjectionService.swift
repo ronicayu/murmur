@@ -28,18 +28,15 @@ enum InjectionMethod: Sendable, Equatable {
 
 protocol TextInjectionServiceProtocol {
     func inject(text: String) async throws -> InjectionMethod
-    func undoLastInjection() async throws
 }
 
 final class TextInjectionService: TextInjectionServiceProtocol, StreamingTextInjectionProtocol {
     private let log = Logger(subsystem: "com.murmur.app", category: "injection")
-    private var lastInjectionMethod: InjectionMethod?
 
     func inject(text: String) async throws -> InjectionMethod {
         // Tier 1: Clipboard paste (most reliable — works with all apps)
         do {
             try await injectViaClipboard(text: text)
-            lastInjectionMethod = .clipboard
             log.info("Injected via clipboard (\(text.count) chars)")
             return .clipboard
         } catch {
@@ -48,28 +45,8 @@ final class TextInjectionService: TextInjectionServiceProtocol, StreamingTextInj
 
         // Tier 2: CGEvent keystrokes (fallback — event.post is void so failures are silent)
         try await injectViaCGEvent(text: text)
-        lastInjectionMethod = .cgEvent
         log.info("Injected via CGEvent (\(text.count) chars)")
         return .cgEvent
-    }
-
-    func undoLastInjection() async throws {
-        guard lastInjectionMethod != nil else {
-            log.info("No injection to undo")
-            return
-        }
-
-        // Simulate Cmd+Z
-        let source = CGEventSource(stateID: .hidSystemState)
-        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x06, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x06, keyDown: false) else {
-            throw MurmurError.injectionFailed("Failed to create undo event")
-        }
-
-        keyDown.flags = .maskCommand
-        keyUp.flags = .maskCommand
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
     }
 
     // MARK: - Tier 1: CGEvent Keystrokes
@@ -108,7 +85,6 @@ final class TextInjectionService: TextInjectionServiceProtocol, StreamingTextInj
         guard !text.isEmpty else { return }
         do {
             try await pasteForStreaming(text)
-            lastInjectionMethod = .clipboard
         } catch {
             log.warning("Streaming paste failed: \(error.localizedDescription), falling back to inject")
             _ = try await inject(text: text)
@@ -157,15 +133,17 @@ final class TextInjectionService: TextInjectionServiceProtocol, StreamingTextInj
         pasteboard.setString(text, forType: .string)
         streamingChangeCount = pasteboard.changeCount
 
-        let source = CGEventSource(stateID: .hidSystemState)
-        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false) else {
-            throw MurmurError.injectionFailed("Failed to create paste event")
+        do {
+            try Self.postPasteKeystroke()
+        } catch {
+            // Nothing will read the clipboard: give the user's content back now.
+            if let saved = streamingSavedItems {
+                Self.restore(saved, to: pasteboard)
+            }
+            streamingSavedItems = nil
+            streamingChangeCount = nil
+            throw error
         }
-        keyDown.flags = .maskCommand
-        keyUp.flags = .maskCommand
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
 
         try? await Task.sleep(for: .milliseconds(Self.pasteSettleMilliseconds))
 
@@ -179,14 +157,7 @@ final class TextInjectionService: TextInjectionServiceProtocol, StreamingTextInj
             // Skip the restore if the user or another app has copied something since.
             guard pasteboard.changeCount == self.streamingChangeCount,
                   let saved = self.streamingSavedItems else { return }
-            pasteboard.clearContents()
-            for itemTypes in saved {
-                let item = NSPasteboardItem()
-                for (typeStr, data) in itemTypes {
-                    item.setData(data, forType: NSPasteboard.PasteboardType(typeStr))
-                }
-                pasteboard.writeObjects([item])
-            }
+            Self.restore(saved, to: pasteboard)
         }
     }
 
@@ -317,9 +288,38 @@ final class TextInjectionService: TextInjectionServiceProtocol, StreamingTextInj
 
     // MARK: - Tier 2: Clipboard Paste
 
-    private func injectViaClipboard(text: String) async throws {
-        let pasteboard = NSPasteboard.general
+    /// Post Cmd+V to the frontmost app.
+    private static func postPasteKeystroke() throws {
+        let source = CGEventSource(stateID: .hidSystemState)
+        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false) else {
+            throw MurmurError.injectionFailed("Failed to create paste event")
+        }
 
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+    }
+
+    private static func restore(_ savedItems: [[(String, Data)]], to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        for itemTypes in savedItems {
+            let item = NSPasteboardItem()
+            for (typeStr, data) in itemTypes {
+                item.setData(data, forType: NSPasteboard.PasteboardType(typeStr))
+            }
+            pasteboard.writeObjects([item])
+        }
+    }
+
+    /// `pasteboard` and `postPaste` are parameters so tests can use a private
+    /// pasteboard and a paste that fails; the app always uses the defaults.
+    func injectViaClipboard(
+        text: String,
+        pasteboard: NSPasteboard = .general,
+        postPaste: () throws -> Void = TextInjectionService.postPasteKeystroke
+    ) async throws {
         // Save current clipboard (all types per item) and change count
         let savedChangeCount = pasteboard.changeCount
         let savedItems = pasteboard.pasteboardItems?.map { item -> [(String, Data)] in
@@ -334,16 +334,14 @@ final class TextInjectionService: TextInjectionServiceProtocol, StreamingTextInj
         pasteboard.setString(text, forType: .string)
 
         // Simulate Cmd+V
-        let source = CGEventSource(stateID: .hidSystemState)
-        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false) else {
-            throw MurmurError.injectionFailed("Failed to create paste event")
+        do {
+            try postPaste()
+        } catch {
+            // Nothing will read the clipboard, so give the user's content
+            // back now instead of leaving the transcript there.
+            Self.restore(savedItems, to: pasteboard)
+            throw error
         }
-
-        keyDown.flags = .maskCommand
-        keyUp.flags = .maskCommand
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
 
         // Restore the user's clipboard asynchronously so inject() can return
         // immediately after the paste event is posted. Blocking here for 1.5 s
@@ -360,14 +358,7 @@ final class TextInjectionService: TextInjectionServiceProtocol, StreamingTextInj
                     // Clipboard was modified by the user or another app — skip restore.
                     return
                 }
-                pasteboard.clearContents()
-                for itemTypes in savedItems {
-                    let item = NSPasteboardItem()
-                    for (typeStr, data) in itemTypes {
-                        item.setData(data, forType: NSPasteboard.PasteboardType(typeStr))
-                    }
-                    pasteboard.writeObjects([item])
-                }
+                Self.restore(savedItems, to: pasteboard)
             }
         }
     }

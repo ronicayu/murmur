@@ -79,7 +79,11 @@ final class AudioService: AudioServiceProtocol {
     /// Set by the coordinator on every `startRecording*Flow`; cleared on
     /// stop/cancel. Always invoked from a non-MainActor context — caller
     /// is responsible for hopping to the actor it needs.
-    var onAutoStop: (@Sendable () -> Void)?
+    var onAutoStop: (@Sendable () -> Void)? {
+        get { autoStop.handler }
+        set { autoStop.handler = newValue }
+    }
+    private let autoStop = AutoStopRelay()
 
     /// Set by route-change / wake observers; consumed on next startRecording.
     /// Protected by `lock`.
@@ -154,7 +158,22 @@ final class AudioService: AudioServiceProtocol {
     /// Tracks whether we have an active tap installed on the input node.
     private var tapInstalled = false
 
+    /// Cancel the max-duration and hands-free tasks of the recording that
+    /// is ending (or being replaced).
+    private func cancelAutoStopTasks() {
+        lock.lock()
+        let tasks = [maxDurationTask, handsFreeTask]
+        maxDurationTask = nil
+        handsFreeTask = nil
+        lock.unlock()
+        tasks.forEach { $0?.cancel() }
+    }
+
     func startRecording() async throws {
+        // A prior recording that was never stopped must not auto-stop this one.
+        cancelAutoStopTasks()
+        let session = autoStop.beginSession()
+
         // Tear down any prior session to prevent SIGABRT from duplicate tap.
         if engine.isRunning {
             engine.inputNode.removeTap(onBus: 0)
@@ -194,6 +213,7 @@ final class AudioService: AudioServiceProtocol {
         let file = try AVAudioFile(forWriting: url, settings: recordFormat.settings)
 
         lock.lock()
+        let abandonedURL = tempURL
         outputFile = file
         tempURL = url
         rmsAccumulator = []
@@ -203,6 +223,10 @@ final class AudioService: AudioServiceProtocol {
         vadActive = (vad != nil)
         hadAnySpeechSegment = false
         lock.unlock()
+        // A recording that was started but never stopped or cancelled.
+        if let abandonedURL {
+            try? FileManager.default.removeItem(at: abandonedURL)
+        }
 
         // Read the hardware format live at start-time and pass it explicitly
         // to installTap. A sample rate of 0 means no input device is currently
@@ -270,11 +294,11 @@ final class AudioService: AudioServiceProtocol {
         logger.info("Recording started")
 
         // Max duration enforcement
-        maxDurationTask = Task { [weak self, maxDuration] in
+        let maxTask = Task { [weak self, maxDuration] in
             try? await Task.sleep(for: .seconds(maxDuration))
             guard !Task.isCancelled else { return }
             self?.logger.info("Max recording duration reached")
-            self?.onAutoStop?()
+            self?.autoStop.fire(session: session)
         }
 
         // Hands-free auto-stop. Only meaningful with a VAD attached; if
@@ -284,13 +308,18 @@ final class AudioService: AudioServiceProtocol {
         let trailing = handsFreeTrailingSilence
         let activeVad = vad
         lock.unlock()
+        var handsFree: Task<Void, Never>?
         if let trailing, let activeVad {
-            handsFreeTask = Task { [weak self] in
-                await self?.runHandsFreeAutoStop(vad: activeVad, trailingSilence: trailing)
+            handsFree = Task { [weak self] in
+                await self?.runHandsFreeAutoStop(vad: activeVad, trailingSilence: trailing, session: session)
             }
         } else if trailing != nil {
             logger.info("Hands-free requested but VAD not attached — falling back to manual stop")
         }
+        lock.lock()
+        maxDurationTask = maxTask
+        handsFreeTask = handsFree
+        lock.unlock()
     }
 
     /// Poll the VAD's live speech state at 10 Hz. Once we see speech at
@@ -322,7 +351,7 @@ final class AudioService: AudioServiceProtocol {
     /// new segment) implicitly defers the timer because the segment
     /// hasn't closed yet — `lastSegmentEndTime` doesn't advance until
     /// it does.
-    private func runHandsFreeAutoStop(vad: VadService, trailingSilence: TimeInterval) async {
+    private func runHandsFreeAutoStop(vad: VadService, trailingSilence: TimeInterval, session: Int) async {
         let pollInterval: Duration = .milliseconds(100)
         // The "when do we stop" decision lives in a pure, unit-tested state
         // machine; this loop only supplies it with poll data (closed segments,
@@ -344,27 +373,33 @@ final class AudioService: AudioServiceProtocol {
             )
             if tick == .fire {
                 logger.info("Hands-free auto-stop: \(trailingSilence, format: .fixed(precision: 2))s since last segment close")
-                onAutoStop?()
+                autoStop.fire(session: session)
                 return
             }
         }
     }
 
     func stopRecording() async throws -> URL {
-        guard engine.isRunning else {
-            throw MurmurError.transcriptionFailed("No active recording")
-        }
+        cancelAutoStopTasks()
+        autoStop.endSession()
 
-        engine.inputNode.removeTap(onBus: 0)
-        tapInstalled = false
-        engine.stop()
-        maxDurationTask?.cancel()
-        maxDurationTask = nil
-        handsFreeTask?.cancel()
-        handsFreeTask = nil
+        // AVAudioEngine stops itself on a configuration change (the input
+        // device was switched or unplugged, the Mac slept). What was captured
+        // up to then is in the file, so finalise it and hand it over rather
+        // than fail the dictation.
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        if engine.isRunning {
+            engine.stop()
+        } else {
+            logger.info("Engine had already stopped; keeping what was captured")
+        }
 
         lock.lock()
         let url = tempURL
+        tempURL = nil
         let accum = rmsAccumulator
         let activeVad = vad
         let vadWasActive = vadActive
@@ -442,10 +477,8 @@ final class AudioService: AudioServiceProtocol {
             tapInstalled = false
         }
         if engine.isRunning { engine.stop() }
-        maxDurationTask?.cancel()
-        maxDurationTask = nil
-        handsFreeTask?.cancel()
-        handsFreeTask = nil
+        cancelAutoStopTasks()
+        autoStop.endSession()
 
         lock.lock()
         outputFile = nil

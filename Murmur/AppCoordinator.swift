@@ -180,6 +180,11 @@ final class AppCoordinator: ObservableObject {
     /// When true, skips accessibility check (for onboarding test where we show text in-app, not inject)
     var skipAccessibilityCheck = false
 
+    /// Replaces the model and permission checks made before a recording
+    /// starts. Nil in the app; tests set it so no real model, permission
+    /// prompt or alert is involved.
+    var startPreflightOverride: (() async -> MurmurError?)?
+
     /// Wire up (or tear down) the Silero VAD service. AudioService uses
     /// it to decide silence at stop time and to drive endpointing in
     /// later phases. Pass nil to revert to the legacy RMS gate.
@@ -227,7 +232,12 @@ final class AppCoordinator: ObservableObject {
             }
         }
     }
-    private var pendingRecording = false
+    /// A hotkey press that arrived while a transcription was running: start
+    /// recording when that transcription is delivered.
+    private(set) var pendingRecording = false
+    /// Counts audio-engine starts, so a start that outlives its timeout can
+    /// tell whether a newer recording has begun since.
+    private var recordingAttempt = 0
     private var undoTimer: Task<Void, Never>?
     private var hotkeyTask: Task<Void, Never>?
     private var audioLevelTask: Task<Void, Never>?
@@ -287,14 +297,16 @@ final class AppCoordinator: ObservableObject {
             }
         }
 
-        // Unload model on sleep, re-preload on wake
-        NotificationCenter.default.addObserver(
+        // Unload model on sleep, re-preload on wake. Sleep and wake are only
+        // posted on the workspace's own notification center.
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceCenter.addObserver(
             forName: NSWorkspace.willSleepNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
             Task { await self?.transcription.unloadModel() }
         }
-        NotificationCenter.default.addObserver(
+        workspaceCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
@@ -310,7 +322,6 @@ final class AppCoordinator: ObservableObject {
     func stop() {
         hotkeyTask?.cancel()
         audioLevelTask?.cancel()
-        longTranscribeTask?.cancel()
         hotkey.unregister()
         audio.cancelRecording()
         Task { await transcription.killProcess() }
@@ -333,82 +344,14 @@ final class AppCoordinator: ObservableObject {
     /// voice input (hotkey) resumes.
     func endWindowTranscription() {
         guard state == .transcribing else { return }
-        transition(to: .idle)
-    }
-
-    // MARK: - Long Transcription
-
-    /// Task handle for an in-flight transcribeLong operation.
-    /// Cancel this to abort chunked transcription and resume voice input.
-    private(set) var longTranscribeTask: Task<Void, Never>?
-
-    /// Transcribe a long audio file using chunked processing.
-    ///
-    /// - Pauses voice input (hotkey suppressed while state == .transcribing).
-    /// - Reports progress via `onProgress` callback on the Main actor.
-    /// - Resumes voice input (state → .idle) on completion, error, or cancellation.
-    ///
-    /// Only one call may run at a time; a second call cancels the first.
-    func transcribeLong(
-        audioURL: URL,
-        onProgress: @escaping @MainActor (TranscriptionProgress) -> Void
-    ) {
-        // Cancel any prior long transcription
-        longTranscribeTask?.cancel()
-
-        longTranscribeTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-
-            // Pause voice input — hotkey guard already blocks new recordings while .transcribing
-            self.transition(to: .transcribing)
-            self.pill.show(state: .transcribing)
-
-            let lang = self.spokenLanguagesHint()
-
-            do {
-                let result = try await self.transcription.transcribeLong(
-                    audioURL: audioURL,
-                    language: lang,
-                    onProgress: { progress in
-                        Task { @MainActor in onProgress(progress) }
-                    }
-                )
-
-                self.transition(to: .injecting)
-                self.pill.show(state: .injecting)
-
-                let method = try await withTimeout(seconds: 5, operation: "text injection") {
-                    try await self.injection.inject(text: result.text)
-                }
-
-                self.lastTranscription = result.text
-                self.lastLanguage = result.language
-                // transcribeLong path does not currently run the correction
-                // pipeline, so rawText is always nil here.
-                self.transcriptionHistory.insert(
-                    (text: result.text, rawText: nil, language: result.language, date: Date()), at: 0
-                )
-                if self.transcriptionHistory.count > self.maxHistoryCount {
-                    self.transcriptionHistory.removeLast()
-                }
-
-                let undoableState = AppState.undoable(text: result.text, method: method)
-                self.transition(to: undoableState)
-                // No success chime: inserted text is visually self-evident.
-                self.pill.show(state: undoableState)
-                self.pill.hide(after: 2)
-
-            } catch is CancellationError {
-                // P1-3 fix: match on the error type, not Task.isCancelled.
-                // Task.isCancelled in a catch block queries the *current task's*
-                // cancellation flag, which may be true even when the thrown error
-                // is a real failure that arrived before the cancel signal.
-                self.transition(to: .idle)
-                self.pill.hide()
-            } catch {
-                self.handleError(self.mapError(error))
-            }
+        // A hotkey press during the file transcription queued a recording.
+        // Nothing drains the queue on this path, so drop it: left set, the
+        // microphone would open by itself after the next dictation.
+        if pendingRecording {
+            pendingRecording = false
+            hotkey.notifyRecordingStopped()
         }
+        transition(to: .idle)
     }
 
     // MARK: - Event Handling
@@ -416,35 +359,13 @@ final class AppCoordinator: ObservableObject {
     private func handleHotkeyEvent(_ event: HotkeyEvent) async {
         switch event {
         case .startRecording:
-            // Pre-check: without a downloaded model the streaming pipeline would
-            // silently swallow transcription errors (processChunkBuffer logs and
-            // continues; full-pass transitions to .done on failure). Catch it
-            // here and surface a proper NSAlert before the user wastes a
-            // recording on a session that can't produce text.
-            guard Self.isActiveBackendModelInstalled else {
-                handleError(.modelNotFound)
-                return
-            }
-            let status = permissions.checkAll()
-            if status.microphone == .notDetermined {
-                let granted = await permissions.requestMicrophone()
-                if !granted {
-                    transition(to: .error(.permissionRevoked(.microphone)))
-                    return
-                }
-            } else if status.microphone != .granted {
-                transition(to: .error(.permissionRevoked(.microphone)))
-                return
-            }
-            if !skipAccessibilityCheck && status.accessibility != .granted {
-                transition(to: .error(.permissionRevoked(.accessibility)))
+            if let failure = await startPreflightFailure() {
+                // The hotkey service already counts this press as a recording.
+                hotkey.notifyRecordingStopped()
+                handleError(failure)
                 return
             }
             if state == .idle || state.isError || state.isUndoable {
-                if state.isUndoable {
-                    undoTimer?.cancel()
-                    removeUndoMonitor()
-                }
                 await startRecordingFlow()
             } else if state == .transcribing || state == .injecting {
                 pendingRecording = true
@@ -452,10 +373,13 @@ final class AppCoordinator: ObservableObject {
             }
 
         case .stopRecording:
+            // The press that follows a queued recording takes it back.
+            pendingRecording = false
             guard state == .recording else { return }
             await stopAndTranscribe()
 
         case .cancelRecording:
+            pendingRecording = false
             guard state == .recording else { return }
             audio.onAutoStop = nil
             audio.detachStreamingAccumulator()
@@ -469,12 +393,80 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    /// Why a recording cannot start right now, or nil when it can.
+    private func startPreflightFailure() async -> MurmurError? {
+        if let startPreflightOverride { return await startPreflightOverride() }
+        // Without a downloaded model the streaming pipeline would silently
+        // swallow transcription errors (processChunkBuffer logs and
+        // continues; full-pass transitions to .done on failure). Catch it
+        // here and surface a proper NSAlert before the user wastes a
+        // recording on a session that can't produce text.
+        guard Self.isActiveBackendModelInstalled else { return .modelNotFound }
+        let status = permissions.checkAll()
+        if status.microphone == .notDetermined {
+            let granted = await permissions.requestMicrophone()
+            if !granted { return .permissionRevoked(.microphone) }
+        } else if status.microphone != .granted {
+            return .permissionRevoked(.microphone)
+        }
+        if !skipAccessibilityCheck && status.accessibility != .granted {
+            return .permissionRevoked(.accessibility)
+        }
+        return nil
+    }
+
     private func startRecordingFlow() async {
+        // The undo window of the previous dictation ends here; its timer
+        // must not put a live recording back to idle.
+        cancelUndoWindow()
         if isStreamingEnabled {
             await startStreamingRecordingFlow()
         } else {
             await startV1RecordingFlow()
         }
+    }
+
+    /// Start the audio engine, giving up after 5 s.
+    private func startAudioCapture() async throws {
+        recordingAttempt += 1
+        let attempt = recordingAttempt
+        try await withTimeout(seconds: 5, operation: "start recording", onLateCompletion: { [weak self] _ in
+            // The start outlived its timeout and the app has already reported
+            // the failure. Release the engine, unless a newer recording
+            // (which resets the engine itself) has started since.
+            Task { @MainActor [weak self] in
+                guard let self, self.recordingAttempt == attempt else { return }
+                self.audio.cancelRecording()
+            }
+        }) {
+            try await self.audio.startRecording()
+        }
+    }
+
+    /// Stop the audio engine and return the recording, giving up after 5 s.
+    private func stopAudioCapture() async throws -> URL {
+        try await withTimeout(seconds: 5, operation: "stop recording", onLateCompletion: { result in
+            // Nobody is waiting for this recording any more.
+            if case .success(let wav) = result {
+                try? FileManager.default.removeItem(at: wav)
+            }
+        }) {
+            try await self.audio.stopRecording()
+        }
+    }
+
+    /// The one exit for a recording that did not start. `HotkeyService`
+    /// counts the key press as a recording (and captures Escape) before the
+    /// coordinator has decided anything, and `AudioService` may have installed
+    /// its tap and created the file before it failed.
+    private func abandonRecordingStart(after error: Error) {
+        audioLevelTask?.cancel()
+        audio.onAutoStop = nil
+        hotkey.notifyRecordingStopped()
+        // A start that timed out is still running inside AudioService;
+        // `startAudioCapture` releases the engine when it returns.
+        if case .timeout? = error as? MurmurError { return }
+        audio.cancelRecording()
     }
 
     // MARK: - V1 Recording Flow (unchanged)
@@ -513,12 +505,9 @@ final class AppCoordinator: ObservableObject {
                 }
             }
 
-            try await withTimeout(seconds: 5, operation: "start recording") {
-                try await self.audio.startRecording()
-            }
+            try await startAudioCapture()
         } catch {
-            audioLevelTask?.cancel()
-            audio.onAutoStop = nil
+            abandonRecordingStart(after: error)
             audioFeedback.playError()
             transition(to: .error(mapError(error)))
         }
@@ -559,9 +548,7 @@ final class AppCoordinator: ObservableObject {
                 }
             }
 
-            try await withTimeout(seconds: 5, operation: "start recording") {
-                try await self.audio.startRecording()
-            }
+            try await startAudioCapture()
 
             // Resolve insertion point before any text is injected (lang already resolved above)
             let startOffset = resolveCurrentCursorOffset()
@@ -584,9 +571,9 @@ final class AppCoordinator: ObservableObject {
             // Attach accumulator to audio tap via AudioService dual-output extension
             audio.attachStreamingAccumulator(acc)
         } catch {
-            audioLevelTask?.cancel()
-            audio.onAutoStop = nil
+            abandonRecordingStart(after: error)
             streamingCoordinator?.cancelSession()
+            streamingCoordinator?.resetToIdle()
             streamingPreview.hide()
             audioFeedback.playError()
             transition(to: .error(mapError(error)))
@@ -605,13 +592,13 @@ final class AppCoordinator: ObservableObject {
 
         audio.detachStreamingAccumulator()
 
+        var recordedWav: URL?
         do {
             transition(to: .transcribing)
             pill.show(state: .transcribing)
 
-            let wav = try await withTimeout(seconds: 5, operation: "stop recording") {
-                try await self.audio.stopRecording()
-            }
+            let wav = try await stopAudioCapture()
+            recordedWav = wav
 
             // Pass the full WAV URL to the coordinator for the full-pass
             streamingCoordinator?.updateFullWavURL(wav)
@@ -622,20 +609,17 @@ final class AppCoordinator: ObservableObject {
             streamingPreview.hide()
 
             // Check how the session ended and show appropriate feedback.
+            var outcome = streamingOutcome()
             if streamingCoordinator?.cancellationReason == nil,
                let final = streamingCoordinator?.finalResult {
                 // Preview session: nothing has been typed yet. Run the same
                 // post-processing as V1 and insert the final text once.
-                if final.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    transition(to: .idle)
-                    pill.hide(after: 0.5)
-                } else {
-                    let language = final.language == .unknown
-                        ? Qwen3TranscriptionService.detectLanguage(final.text) : final.language
-                    try await deliverTranscription(
-                        TranscriptionResult(text: final.text, language: language, durationMs: final.durationMs)
-                    )
-                }
+                let language = final.language == .unknown
+                    ? Qwen3TranscriptionService.detectLanguage(final.text) : final.language
+                let delivered = try await deliverTranscription(
+                    TranscriptionResult(text: final.text, language: language, durationMs: final.durationMs)
+                )
+                if !delivered { outcome = .silenceGated }
             } else if let reason = streamingCoordinator?.cancellationReason {
                 switch reason {
                 case .focusAbandoned:
@@ -670,7 +654,7 @@ final class AppCoordinator: ObservableObject {
                 pill.hide(after: 1)
             }
 
-            recordStreamingMetrics(outcome: streamingOutcome(), stopRequestedAt: stopRequestedAt)
+            recordStreamingMetrics(outcome: outcome, stopRequestedAt: stopRequestedAt)
         } catch {
             streamingCoordinator?.cancelSession()
             streamingPreview.hide()
@@ -678,6 +662,12 @@ final class AppCoordinator: ObservableObject {
                 outcome: Self.failureOutcome(for: error), stopRequestedAt: stopRequestedAt
             )
             handleError(mapError(error))
+        }
+
+        // The session has ended (done, cancelled or failed), so nothing needs
+        // the recording of the user's voice any more.
+        if let recordedWav {
+            try? FileManager.default.removeItem(at: recordedWav)
         }
 
         // Reset coordinator so next session can begin
@@ -786,24 +776,18 @@ final class AppCoordinator: ObservableObject {
             transition(to: .transcribing)
             pill.show(state: .transcribing)
 
-            let wav = try await withTimeout(seconds: 5, operation: "stop recording") {
-                try await self.audio.stopRecording()
-            }
+            let wav = try await stopAudioCapture()
             // The model detects the spoken language itself; the user's
             // "Languages you speak" only tell it which scripts to expect.
-            let hint = spokenLanguagesHint()
-            let result = try await withTimeout(seconds: 120, operation: "transcription") {
-                try await self.transcription.transcribe(audioURL: wav, language: hint)
-            }
-            try await deliverTranscription(result)
+            let (result, delivered) = try await transcribeAndDeliver(wav: wav, hint: spokenLanguagesHint())
 
             // Increment V1 usage counter for discovery badge
-            V1UsageCounter.increment()
+            if delivered { V1UsageCounter.increment() }
 
             recordSessionMetrics(SessionMetrics(
                 date: Date(),
                 mode: .v1FullPass,
-                outcome: .injected,
+                outcome: delivered ? .injected : .silenceGated,
                 language: Self.metricsLanguage(for: result.language),
                 stopToFinalTextMs: Self.elapsedMs(since: stopRequestedAt)
             ))
@@ -825,10 +809,32 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    /// Replaces the real paste when delivering a transcription (tests only).
+    typealias PasteOverride = @Sendable (String) async throws -> InjectionMethod
+
+    /// Transcribe a finished recording and deliver the text. Returns the
+    /// transcription and whether any text was inserted.
+    ///
+    /// The WAV holds the user's voice, so it is deleted as soon as the engine
+    /// is done with it — also when the engine failed or outlived the timeout.
+    private func transcribeAndDeliver(
+        wav: URL,
+        hint: String,
+        paste: PasteOverride? = nil
+    ) async throws -> (TranscriptionResult, Bool) {
+        let result = try await withTimeout(seconds: 120, operation: "transcription") { () async throws -> TranscriptionResult in
+            defer { try? FileManager.default.removeItem(at: wav) }
+            return try await self.transcription.transcribe(audioURL: wav, language: hint)
+        }
+        let delivered = try await deliverTranscription(result, paste: paste)
+        return (result, delivered)
+    }
+
     // MARK: - Session metrics
 
     /// A silence-gated recording is recorded as its own outcome rather than a
-    /// failure: a rising count is the dropped-utterance class of bug.
+    /// failure: a rising count is the dropped-utterance class of bug. A
+    /// recording that transcribed to nothing is counted with it.
     private static func failureOutcome(for error: Error) -> SessionMetrics.Outcome {
         if case .silenceDetected? = error as? MurmurError { return .silenceGated }
         return .failed
@@ -877,7 +883,22 @@ final class AppCoordinator: ObservableObject {
     /// Post-process a finished transcription, insert it at the cursor, record
     /// it in history and show the "Inserted" pill. Shared by the V1 full-pass
     /// path and streaming preview sessions, which both insert the text once.
-    private func deliverTranscription(_ result: TranscriptionResult) async throws {
+    ///
+    /// Returns false, and inserts and records nothing, when there is no text:
+    /// pasting an empty string would replace the user's selection with
+    /// nothing under an "Inserted" pill.
+    @discardableResult
+    private func deliverTranscription(
+        _ result: TranscriptionResult,
+        paste: PasteOverride? = nil
+    ) async throws -> Bool {
+        guard !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            Self.log.info("Empty transcription: nothing to insert")
+            transition(to: .idle)
+            pill.hide(after: 0.5)
+            return false
+        }
+
         // Post-processing rules exist for Chinese and English only, and are
         // chosen by what the transcript is actually written in. Any other
         // language gets a code the rules do not know, so they leave it alone.
@@ -892,8 +913,9 @@ final class AppCoordinator: ObservableObject {
         transition(to: .injecting)
         pill.show(state: .injecting)
 
-        let method = try await withTimeout(seconds: 5, operation: "text injection") {
-            try await self.injection.inject(text: textToInject)
+        let method = try await withTimeout(seconds: 5, operation: "text injection") { () async throws -> InjectionMethod in
+            if let paste { return try await paste(textToInject) }
+            return try await self.injection.inject(text: textToInject)
         }
 
         lastTranscription = textToInject
@@ -920,6 +942,7 @@ final class AppCoordinator: ObservableObject {
         pill.show(state: undoableState)
         pill.hide(after: 2)
         // Undo timer + Cmd+Z monitor set up automatically by transition(to: .undoable)
+        return true
     }
 
     /// Runs the cleanup service if the toggle is on and a service is wired in.
@@ -964,32 +987,16 @@ final class AppCoordinator: ObservableObject {
     private static let correctionTimeoutSeconds: TimeInterval = 2.5
 
 #if DEBUG
-    /// Testable entry-point that bypasses audio I/O. Exercises the transcribe →
-    /// cleanup → inject pipeline with a pre-recorded WAV and a pre-resolved
-    /// language code. Only used by `CoordinatorCleanupTests`.
-    func stopAndTranscribeV1ForTesting(wav: URL, lang: String) async {
+    /// Testable entry-point that bypasses audio I/O. Runs the real transcribe →
+    /// correction → cleanup → deliver pipeline on a pre-recorded WAV; only the
+    /// paste into the frontmost app is replaced by `paste`.
+    func stopAndTranscribeV1ForTesting(
+        wav: URL,
+        lang: String,
+        paste: @escaping PasteOverride = { _ in .clipboard }
+    ) async {
         do {
-            let result = try await withTimeout(seconds: 120, operation: "transcription") {
-                return try await self.transcription.transcribe(audioURL: wav, language: lang)
-            }
-
-            let rawTranscribed = result.text
-            let corrected = await applyCorrectionIfEnabled(text: rawTranscribed, language: lang)
-            let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
-
-            // Skip real injection in tests — just record what would be injected.
-            lastTranscription = textToInject
-            lastLanguage = result.language
-            // Capture rawText whenever the pipeline touched the words (matches production).
-            let rawForHistory: String? = (textToInject != rawTranscribed) ? rawTranscribed : nil
-            transcriptionHistory.insert((text: textToInject, rawText: rawForHistory, language: result.language, date: Date()), at: 0)
-            if transcriptionHistory.count > maxHistoryCount {
-                transcriptionHistory.removeLast()
-            }
-
-            // method hardcoded — tests here don't assert on injection method;
-            // see AppCoordinatorTests for real injection coverage.
-            transition(to: .undoable(text: textToInject, method: .clipboard))
+            _ = try await transcribeAndDeliver(wav: wav, hint: lang, paste: paste)
         } catch {
             handleError(mapError(error))
         }
@@ -1122,26 +1129,37 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func setupUndoAutoRecovery() {
-        removeUndoMonitor()
+        cancelUndoWindow()
         undoMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self,
                   event.modifierFlags.contains(.command),
                   event.keyCode == 0x06 /* Z */ else { return }
             Task { @MainActor in
                 guard case .undoable = self.state else { return }
-                try? await self.injection.undoLastInjection()
-                self.removeUndoMonitor()
+                // A global monitor only observes: the user's own Cmd+Z has
+                // already reached the target app and undone the insertion.
+                // Posting another one would also undo the edit before it.
+                self.cancelUndoWindow()
                 self.transition(to: .idle)
-                Self.log.info("Undo triggered via Cmd+Z")
+                Self.log.info("Undo seen (Cmd+Z)")
             }
         }
-        undoTimer?.cancel()
         undoTimer = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(5))
             guard let self, !Task.isCancelled else { return }
             self.removeUndoMonitor()
+            // Only leave the undo window. If a recording started meanwhile,
+            // going idle here would strand a running engine.
+            guard case .undoable = self.state else { return }
             self.transition(to: .idle)
         }
+    }
+
+    /// End the undo window: stop its timer and its Cmd+Z monitor.
+    private func cancelUndoWindow() {
+        undoTimer?.cancel()
+        undoTimer = nil
+        removeUndoMonitor()
     }
 
     private func removeUndoMonitor() {
@@ -1167,25 +1185,6 @@ final class AppCoordinator: ObservableObject {
             return murmurError
         }
         return .transcriptionFailed(error.localizedDescription)
-    }
-
-    private func withTimeout<T: Sendable>(
-        seconds: TimeInterval,
-        operation: String,
-        body: @escaping @Sendable () async throws -> T
-    ) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask { try await body() }
-            group.addTask {
-                try await Task.sleep(for: .seconds(seconds))
-                throw MurmurError.timeout(operation: operation)
-            }
-            guard let result = try await group.next() else {
-                throw MurmurError.timeout(operation: operation)
-            }
-            group.cancelAll()
-            return result
-        }
     }
 }
 

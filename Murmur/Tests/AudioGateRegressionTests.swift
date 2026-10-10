@@ -178,3 +178,87 @@ final class HandsFreeAutoStopTimerRegressionTests: XCTestCase {
         XCTAssertEqual(timer.step(now: 10.0, closedSegmentCount: 0, isCurrentlySpeech: false), .fire)
     }
 }
+
+// MARK: - AutoStopRelay
+
+// The auto-stop timers of one recording (max duration, hands-free) used to
+// call whatever closure was installed when they fired. After a recording that
+// ended without cancelling them, that was the NEXT recording's closure, so
+// the next recording was stopped early.
+final class AutoStopRelayTests: XCTestCase {
+
+    func test_timerOfCurrentRecording_reachesTheHandler() {
+        let relay = AutoStopRelay()
+        let fired = LockedCounter()
+        relay.handler = { fired.increment() }
+
+        let session = relay.beginSession()
+        relay.fire(session: session)
+
+        XCTAssertEqual(fired.value, 1)
+    }
+
+    func test_timerOfEarlierRecording_doesNotStopTheNextOne() {
+        let relay = AutoStopRelay()
+        let firstFired = LockedCounter()
+        let secondFired = LockedCounter()
+
+        relay.handler = { firstFired.increment() }
+        let first = relay.beginSession()
+
+        // The second recording starts without the first having been stopped.
+        relay.handler = { secondFired.increment() }
+        let second = relay.beginSession()
+
+        relay.fire(session: first)
+        XCTAssertEqual(firstFired.value, 0)
+        XCTAssertEqual(secondFired.value, 0, "A stale timer must not stop the next recording")
+
+        relay.fire(session: second)
+        XCTAssertEqual(secondFired.value, 1)
+    }
+
+    func test_timerFiringAfterItsRecordingEnded_isDropped() {
+        let relay = AutoStopRelay()
+        let fired = LockedCounter()
+        relay.handler = { fired.increment() }
+
+        let session = relay.beginSession()
+        relay.endSession()
+        relay.fire(session: session)
+
+        XCTAssertEqual(fired.value, 0)
+    }
+
+    func test_clearedHandler_isNotCalled() {
+        let relay = AutoStopRelay()
+        let fired = LockedCounter()
+        relay.handler = { fired.increment() }
+        let session = relay.beginSession()
+
+        relay.handler = nil
+        relay.fire(session: session)
+
+        XCTAssertEqual(fired.value, 0)
+    }
+}
+
+// MARK: - AudioService stop without a recording
+
+final class AudioServiceStopTests: XCTestCase {
+
+    // `stopRecording` no longer requires a running engine (the engine stops
+    // itself on a device change, and the captured audio must survive that),
+    // so "nothing was recorded" has to be detected from the recording itself.
+    func test_stopWithoutRecording_throws() async {
+        let audio = AudioService()
+        do {
+            _ = try await audio.stopRecording()
+            XCTFail("Stopping with no recording must not return a file")
+        } catch MurmurError.transcriptionFailed {
+            // expected
+        } catch {
+            XCTFail("Expected transcriptionFailed, got \(error)")
+        }
+    }
+}
