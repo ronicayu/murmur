@@ -126,7 +126,7 @@ final class Qwen3DecodeJudgementTests: XCTestCase {
                 Attempt(text: "x", judgement: .debris),
                 Attempt(text: "好", judgement: .tooShort),
                 Attempt(text: "好的", judgement: .tooShort),
-            ]),
+            ], expected: chineseAndEnglish),
             "好的"
         )
     }
@@ -136,9 +136,67 @@ final class Qwen3DecodeJudgementTests: XCTestCase {
             Service.lastResort([
                 Attempt(text: "x", judgement: .debris),
                 Attempt(text: "สั่งฟรี", judgement: .unexpectedScript(.thai)),
+            ], expected: chineseAndEnglish),
+            ""
+        )
+    }
+
+    func test_lastResort_neverReturnsAShortTranscriptInAnUnexpectedScript() {
+        // Four misfires of "да" on five seconds of speech, for a Chinese-only
+        // user. Each is judged too short before its script is looked at.
+        let chineseOnly: Set<WritingScript> = [.han]
+        let attempts = (0..<4).map { _ in
+            Attempt(text: "да",
+                    judgement: Service.judge(raw: "да", cleaned: "да", speechSeconds: 5, expected: chineseOnly))
+        }
+        XCTAssertEqual(attempts.first?.judgement, .tooShort)
+        XCTAssertNil(Service.settledText(attempts), "a short misfire must not settle by repetition")
+        XCTAssertEqual(Service.lastResort(attempts, expected: chineseOnly), "")
+    }
+
+    func test_lastResort_keepsAShortTranscriptInAnExpectedScriptOverAForeignOne() {
+        XCTAssertEqual(
+            Service.lastResort([
+                Attempt(text: "да да да", judgement: .tooShort),
+                Attempt(text: "好", judgement: .tooShort),
+            ], expected: chineseAndEnglish),
+            "好"
+        )
+    }
+
+    // MARK: - empty results (sound without speech)
+
+    func test_judge_nothingForSeveralSecondsOfSoundIsTooShort() {
+        XCTAssertEqual(judge("", speechSeconds: 5), .tooShort)
+    }
+
+    func test_settled_oneEmptyResultForAudibleSoundIsDecodedAgain() {
+        XCTAssertNil(Service.settledText([Attempt(text: "", judgement: .tooShort)]))
+    }
+
+    func test_settled_twoEmptyResultsSettleOnNoText() {
+        XCTAssertEqual(
+            Service.settledText([
+                Attempt(text: "", judgement: .tooShort),
+                Attempt(text: "", judgement: .tooShort),
             ]),
             ""
         )
+    }
+
+    func test_settled_anEmptyResultAfterAShortOneDoesNotSettle() {
+        // The first decode heard something; one empty retry does not overrule it.
+        XCTAssertNil(Service.settledText([
+            Attempt(text: "好", judgement: .tooShort),
+            Attempt(text: "", judgement: .tooShort),
+        ]))
+    }
+
+    func test_settled_twoShortButNonEmptyResultsDoNotSettle() {
+        XCTAssertNil(Service.settledText([
+            Attempt(text: "好", judgement: .tooShort),
+            Attempt(text: "好", judgement: .tooShort),
+        ]))
     }
 
     // MARK: - editRatio
