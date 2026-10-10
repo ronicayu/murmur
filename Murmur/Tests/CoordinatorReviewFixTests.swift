@@ -166,14 +166,14 @@ final class CoordinatorDeliveryTests: XCTestCase {
         wav = FileManager.default.temporaryDirectory
             .appendingPathComponent("review-fix-\(UUID().uuidString).wav")
         FileManager.default.createFile(atPath: wav.path, contents: Data([0]))
-        for key in ["cleanupTranscription", "correctTranscription", "undoAfterTranscription"] {
+        for key in ["correctTranscription", "undoAfterTranscription"] {
             UserDefaults.standard.set(false, forKey: key)
         }
     }
 
     override func tearDown() {
         try? FileManager.default.removeItem(at: wav)
-        for key in ["cleanupTranscription", "correctTranscription", "undoAfterTranscription"] {
+        for key in ["correctTranscription", "undoAfterTranscription"] {
             UserDefaults.standard.removeObject(forKey: key)
         }
         pill = nil

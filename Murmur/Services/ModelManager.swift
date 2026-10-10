@@ -501,6 +501,12 @@ final class ModelManager: ObservableObject {
         FileManager.default.createFile(
             atPath: directory.appendingPathComponent(Self.incompleteMarker).path, contents: nil
         )
+        // A manifest from an earlier download would vouch for whatever lands
+        // here until this run has verified it: a file of the right size but
+        // the wrong content would read as installed if the app quit, or the
+        // download were cancelled, before the check. The verified run writes
+        // a new manifest at the end.
+        try? FileManager.default.removeItem(at: manifestURL(for: backend))
 
         downloadEpoch += 1
         let epoch = downloadEpoch

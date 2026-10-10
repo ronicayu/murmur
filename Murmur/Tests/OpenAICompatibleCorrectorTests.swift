@@ -286,27 +286,14 @@ final class OpenAICompatibleCorrectorTests: XCTestCase {
         XCTAssertThrowsError(try OpenAICompatibleCorrector.parseChatResponse(data: body))
     }
 
-    // MARK: - correct(): key source and error text
+    // MARK: - correct(): bearer token and error text
 
-    func test_correct_usesStoredKey_whenNoExplicitKey() async throws {
-        StubURLProtocol.respond(status: 200, body: Self.chatBody("Hello, world."))
-        let corrector = OpenAICompatibleCorrector(
-            baseURL: URL(string: "https://llm.invalid/v1")!,
-            modelName: "m",
-            storedAPIKey: { "sk-stored" },
-            session: StubURLProtocol.makeSession()
-        )
-        _ = try await corrector.correct("hello world", language: "en")
-        XCTAssertEqual(StubURLProtocol.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer sk-stored")
-    }
-
-    func test_correct_explicitKeyWins_overStoredKey() async throws {
+    func test_correct_sendsTheExplicitKeyAsABearerToken() async throws {
         StubURLProtocol.respond(status: 200, body: Self.chatBody("Hello, world."))
         let corrector = OpenAICompatibleCorrector(
             baseURL: URL(string: "https://llm.invalid/v1")!,
             modelName: "m",
             apiKey: "sk-explicit",
-            storedAPIKey: { "sk-stored" },
             session: StubURLProtocol.makeSession()
         )
         _ = try await corrector.correct("hello world", language: "en")
@@ -320,7 +307,6 @@ final class OpenAICompatibleCorrectorTests: XCTestCase {
         let corrector = OpenAICompatibleCorrector(
             baseURL: URL(string: "https://llm.invalid/v1")!,
             modelName: "m",
-            storedAPIKey: { nil },
             session: StubURLProtocol.makeSession()
         )
         do {

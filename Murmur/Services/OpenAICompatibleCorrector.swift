@@ -17,29 +17,23 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
     let modelName: String
     /// Optional bearer token for hosted endpoints. nil for local servers.
     let apiKey: String?
-    /// Consulted on each request when `apiKey` is nil.
-    private let storedAPIKey: @Sendable () -> String?
     private let session: URLSession
 
     /// - Parameters:
     ///   - baseURL: the endpoint root (e.g. `http://localhost:11434/v1`).
     ///     `chat/completions` is appended by this class.
     ///   - modelName: the model identifier the server recognises.
-    ///   - apiKey: an explicit bearer token. When nil, `storedAPIKey` decides.
-    ///   - storedAPIKey: where to find the user's key when none is passed in;
-    ///     defaults to the Keychain. Returns nil for keyless local servers.
+    ///   - apiKey: optional bearer token. nil for keyless local servers.
     ///   - session: injectable for tests; defaults to `.shared`.
     init(
         baseURL: URL,
         modelName: String,
         apiKey: String? = nil,
-        storedAPIKey: @escaping @Sendable () -> String? = { LLMAPIKeyStore.current() },
         session: URLSession = .shared
     ) {
         self.baseURL = baseURL
         self.modelName = modelName
         self.apiKey = apiKey
-        self.storedAPIKey = storedAPIKey
         self.session = session
     }
 
@@ -54,7 +48,7 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
         let request = try Self.makeRequest(
             baseURL: baseURL,
             modelName: modelName,
-            apiKey: apiKey ?? storedAPIKey(),
+            apiKey: apiKey,
             language: language,
             glossary: glossary,
             trimmed: trimmed

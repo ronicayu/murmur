@@ -30,8 +30,7 @@ struct SettingsView: View {
     @State private var showRemoveLegacyConfirmation = false
     @State private var hotkeyKey: Key = HotkeyPreference.defaultCustomKey
     @State private var hotkeyModifiers: NSEvent.ModifierFlags = HotkeyPreference.defaultCustomModifiers
-    /// Lives in the Keychain (`LLMAPIKeyStore`), not UserDefaults.
-    @State private var localLLMAPIKey: String = ""
+    @AppStorage("localLLMAPIKey") private var localLLMAPIKey: String = ""
 
     /// Minimum downloaded bytes before the cancel confirmation dialog is shown.
     /// Below this threshold a single click is fine — very little data would be lost.
@@ -541,7 +540,6 @@ struct SettingsView: View {
             LabeledContent("API Key") {
                 SecureField("optional — leave empty for local servers", text: $localLLMAPIKey)
                     .textFieldStyle(.roundedBorder)
-                    .onChange(of: localLLMAPIKey) { _, newValue in LLMAPIKeyStore.save(newValue) }
                     .onSubmit { coordinator.reconfigureCorrectionEngine() }
             }
 
@@ -554,7 +552,6 @@ struct SettingsView: View {
             }
         }
         .padding(.leading, 4)
-        .onAppear { localLLMAPIKey = LLMAPIKeyStore.current() ?? "" }
     }
 
     @ViewBuilder

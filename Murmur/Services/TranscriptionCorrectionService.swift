@@ -14,10 +14,7 @@ import FoundationModels
 /// (English technical terms inside Chinese speech, etc.) must stay
 /// code-switched.
 ///
-/// Runs BEFORE `TranscriptionCleanup` in the coordinator pipeline:
-///   `transcribe → correction → cleanup → inject`
-/// Cleanup is a deterministic safety net for when correction is off or times
-/// out; when correction runs and adds its own punctuation, cleanup is a no-op.
+/// Runs in the coordinator pipeline: `transcribe → correction → inject`.
 ///
 /// Implementations MUST be safe to time out: the coordinator enforces a hard
 /// deadline and falls back to the raw text on any throw. The concrete Apple
@@ -310,7 +307,7 @@ actor FoundationModelsCorrector: TranscriptionCorrection {
         """)
 
         // Preserve the original leading/trailing whitespace so downstream
-        // cleanup sees a shape consistent with the raw input.
+        // steps see a shape consistent with the raw input.
         if trimmed != text {
             // Find leading and trailing whitespace from the original.
             let leading = text.prefix { $0.isWhitespace || $0.isNewline }

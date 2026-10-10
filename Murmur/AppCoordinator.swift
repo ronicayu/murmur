@@ -60,9 +60,8 @@ final class AppCoordinator: ObservableObject {
     /// In-memory recent transcriptions. `rawText` is populated only when the
     /// LLM correction step actually changed the transcribed words (e.g.
     /// homophone fix), so the menu-bar UI can show the user a before/after
-    /// diff when correction is on. Rule-based cleanup (punctuation/casing) is
-    /// NOT reflected here — its effect is deterministic and not interesting
-    /// to compare. nil `rawText` means "no correction diff to show."
+    /// diff when correction is on. nil `rawText` means "no correction diff
+    /// to show."
     @Published private(set) var transcriptionHistory: [(text: String, rawText: String?, language: DetectedLanguage, date: Date)] = []
 
     private let maxHistoryCount = 20
@@ -75,15 +74,9 @@ final class AppCoordinator: ObservableObject {
     let audioFeedback: AudioFeedbackService
     let pill: any PillControlling
 
-    /// Optional post-transcription cleanup service. When non-nil and the
-    /// `cleanupTranscription` UserDefault is on, called after V1 transcription
-    /// succeeds and before text is injected. Injected by MurmurApp on every
-    /// launch (rule-based; no download gate in v0.3.0).
-    var cleanup: (any TranscriptionCleanup)?
-
     /// Optional ASR error-correction service. When non-nil and the
-    /// `correctTranscription` UserDefault is on, runs BEFORE `cleanup` on the
-    /// raw transcribed text. Concrete implementation is chosen by
+    /// `correctTranscription` UserDefault is on, runs on the raw transcribed
+    /// text before it is inserted. Concrete implementation is chosen by
     /// `reconfigureCorrectionEngine()` based on the `correctionEngine`
     /// UserDefault: `"apple"` → `FoundationModelsCorrector` (or NoOp on
     /// older systems), `"ollama"` → `OllamaCorrector`. Re-wired whenever
@@ -130,10 +123,6 @@ final class AppCoordinator: ObservableObject {
             self.correction = NoOpCorrector()
             Self.log.info("correction engine: noop (apple unavailable)")
         }
-    }
-
-    private var cleanupEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "cleanupTranscription")
     }
 
     private var correctionEnabled: Bool {
@@ -918,16 +907,15 @@ final class AppCoordinator: ObservableObject {
             return false
         }
 
-        // Post-processing rules exist for Chinese and English only, and are
-        // chosen by what the transcript is actually written in. Any other
-        // language gets a code the rules do not know, so they leave it alone.
+        // The correction prompt is language-specific and exists for Chinese
+        // and English, chosen by what the transcript is actually written in.
+        // Any other language gets a code it does not know.
         let lang = Self.languageCode(for: result.language) ?? "und"
 
-        // Pipeline: transcribe → correction (LLM, 2.5 s cap) → cleanup (rules, 250 ms cap) → inject. Each step silently falls back to its input on
-        // timeout or error.
+        // Pipeline: transcribe → correction (LLM, 2.5 s cap) → inject. The
+        // correction step silently falls back to its input on timeout or error.
         let rawTranscribed = result.text
-        let corrected = await applyCorrectionIfEnabled(text: rawTranscribed, language: lang)
-        let textToInject = await applyCleanupIfEnabled(text: corrected, language: lang)
+        let textToInject = await applyCorrectionIfEnabled(text: rawTranscribed, language: lang)
 
         transition(to: .injecting)
         pill.show(state: .injecting)
@@ -939,13 +927,9 @@ final class AppCoordinator: ObservableObject {
 
         lastTranscription = textToInject
         lastLanguage = result.language
-        // History records the injected (final) text. `rawText` captures
-        // the pre-pipeline transcription whenever ANY post-processing
-        // step (LLM correction OR rule-based cleanup) changed the text.
-        // Comparing against the final injected text — not just the
-        // correction step — means cleanup-only diffs (e.g. just adding
-        // a terminal `。`) also surface in Recent, so the user can
-        // always tell whether the pipeline did anything to their words.
+        // History records the injected (final) text. `rawText` captures the
+        // transcription as the model produced it whenever correction changed
+        // it, so Recent can show what was altered.
         let rawForHistory: String? = (textToInject != rawTranscribed) ? rawTranscribed : nil
         transcriptionHistory.insert((text: textToInject, rawText: rawForHistory, language: result.language, date: Date()), at: 0)
         if transcriptionHistory.count > maxHistoryCount {
@@ -964,26 +948,9 @@ final class AppCoordinator: ObservableObject {
         return true
     }
 
-    /// Runs the cleanup service if the toggle is on and a service is wired in.
-    /// Always returns a valid string: the cleaned text on success, `rawText` on
-    /// timeout, throw, or toggle-off. Never surfaces an error to the caller.
-    private func applyCleanupIfEnabled(text rawText: String, language: String) async -> String {
-        guard cleanupEnabled, let cleanup else { return rawText }
-        do {
-            let cleaned = try await withTimeout(seconds: Self.cleanupTimeoutSeconds, operation: "cleanup") {
-                try await cleanup.improve(rawText, language: language)
-            }
-            return cleaned
-        } catch {
-            Self.log.warning("Cleanup failed, using raw text: \(String(describing: error), privacy: .public)")
-            return rawText
-        }
-    }
-
     /// Runs the ASR-error correction service if the toggle is on and a service
     /// is wired in. Silent fallback to `rawText` on timeout, throw, toggle-off,
     /// or if the safety rails in `TranscriptionCorrection` reject the candidate.
-    /// Generative LLM inference is given a longer budget than rule-based cleanup.
     private func applyCorrectionIfEnabled(text rawText: String, language: String) async -> String {
         guard correctionEnabled, let correction else { return rawText }
         do {
@@ -997,9 +964,6 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    /// Hard cap for post-transcription cleanup (250 ms per spec).
-    private static let cleanupTimeoutSeconds: TimeInterval = 0.25
-
     /// Hard cap for ASR-error correction. 2.5 s accommodates Apple Foundation
     /// Models first-token + generation on M-series; shorter would cause a
     /// fallback on nearly every invocation when the session is cold.
@@ -1007,7 +971,7 @@ final class AppCoordinator: ObservableObject {
 
 #if DEBUG
     /// Testable entry-point that bypasses audio I/O. Runs the real transcribe →
-    /// correction → cleanup → deliver pipeline on a pre-recorded WAV; only the
+    /// correction → deliver pipeline on a pre-recorded WAV; only the
     /// paste into the frontmost app is replaced by `paste`.
     func stopAndTranscribeV1ForTesting(
         wav: URL,
