@@ -37,6 +37,16 @@ mkdir -p "$APP/Contents/Resources"
 # Copy binary
 cp "$BINARY" "$APP/Contents/MacOS/Murmur"
 
+# The speech engine runs in this helper process. Without it the app still
+# works, with the engine inside its own process, and keeps gigabytes of
+# memory for good; so a build without it is an error.
+ENGINE="$(dirname "$BINARY")/MurmurEngine"
+if [ ! -f "$ENGINE" ]; then
+    echo "error: $ENGINE was not built" >&2
+    exit 1
+fi
+cp "$ENGINE" "$APP/Contents/MacOS/MurmurEngine"
+
 # Copy Info.plist, add icon key and stamp the version
 cp Info.plist "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP/Contents/Info.plist" 2>/dev/null || \

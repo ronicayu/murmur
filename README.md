@@ -201,9 +201,10 @@ Murmur unloads the model when your Mac sleeps to free memory, and reloads it whe
 ```
 
 - **Qwen3TranscriptionService** — the one speech engine. Loads the model lazily, retries when a decode comes back corrupt, and splits long audio at pauses.
+- **MurmurEngine** — a helper process that holds that engine. The app (`EngineProcessClient`) sends it one request per line of JSON and ends it after 5 idle minutes, which is the only way to give the 2–4 GB the engine holds back to the system.
 - **StreamingTranscriptionCoordinator** — re-transcribes the growing audio window every second and shows the words two consecutive passes agree on (`StablePrefixAggregator`).
 - **ModelManager** — downloads the model files from a pinned revision on Hugging Face with the system `curl` (no Python), and checks every file's SHA-256 against that revision's listing before the model is marked ready.
-- Model preloads on launch and after wake for instant first transcription.
+- The model loads when a recording starts, while you speak.
 
 ## Project Structure
 
