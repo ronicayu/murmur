@@ -105,7 +105,7 @@ final class TranscriptionWindowModelTests: XCTestCase {
         // Arrange — each transcribeLong call ends only when the test opens its gate
         let firstGate = TestGate()
         let secondGate = TestGate()
-        let service = GatedTranscriptionService(calls: [
+        let service = WindowGatedTranscriptionService(calls: [
             (firstGate, .failure(firstError)),
             (secondGate, .success(TranscriptionResult(text: "second", language: .english, durationMs: 1))),
         ])
@@ -158,7 +158,7 @@ final class TranscriptionWindowModelTests: XCTestCase {
     func test_cancelTranscription_keeps_voice_input_paused_until_task_unwinds() async throws {
         // Arrange
         let gate = TestGate()
-        let service = GatedTranscriptionService(calls: [(gate, .failure(CancellationError()))])
+        let service = WindowGatedTranscriptionService(calls: [(gate, .failure(CancellationError()))])
         let model = TranscriptionWindowModel(
             historyService: historyService,
             coordinator: coordinator,
@@ -569,7 +569,7 @@ final class TestGate: @unchecked Sendable {
 
 /// Transcription service whose n-th `transcribeLong` call ends only when the
 /// test opens that call's gate, and then returns or throws the given outcome.
-final class GatedTranscriptionService: TranscriptionServiceProtocol, @unchecked Sendable {
+final class WindowGatedTranscriptionService: TranscriptionServiceProtocol, @unchecked Sendable {
     typealias Call = (gate: TestGate, outcome: Result<TranscriptionResult, Error>)
 
     nonisolated var isModelLoaded: Bool { true }
