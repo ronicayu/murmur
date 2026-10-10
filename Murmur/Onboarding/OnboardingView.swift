@@ -15,6 +15,9 @@ struct OnboardingView: View {
     let onComplete: () -> Void
 
     @State private var showCancelDownloadConfirmation = false
+    /// The window hosting this view, so its close button can be told apart
+    /// from any other window closing.
+    @State private var hostWindow: NSWindow?
 
     /// Minimum downloaded bytes before the cancel confirmation dialog is shown.
     /// Mirrors the same constant in SettingsView — keep in sync.
@@ -58,6 +61,13 @@ struct OnboardingView: View {
             .padding(32)
         }
         .frame(width: 520, height: 580)
+        .background(HostWindowReader(window: $hostWindow))
+        // The window is closable: without this, closing it at the test step
+        // would leave the accessibility check skipped and the polls running.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { note in
+            guard let closing = note.object as? NSWindow, closing === hostWindow else { return }
+            viewModel.teardown()
+        }
     }
 
     // MARK: - Step 1: Welcome + Microphone (merged)
@@ -412,7 +422,10 @@ struct OnboardingView: View {
                         modifiers: $viewModel.customModifiers
                     )
                     .onChange(of: viewModel.customKey) { _, _ in
-                        viewModel.hotkeyConflictDetected = false
+                        viewModel.customHotkeyDidChange()
+                    }
+                    .onChange(of: viewModel.customModifiers) { _, _ in
+                        viewModel.customHotkeyDidChange()
                     }
                 }
             } else {
@@ -456,6 +469,31 @@ struct OnboardingView: View {
             return "\(bytesPerSec / 1_000) KB/s"
         } else {
             return "\(bytesPerSec) B/s"
+        }
+    }
+}
+
+/// Reports the `NSWindow` a SwiftUI view ends up in.
+private struct HostWindowReader: NSViewRepresentable {
+    @Binding var window: NSWindow?
+
+    func makeNSView(context: Context) -> NSView {
+        let view = ReportingView()
+        view.onWindowChange = { newWindow in
+            // Deferred: this fires during a view update.
+            DispatchQueue.main.async { window = newWindow }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class ReportingView: NSView {
+        var onWindowChange: ((NSWindow?) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            onWindowChange?(window)
         }
     }
 }
