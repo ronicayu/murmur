@@ -51,6 +51,49 @@ enum AppState: Equatable, Sendable {
     }
 }
 
+/// Hands V3 streaming a transcription service that always resolves to the
+/// coordinator's *current* services and routing. The streaming coordinator
+/// keeps its service for its whole lifetime, so giving it a concrete service
+/// would leave it on a stale (killed) instance after every engine switch and
+/// would pin streaming to Cohere regardless of the selected engine.
+private final class StreamingTranscriptionProxy: TranscriptionServiceProtocol, @unchecked Sendable {
+    /// Set once, on the main actor, right after the coordinator's stored
+    /// properties are initialised; only read afterwards.
+    weak var owner: AppCoordinator?
+
+    private func resolvedOwner() throws -> AppCoordinator {
+        guard let owner else {
+            throw MurmurError.transcriptionFailed("Transcription is unavailable — the app is shutting down")
+        }
+        return owner
+    }
+
+    func transcribe(audioURL: URL, language: String) async throws -> TranscriptionResult {
+        try await resolvedOwner().routedTranscribe(wav: audioURL, language: language, version: .v3Streaming)
+    }
+
+    func transcribeLong(
+        audioURL: URL,
+        language: String,
+        onProgress: @escaping (TranscriptionProgress) -> Void
+    ) async throws -> TranscriptionResult {
+        try await resolvedOwner().transcription.transcribeLong(
+            audioURL: audioURL, language: language, onProgress: onProgress
+        )
+    }
+
+    func preloadModel() async throws {
+        try await resolvedOwner().transcription.preloadModel()
+    }
+
+    func unloadModel() async {
+        await owner?.transcription.unloadModel()
+    }
+
+    /// Loading is managed by the coordinator's own services.
+    var isModelLoaded: Bool { true }
+}
+
 @MainActor
 final class AppCoordinator: ObservableObject {
     @Published private(set) var state: AppState = .idle
@@ -313,10 +356,12 @@ final class AppCoordinator: ObservableObject {
         self.permissions = permissions
         self.audioFeedback = audioFeedback
         self.pill = pill
+        let streamingProxy = StreamingTranscriptionProxy()
         self.streamingCoordinator = StreamingTranscriptionCoordinator(
-            transcription: transcription,
+            transcription: streamingProxy,
             injection: injection
         )
+        streamingProxy.owner = self
 
         // Defer start to next run loop to ensure StateObject is fully initialized
         Task { @MainActor [weak self] in
@@ -1160,12 +1205,22 @@ final class AppCoordinator: ObservableObject {
     /// or Qwen3 errors we fall back to Cohere for THIS request only and log
     /// the failure once per session.
     private func routedTranscribeV1(wav: URL, language: String) async throws -> TranscriptionResult {
+        try await routedTranscribe(wav: wav, language: language, version: .v1FullPass)
+    }
+
+    /// Shared by the V1 full-pass path and, through `StreamingTranscriptionProxy`,
+    /// by V3 streaming chunks and the streaming full-pass refinement.
+    fileprivate func routedTranscribe(
+        wav: URL,
+        language: String,
+        version: TranscriptionRouter.TranscriptionVersion
+    ) async throws -> TranscriptionResult {
         let mm = self.modelManager
         let choice = TranscriptionRouter.route(
             activeBackend: mm?.activeBackend ?? .onnx,
             useFireRedForChinese: mm?.useFireRedForChinese ?? false,
             language: language,
-            version: .v1FullPass
+            version: version
         )
 
         switch choice {

@@ -7,7 +7,7 @@ import Foundation
 enum TranscriptionRouter {
 
     /// V1 = full-pass (record then transcribe); V3 = streaming.
-    /// V3 always uses Cohere because FireRed and Qwen3-ASR have no streaming mode.
+    /// V3 uses Cohere unless Qwen3-ASR is the active engine (see `route`).
     enum TranscriptionVersion: Sendable {
         case v1FullPass
         case v3Streaming
@@ -29,6 +29,13 @@ enum TranscriptionRouter {
         version: TranscriptionVersion
     ) -> BackendChoice {
         if version == .v3Streaming {
+            // V3 "streaming" is chunked offline transcription, so any fast
+            // offline model can serve it. Qwen3-ASR is fast enough (several
+            // times quicker than Cohere per chunk); FireRed is not, so it
+            // still hands streaming to Cohere.
+            if activeBackend == .qwen3 && (language == "zh" || language == "en") {
+                return .qwen3
+            }
             return .cohereStreaming
         }
 

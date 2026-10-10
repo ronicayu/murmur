@@ -13,13 +13,14 @@
   - **Speed:** on the 14.7 s reference clip it transcribes in ~1.0 s against ~5.1 s for FireRed (M5 Max, 4 threads).
   - **Quality:** in an offline benchmark (ASCEND conversational + FLEURS read Mandarin, ~1,360 utterances) it was slightly better than FireRed on pure Chinese (mixed error rate 6.99 vs 7.99, and 4.35 vs 5.35) and slightly worse on Chinese-English mixed speech (14.13 vs 12.77). It occasionally translates an English term into Chinese instead of transcribing it.
   - **Punctuation:** Qwen3-ASR emits `，。？` and natural casing itself, so the ASR Punctuation add-on is not needed with it.
-  - **Routing:** Chinese and English full-pass audio use Qwen3-ASR; other languages fall back to Cohere ONNX. V3 streaming is unchanged and always uses Cohere, because sherpa-onnx has no streaming mode for this model.
+  - **Routing:** Chinese and English audio use Qwen3-ASR, in both full-pass and V3 streaming mode (streaming chunks and the final refinement pass). Other languages fall back to Cohere ONNX.
   - FireRed is untouched and remains selectable, including the "Use FireRed for Chinese transcription" toggle under Standard.
 
 ### Changed
 - **Model downloads no longer need Python.** Downloading a speech engine or add-on model used to create a Python environment and `pip install` eight packages (including PyTorch) just to call `snapshot_download`; any failure there surfaced as "Setup failed. Please check your internet connection." Murmur now lists the files through `URLSession` and fetches them with the system `/usr/bin/curl`, resuming partial files. Both use the macOS keychain for TLS trust, so Cloudflare WARP / Zero Trust needs no custom CA bundle.
 
 ### Fixed
+- **Streaming kept using a stale transcription service after switching engines.** The streaming coordinator captured the service it was created with, so after any engine switch it ran on the old, already-torn-down instance, which had to reload its model. Streaming now resolves the current service on every chunk.
 - **Streaming and non-Chinese/English audio did not work while FireRed was the selected engine.** The fallback service was the legacy Python bridge pointed at the FireRed model folder, which it cannot load. Every engine now keeps the native Cohere ONNX service (pointed at the Cohere model folder) for streaming and fallback languages. The Cohere model still has to be downloaded for those paths.
 
 ## [0.4.10] — 2026-05-01

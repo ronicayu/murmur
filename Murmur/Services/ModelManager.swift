@@ -109,7 +109,7 @@ enum ModelBackend: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .onnx: return "Smaller download, fast and lightweight. Great for most users."
         case .fireRed: return "Best Chinese accuracy, including dialects and Chinese-English code-switching. Other languages fall back to Cohere ONNX (1.5 GB additional)."
-        case .qwen3: return "Smaller and about 5× faster than FireRed with similar Chinese accuracy, and adds punctuation itself. Slightly weaker on English terms inside Chinese speech. Other languages fall back to Cohere ONNX (1.5 GB additional)."
+        case .qwen3: return "Smaller and about 5× faster than FireRed with similar Chinese accuracy, and adds punctuation itself. Slightly weaker on English terms inside Chinese speech. Also used for streaming. Other languages fall back to Cohere ONNX (1.5 GB additional)."
         }
     }
 }

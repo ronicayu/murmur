@@ -127,10 +127,21 @@ final class TranscriptionRouterTests: XCTestCase {
         )
     }
 
-    func test_v3Streaming_alwaysRoutesToCohere_evenWithQwen3Active() {
+    func test_v3Streaming_qwen3Backend_zhAndEn_routeToQwen3() {
+        for lang in ["zh", "en"] {
+            XCTAssertEqual(
+                TranscriptionRouter.route(activeBackend: .qwen3, useFireRedForChinese: false,
+                                          language: lang, version: .v3Streaming),
+                .qwen3,
+                "streaming \(lang) should use Qwen3 when it is the active engine"
+            )
+        }
+    }
+
+    func test_v3Streaming_qwen3Backend_otherLanguage_routesToCohere() {
         XCTAssertEqual(
             TranscriptionRouter.route(activeBackend: .qwen3, useFireRedForChinese: false,
-                                      language: "zh", version: .v3Streaming),
+                                      language: "ja", version: .v3Streaming),
             .cohereStreaming
         )
     }
