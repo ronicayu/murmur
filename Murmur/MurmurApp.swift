@@ -66,7 +66,7 @@ struct MurmurApp: App {
                 onOpenRecentHistory: { showRecentHistory() }
             )
         } label: {
-            Label("Murmur", systemImage: menuBarIconName)
+            Label(coordinator.state.menuBarAccessibilityName, systemImage: menuBarIconName)
                 .labelStyle(.iconOnly)
                 .onAppear {
                     guard !launched else { return }

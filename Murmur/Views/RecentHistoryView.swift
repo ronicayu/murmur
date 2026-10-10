@@ -7,6 +7,9 @@ import SwiftUI
 struct RecentHistoryView: View {
     @ObservedObject var coordinator: AppCoordinator
     @State private var searchQuery: String = ""
+    /// The entry (by its date) whose text was just copied, for the short
+    /// "Copied" confirmation on its row.
+    @State private var copiedEntryDate: Date?
 
     /// Entries matching the current query. Searches both the injected text and
     /// the pre-correction raw text, so looking for what you *said* finds the
@@ -124,8 +127,7 @@ struct RecentHistoryView: View {
     @ViewBuilder
     private func row(text: String, rawText: String?, language: DetectedLanguage, date: Date) -> some View {
         Button {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+            copy(text, entryDate: date)
         } label: {
             VStack(alignment: .leading, spacing: 4) {
                 // Header: timestamp + language + copy glyph
@@ -146,9 +148,16 @@ struct RecentHistoryView: View {
                             .foregroundStyle(Color.accentColor)
                     }
                     Spacer()
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+                    if copiedEntryDate == date {
+                        Label("Copied", systemImage: "checkmark")
+                            .labelStyle(.titleAndIcon)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
                 }
 
                 // Corrected (what was actually injected)
@@ -175,6 +184,27 @@ struct RecentHistoryView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(text)
+        .accessibilityHint("Copies this text")
+    }
+
+    /// Copies `text` and confirms it on the row and to VoiceOver. A click on
+    /// a row otherwise changes nothing the user can see or hear.
+    private func copy(_ text: String, entryDate: Date) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        copiedEntryDate = entryDate
+        if let app = NSApp {
+            NSAccessibility.post(
+                element: app,
+                notification: .announcementRequested,
+                userInfo: [.announcement: "Copied", .priority: NSAccessibilityPriorityLevel.high.rawValue]
+            )
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.5))
+            if copiedEntryDate == entryDate { copiedEntryDate = nil }
+        }
     }
 
     private func timestampLabel(_ date: Date) -> String {

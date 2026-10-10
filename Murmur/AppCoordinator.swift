@@ -49,6 +49,18 @@ enum AppState: Equatable, Sendable {
         case .error(let err): return err.localizedDescription
         }
     }
+
+    /// What the menu-bar item is called for VoiceOver. Its icon changes with
+    /// the state; this says the same in words.
+    var menuBarAccessibilityName: String {
+        switch self {
+        case .idle, .undoable: return "Murmur"
+        case .recording, .streaming: return "Murmur, recording"
+        case .transcribing: return "Murmur, transcribing"
+        case .injecting: return "Murmur, inserting text"
+        case .error(let err): return "Murmur, error: \(err.shortMessage)"
+        }
+    }
 }
 
 @MainActor
