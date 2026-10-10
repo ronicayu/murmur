@@ -219,6 +219,10 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
     ///   real speech comes back in the same script with nearly the same
     ///   words, a misfire does not. When two attempts agree, the transcript is
     ///   accepted — the user's speech is never dropped for being unexpected.
+    ///
+    /// A third case needs only one more decode: **nothing at all** for several
+    /// seconds of audible sound. That is usually sound with no speech in it
+    /// (a fan, typing), and a second empty result confirms it (see `settledText`).
     private func decodeWithRetry(
         _ samples: [Float], sampleRate: Int, language: String, recognizer: SherpaOnnxOfflineRecognizer
     ) -> String {
@@ -237,7 +241,7 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
             }
             logger.warning("Qwen3 decode not accepted at +\(offset) samples (\(String(describing: judgement), privacy: .public)): \(raw.prefix(60), privacy: .public)")
         }
-        return Self.lastResort(attempts)
+        return Self.lastResort(attempts, expected: expected)
     }
 
     // MARK: - Judging a decode
@@ -271,17 +275,23 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
         if raw.contains("<asr_text>") || raw.contains("<|") || raw.contains("\u{FFFD}") { return .debris }
         if speechSeconds >= 4 && Double(cleaned.count) < speechSeconds * 0.5 { return .tooShort }
 
-        // A transcript is "in" an unexpected script when letters outside the
-        // expected scripts outnumber the letters inside them. A stray foreign
-        // word in an otherwise expected transcript is not a reason to distrust it.
-        let counts = WritingScript.counts(in: cleaned)
+        if let script = unexpectedScript(in: cleaned, expected: expected) { return .unexpectedScript(script) }
+        return .accepted
+    }
+
+    /// The script `text` is mostly written in, when that is not one of the
+    /// `expected` scripts; nil otherwise.
+    ///
+    /// A transcript is "in" an unexpected script when letters outside the
+    /// expected scripts outnumber the letters inside them. A stray foreign
+    /// word in an otherwise expected transcript is not a reason to distrust it.
+    nonisolated static func unexpectedScript(in text: String, expected: Set<WritingScript>) -> WritingScript? {
+        let counts = WritingScript.counts(in: text)
         let inside = counts.filter { expected.contains($0.key) }.reduce(0) { $0 + $1.value }
         let outside = counts.filter { !expected.contains($0.key) }
         let outsideTotal = outside.reduce(0) { $0 + $1.value }
-        if outsideTotal > inside, let dominant = outside.max(by: { $0.value < $1.value })?.key {
-            return .unexpectedScript(dominant)
-        }
-        return .accepted
+        guard outsideTotal > inside else { return nil }
+        return outside.max(by: { $0.value < $1.value })?.key
     }
 
     /// How alike two transcripts must be (character edit distance over the
@@ -294,9 +304,18 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
     /// - An accepted attempt settles it.
     /// - Two attempts in the same unexpected script with nearly the same text
     ///   settle it too: that is the user speaking an unlisted language.
+    /// - Two empty attempts settle on no text. The misfire a retry is for
+    ///   gives a few wrong characters and changes when the start moves, so
+    ///   silence from two different starts is the model hearing no speech.
+    ///   Without this rule a window of steady noise costs every retry on
+    ///   every streaming pass, and the stream falls behind the speaker.
     nonisolated static func settledText(_ attempts: [DecodeAttempt]) -> String? {
         guard let latest = attempts.last else { return nil }
         if latest.judgement == .accepted { return latest.text }
+        if latest.text.isEmpty, latest.judgement == .tooShort,
+           attempts.dropLast().contains(where: { $0.text.isEmpty && $0.judgement == .tooShort }) {
+            return ""
+        }
         guard case .unexpectedScript(let script) = latest.judgement else { return nil }
         for earlier in attempts.dropLast() {
             if case .unexpectedScript(script) = earlier.judgement,
@@ -309,10 +328,11 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
 
     /// What to return when no attempt settled. A transcript that is merely
     /// short is still the best guess; debris and an unconfirmed foreign script
-    /// are not worth typing, so the result may be empty.
-    nonisolated static func lastResort(_ attempts: [DecodeAttempt]) -> String {
+    /// are not worth typing, so the result may be empty. `judge` decides
+    /// "too short" before it looks at the script, so the script is checked here.
+    nonisolated static func lastResort(_ attempts: [DecodeAttempt], expected: Set<WritingScript>) -> String {
         attempts
-            .filter { $0.judgement == .tooShort }
+            .filter { $0.judgement == .tooShort && unexpectedScript(in: $0.text, expected: expected) == nil }
             .map(\.text)
             .max { $0.count < $1.count } ?? ""
     }

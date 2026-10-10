@@ -86,4 +86,31 @@ final class StreamingMetricsTests: XCTestCase {
         XCTAssertNil(coord.timeToFirstWordMs)
     }
 
+    func test_finalizingStartedAt_isNotInheritedFromPriorSession() async throws {
+        let coord = makeCoordinator()
+        let wav = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metrics_\(UUID().uuidString).wav")
+        try createMinimalWAV(at: wav)
+        defer { try? FileManager.default.removeItem(at: wav) }
+
+        _ = coord.beginSession(
+            language: "en", targetAppPID: getpid(), startOffset: 0, fullWavURL: wav
+        )
+        coord.endSession()
+        let done = await pollUntil(timeout: 5) { coord.sessionState == .done }
+        XCTAssertTrue(done)
+        XCTAssertNotNil(coord.finalizingStartedAt,
+            "endSession must stamp the start of the finalizing phase")
+        coord.resetToIdle()
+
+        // The second session is cancelled before it ever finalises.
+        _ = coord.beginSession(
+            language: "en", targetAppPID: getpid(), startOffset: 0, fullWavURL: wav
+        )
+        coord.cancelSession()
+
+        XCTAssertNil(coord.finalizingStartedAt,
+            "A session that never finalised must not report the previous session's value")
+    }
+
 }

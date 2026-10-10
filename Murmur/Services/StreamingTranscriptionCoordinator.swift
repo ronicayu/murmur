@@ -101,11 +101,20 @@ final class FocusGuard: @unchecked Sendable {
 
 // MARK: - CPU Monitor
 
-/// Polls ProcessInfo for system CPU load and fires a callback when sustained
-/// high load is detected. Used to trigger automatic V1 fallback.
+/// The host's CPU tick counters, by state. They count up from boot, so load
+/// over a period is the difference between two readings.
+struct CPUTicks: Equatable, Sendable {
+    var user: UInt32
+    var system: UInt32
+    var idle: UInt32
+    var nice: UInt32
+}
+
+/// Polls the host CPU tick counters and fires a callback when sustained high
+/// load is detected. Used to trigger automatic V1 fallback.
 ///
-/// Uses `ProcessInfo.processInfo.systemUptime` diff as a lightweight proxy;
-/// the actual process CPU% comes from `host_statistics64`.
+/// The load of each poll is measured between that poll's reading and the one
+/// before it; the first reading only sets the baseline.
 final class CPULoadMonitor: @unchecked Sendable {
 
     /// Called when CPU sustained load exceeds the threshold for the required duration.
@@ -114,6 +123,7 @@ final class CPULoadMonitor: @unchecked Sendable {
     private let threshold: Double       // 0.0–1.0
     private let sustainedSeconds: TimeInterval
     private let pollInterval: TimeInterval
+    private let sampleTicks: @Sendable () -> CPUTicks?
     private var monitorTask: Task<Void, Never>?
     private var highLoadStart: Date?
     private let logger = Logger(subsystem: "com.murmur.app", category: "cpu-monitor")
@@ -121,22 +131,33 @@ final class CPULoadMonitor: @unchecked Sendable {
     init(
         threshold: Double = 0.90,
         sustainedSeconds: TimeInterval = 3.0,
-        pollInterval: TimeInterval = 1.0
+        pollInterval: TimeInterval = 1.0,
+        sampleTicks: @escaping @Sendable () -> CPUTicks? = CPULoadMonitor.hostCPUTicks
     ) {
         self.threshold = threshold
         self.sustainedSeconds = sustainedSeconds
         self.pollInterval = pollInterval
+        self.sampleTicks = sampleTicks
     }
 
     func start() {
         monitorTask = Task.detached { [weak self] in
             guard let self else { return }
+            var previous = self.sampleTicks()
             while !Task.isCancelled {
-                let load = self.currentCPULoad()
+                try? await Task.sleep(for: .seconds(self.pollInterval))
+                if Task.isCancelled { break }
+                let current = self.sampleTicks()
+                let load: Double
+                if let previous, let current {
+                    load = CPULoadMonitor.load(from: previous, to: current)
+                } else {
+                    load = 0.0
+                }
+                previous = current
                 await MainActor.run {
                     self.evaluate(load: load)
                 }
-                try? await Task.sleep(for: .seconds(self.pollInterval))
             }
         }
     }
@@ -170,12 +191,27 @@ final class CPULoadMonitor: @unchecked Sendable {
         }
     }
 
-    /// Returns a normalized [0.0, 1.0] CPU load estimate using host_statistics64.
+    /// Share of CPU time spent busy between two readings, in [0.0, 1.0].
+    /// 0.0 when no time passed between them.
+    static func load(from previous: CPUTicks, to current: CPUTicks) -> Double {
+        // The counters are 32-bit and wrap around; wrapping subtraction still
+        // gives the right difference across a wrap.
+        let user   = Double(current.user &- previous.user)
+        let system = Double(current.system &- previous.system)
+        let idle   = Double(current.idle &- previous.idle)
+        let nice   = Double(current.nice &- previous.nice)
+        let total  = user + system + idle + nice
+        guard total > 0 else { return 0.0 }
+        return (user + system + nice) / total
+    }
+
+    /// Reads the host's cumulative CPU ticks with `host_statistics`.
     ///
     /// HOST_CPU_LOAD_INFO_COUNT is a C macro unavailable in Swift; the struct contains
     /// 4 × UInt32 fields, so the count is MemoryLayout<host_cpu_load_info_data_t>.size / 4.
-    /// Falls back to 0.0 on error (conservative — won't falsely trigger fallback).
-    private func currentCPULoad() -> Double {
+    /// Returns nil on error; the monitor then reports no load (conservative —
+    /// won't falsely trigger fallback).
+    static func hostCPUTicks() -> CPUTicks? {
         let cpuLoadInfoCount = mach_msg_type_number_t(
             MemoryLayout<host_cpu_load_info_data_t>.size / MemoryLayout<integer_t>.size
         )
@@ -188,15 +224,14 @@ final class CPULoadMonitor: @unchecked Sendable {
             }
         }
 
-        guard result == KERN_SUCCESS else { return 0.0 }
+        guard result == KERN_SUCCESS else { return nil }
 
-        let user   = Double(info.cpu_ticks.0)
-        let system = Double(info.cpu_ticks.1)
-        let idle   = Double(info.cpu_ticks.2)
-        let nice   = Double(info.cpu_ticks.3)
-        let total  = user + system + idle + nice
-        guard total > 0 else { return 0.0 }
-        return (user + system + nice) / total
+        return CPUTicks(
+            user: info.cpu_ticks.0,
+            system: info.cpu_ticks.1,
+            idle: info.cpu_ticks.2,
+            nice: info.cpu_ticks.3
+        )
     }
 }
 
@@ -282,7 +317,8 @@ struct V1UsageCounter {
 /// **Responsibilities:**
 /// - Manages the streaming state machine (idle → streaming → finalizing → done/cancelled).
 /// - Drives the `AudioBufferAccumulator` → `TranscriptionService.transcribe()` →
-///   `TextInjectionService.appendText()` loop for each 3-second chunk.
+///   `TextInjectionService.appendText()` loop: the growing window of captured
+///   audio is re-transcribed on a short fixed cadence.
 /// - After recording stops, performs a full-pass transcribe of the complete WAV.
 /// - If the full-pass result differs from the concatenated streaming text, calls
 ///   `TextInjectionService.replaceRange()` to substitute the correct text.
@@ -293,6 +329,11 @@ struct V1UsageCounter {
 /// **Thread model:** All public API must be called from `@MainActor`.
 /// Internal chunk processing dispatches to a detached task but marshals results
 /// back to the main actor before mutating state.
+///
+/// **Session identity:** a transcription cannot be interrupted, so work started
+/// by one session can finish after that session was cancelled, or after the
+/// next one began. Every task and callback captures `sessionGeneration` when
+/// it is created and does nothing once the value has moved on.
 @MainActor
 final class StreamingTranscriptionCoordinator: ObservableObject {
 
@@ -315,13 +356,10 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
 
     // MARK: - Session state
 
+    /// Changes whenever a session begins, is cancelled or is reset. Work that
+    /// captured an older value belongs to a session that is over.
+    private var sessionGeneration = 0
     private var accumulator: AudioBufferAccumulator?
-    /// On-disk path to the Silero VAD ONNX, set via `setVadModelURL(_:)`.
-    /// When non-nil, each `beginSession` builds a fresh `VadService`
-    /// against this file and hands it to the accumulator. A fresh
-    /// instance per session keeps state clean — Silero's reset semantics
-    /// are good but cross-session reuse is unnecessary risk.
-    private var vadModelURL: URL?
     private var rangeTracker: InjectedRangeTracker?
     private var streamingChunks: [String] = []
     private var focusGuard: FocusGuard?
@@ -340,7 +378,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     // MARK: - Stable-prefix streaming state (LocalAgreement-2 over a growing window)
 
     /// Audio accumulated since the last window reset. Re-transcribed in full on every
-    /// pass so each hypothesis has sentence context — isolated single-segment chunks
+    /// pass so each hypothesis has sentence context — isolated short chunks
     /// are what let one-pass hallucinations reach the cursor.
     private var windowSamples: [Float] = []
     /// Emits only text two consecutive hypotheses agree on; withholds the unstable tail.
@@ -385,10 +423,6 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     /// typed twice and the other lost.
     private var pendingInjections: [String] = []
     private var isDrainingInjections = false
-    /// Incremental mode: the window is re-transcribed on a fixed short cadence
-    /// over *all* captured audio instead of once per closed VAD segment. Only
-    /// worth it with an engine fast enough to keep up (see `beginSession`).
-    private var incrementalMode = false
 
     /// Why the session ended in `.cancelled` state, for UI messaging.
     enum CancellationReason: Sendable {
@@ -399,23 +433,21 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     internal(set) var cancellationReason: CancellationReason?
 
     private static let chunkSampleRate: Double = 16000
-    private static let chunkSeconds: Double = 3.0
     /// Seconds before a lost-focus session is abandoned. Configurable via Settings.
     static var focusAbandonSeconds: TimeInterval {
         let stored = UserDefaults.standard.double(forKey: "streamingFocusAbandonSeconds")
         return stored > 0 ? stored : 10.0
     }
-    private static let samplesPerChunk: Int = Int(chunkSampleRate * chunkSeconds)
     private static let replaceWindowSeconds: TimeInterval = 0.5
     /// Cap on the re-transcribed window. Past this, the window is flushed + reset so a
     /// long monologue can't grow the per-pass transcription cost without bound.
     private static let maxWindowSeconds: Double = 12.0
     private static var maxWindowSamples: Int { Int(chunkSampleRate * maxWindowSeconds) }
-    /// Incremental mode: once the speaker pauses, a window at least this long is
-    /// closed at the pause so later passes don't re-transcribe finished sentences.
+    /// Once the speaker pauses, a window at least this long is closed at the
+    /// pause so later passes don't re-transcribe finished sentences.
     private static let minPauseResetSeconds: Double = 3.0
-    /// Incremental mode: a window with no frame above this RMS (≈ −50 dBFS,
-    /// whisper level) is treated as silence and not sent to the model.
+    /// A window with no frame above this RMS (≈ −50 dBFS, whisper level) is
+    /// treated as silence and not sent to the model.
     private static let silenceRMSThreshold: Float = 0.00316
 
     private let logger = Logger(subsystem: "com.murmur.app", category: "streaming-coordinator")
@@ -438,26 +470,19 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
 
     // MARK: - Public API
 
-    /// Set (or clear) the Silero VAD model used by future streaming
-    /// sessions. Called from `AppCoordinator.setVadService(_:)` so live
-    /// PTT and streaming share the same model file.
-    func setVadModelURL(_ url: URL?) {
-        self.vadModelURL = url
-    }
-
     /// Begin a streaming session.
+    ///
+    /// A session left in a terminal state (done, cancelled, failed) is cleared
+    /// first, so a missing `resetToIdle()` cannot block the next session.
     ///
     /// - Parameters:
     ///   - language: BCP-47 language code (e.g. "en", "zh").
     ///   - targetAppPID: PID of the app receiving injected text (for focus guard).
     ///   - startOffset: AX character offset at the current insertion point.
     ///   - fullWavURL: URL where `AudioService` is writing the complete WAV.
-    ///   - incrementalSeconds: When set, re-transcribe the growing window every
-    ///     this many seconds of captured audio instead of once per VAD segment.
-    ///     Text then follows speech by a pass or two rather than waiting for a
-    ///     sentence-end pause, and no speech onset is lost to VAD segmentation.
-    ///     Pass it only for an engine that transcribes a full window well within
-    ///     the interval and stays silent on silence; nil keeps segment-driven passes.
+    ///   - incrementalSeconds: The growing window is re-transcribed every this
+    ///     many seconds of captured audio, so text follows speech by a pass or
+    ///     two. The engine must transcribe a full window well within the interval.
     ///   - onPreviewText: When set, streamed text is reported here (for a preview
     ///     UI) and never typed into the target app. The caller inserts
     ///     `finalResult` after the session is done.
@@ -467,78 +492,34 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         targetAppPID: pid_t,
         startOffset: Int,
         fullWavURL: URL,
-        incrementalSeconds: Double? = nil,
+        incrementalSeconds: Double = 1.0,
         onPreviewText: ((String) -> Void)? = nil
     ) -> AudioBufferAccumulator {
-        guard case .idle = sessionState else {
-            logger.warning("beginSession called while not idle — ignoring")
-            return AudioBufferAccumulator(
-                samplesPerChunk: Self.samplesPerChunk,
-                sampleRate: Self.chunkSampleRate
-            )
+        let acc = AudioBufferAccumulator(
+            samplesPerChunk: max(1, Int(Self.chunkSampleRate * incrementalSeconds)),
+            sampleRate: Self.chunkSampleRate
+        )
+        switch sessionState {
+        case .streaming, .finalizing:
+            logger.warning("beginSession called during a session — ignoring")
+            return acc
+        case .idle, .done, .cancelled, .failed:
+            break
         }
+
+        clearSessionState()
+        let generation = sessionGeneration
 
         self.language = language
         self.fullWavURL = fullWavURL
         self.rangeTracker = InjectedRangeTracker(startOffset: startOffset)
-        self.streamingChunks = []
-        self.chunkCount = 0
-        self.pausedPendingChunks = []
-        self.isFocusPaused = false
-        self.cpuFallbackTriggered = false
-        self.cancellationReason = nil
-        self.fullPassReplacedText = nil
-        self.windowSamples = []
-        self.aggregator = StablePrefixAggregator()
-        self.transcriptionInFlight = false
-        self.windowDirty = false
-        self.pendingWindowSeparator = false
-        self.incrementalMode = incrementalSeconds != nil
-        self.pendingInjections = []
         self.onPreviewText = onPreviewText
-        self.finalResult = nil
         self.sessionStartedAt = Date()
-        self.firstDeltaAt = nil
-        self.lastEditDistanceRatio = nil
 
-        // Build a fresh per-session VAD if a model is configured.
-        // minSilenceDurationSeconds: 0.8 — Silero's 0.25 s default closes
-        // a segment on a mid-sentence breath, which makes streaming emit
-        // half-finished phrases. 0.8 s spans typical mid-sentence pauses
-        // (commas, breaths) so a chunk only delivers on a real
-        // sentence-end pause.
-        // maxSpeechDurationSeconds: 8 — give the ASR enough context per
-        // chunk; Silero will force-close past this even if speech
-        // continues, so a long monologue still produces deliverable
-        // chunks at a usable cadence.
-        let sessionVad: VadService?
-        if incrementalSeconds != nil {
-            // Incremental mode windows over all captured audio; VAD segmentation
-            // would reintroduce the sentence-end wait and clip soft onsets.
-            sessionVad = nil
-        } else if let vadURL = self.vadModelURL {
-            sessionVad = try? VadService(
-                modelURL: vadURL,
-                minSilenceDurationSeconds: 0.8,
-                maxSpeechDurationSeconds: 8.0
-            )
-            if sessionVad == nil {
-                logger.warning("StreamingCoordinator: VAD construction failed — falling back to fixed-size chunking")
-            }
-        } else {
-            sessionVad = nil
-        }
-
-        let acc = AudioBufferAccumulator(
-            samplesPerChunk: incrementalSeconds.map { max(1, Int(Self.chunkSampleRate * $0)) }
-                ?? Self.samplesPerChunk,
-            sampleRate: Self.chunkSampleRate,
-            vad: sessionVad
-        )
         acc.onChunkReady = { [weak self] buffer in
             guard let self else { return }
             Task { @MainActor in
-                self.handleChunkReady(buffer)
+                self.handleChunkReady(buffer, generation: generation)
             }
         }
         self.accumulator = acc
@@ -568,9 +549,12 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         focusGuard = nil
         cpuMonitor.stop()
 
-        // Flush partial tail
-        if let partial = accumulator?.flush() {
-            handleChunkReady(partial)
+        // Keep the partial tail in the window, but start no pass for it: its
+        // result would be discarded (the session is no longer streaming) and
+        // the full pass would wait behind it. `finishStreamedText` transcribes
+        // the final window where the streamed text is needed.
+        if let partial = accumulator?.flush(), !isFocusPaused {
+            appendToWindow(partial)
         }
         accumulator = nil
 
@@ -578,13 +562,15 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         transition(to: .finalizing)
         logger.info("StreamingCoordinator: session ending, starting full-pass")
 
+        let generation = sessionGeneration
         Task { @MainActor [weak self] in
+            guard let self, self.isCurrent(generation) else { return }
             // A preview session inserts the full-pass text, so the streamed
             // text only needs finishing if that pass fails (see runFullPass).
-            if self?.isPreviewSession == false {
-                await self?.finishStreamedText()
+            if !self.isPreviewSession {
+                await self.finishStreamedText(generation: generation)
             }
-            await self?.runFullPass()
+            await self.runFullPass(generation: generation)
         }
     }
 
@@ -600,24 +586,34 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     /// It also covers the short single-utterance case: LocalAgreement-2 emits
     /// nothing until a second pass agrees, and the full pass only *replaces*
     /// streamed text — it never inserts from empty.
-    private func finishStreamedText() async {
-        // Let a pass that was already running finish; its result is ignored
-        // (the session is no longer `.streaming`) but it holds the model.
-        let deadline = Date().addingTimeInterval(5)
-        while transcriptionInFlight && Date() < deadline {
-            try? await Task.sleep(for: .milliseconds(50))
-        }
+    ///
+    /// - Parameter transcribeFinalWindow: false when the engine is known to be
+    ///   busy (an abandoned full pass still holds it): only the text the last
+    ///   hypothesis already holds is flushed.
+    ///
+    /// The session can end while this waits; callers check `isCurrent` afterwards.
+    private func finishStreamedText(generation: Int, transcribeFinalWindow: Bool = true) async {
+        if transcribeFinalWindow {
+            // Let a pass that was already running finish; its result is ignored
+            // (the session is no longer `.streaming`) but it holds the model.
+            let deadline = Date().addingTimeInterval(5)
+            while transcriptionInFlight && Date() < deadline {
+                try? await Task.sleep(for: .milliseconds(50))
+                guard isCurrent(generation) else { return }
+            }
 
-        if !windowSamples.isEmpty,
-           !(incrementalMode && Self.isSilent(windowSamples)),
-           let wavURL = writeSamplesToTempWAV(windowSamples) {
-            let transcription = self.transcription
-            let lang = self.language
-            let text = try? await transcription.transcribe(audioURL: wavURL, language: lang).text
-            try? FileManager.default.removeItem(at: wavURL)
-            if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let delta = aggregator.ingest(text)
-                if !delta.isEmpty { injectDelta(delta) }
+            if !windowSamples.isEmpty,
+               !Self.isSilent(windowSamples),
+               let wavURL = writeSamplesToTempWAV(windowSamples) {
+                let transcription = self.transcription
+                let lang = self.language
+                let text = try? await transcription.transcribe(audioURL: wavURL, language: lang).text
+                try? FileManager.default.removeItem(at: wavURL)
+                guard isCurrent(generation) else { return }
+                if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let delta = aggregator.ingest(text)
+                    if !delta.isEmpty { injectDelta(delta) }
+                }
             }
         }
         windowSamples.removeAll()
@@ -630,12 +626,19 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
 
     /// Reset the coordinator to idle so it can be reused for the next session.
     /// Call after the session reaches a terminal state (done/cancelled/failed).
+    /// Clears everything the session reported (`finalResult`,
+    /// `cancellationReason`, the measurements), so read those first.
     func resetToIdle() {
-        if case .idle = sessionState { return }
-        if case .streaming = sessionState {
-            logger.warning("resetToIdle called while streaming — cancelling first")
+        switch sessionState {
+        case .idle:
+            return
+        case .streaming, .finalizing:
+            logger.warning("resetToIdle called during a session — cancelling first")
             cancelSession()
+        case .done, .cancelled, .failed:
+            break
         }
+        clearSessionState()
         transition(to: .idle)
     }
 
@@ -646,7 +649,16 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     }
 
     /// Cancel the session immediately, discarding any in-flight work.
+    /// Does nothing when no session is running (idle, or already ended).
     func cancelSession() {
+        switch sessionState {
+        case .streaming, .finalizing:
+            break
+        case .idle, .done, .cancelled, .failed:
+            return
+        }
+        // Whatever this session still has in flight must find it gone.
+        sessionGeneration += 1
         focusGuard?.stop()
         focusGuard = nil
         focusAbandonTask?.cancel()
@@ -658,10 +670,48 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         logger.info("StreamingCoordinator: session cancelled")
     }
 
+    /// True while the session that captured `generation` is still the current one.
+    private func isCurrent(_ generation: Int) -> Bool {
+        generation == sessionGeneration
+    }
+
+    /// Stops everything a session owns and clears all per-session state and
+    /// results, so nothing from one session can be read as the next one's.
+    private func clearSessionState() {
+        sessionGeneration += 1
+        focusGuard?.stop()
+        focusGuard = nil
+        focusAbandonTask?.cancel()
+        focusAbandonTask = nil
+        cpuMonitor.stop()
+        accumulator = nil
+        fullWavURL = nil
+        rangeTracker = nil
+        streamingChunks = []
+        chunkCount = 0
+        pausedPendingChunks = []
+        isFocusPaused = false
+        cpuFallbackTriggered = false
+        cancellationReason = nil
+        finalizingStartedAt = nil
+        fullPassReplacedText = nil
+        windowSamples = []
+        aggregator = StablePrefixAggregator()
+        transcriptionInFlight = false
+        windowDirty = false
+        pendingWindowSeparator = false
+        pendingInjections = []
+        onPreviewText = nil
+        finalResult = nil
+        sessionStartedAt = nil
+        firstDeltaAt = nil
+        lastEditDistanceRatio = nil
+    }
+
     // MARK: - Chunk handling (LocalAgreement-2 over a growing window)
 
-    private func handleChunkReady(_ buffer: AVAudioPCMBuffer) {
-        guard case .streaming = sessionState else { return }
+    private func handleChunkReady(_ buffer: AVAudioPCMBuffer, generation: Int) {
+        guard isCurrent(generation), case .streaming = sessionState else { return }
 
         if isFocusPaused {
             pausedPendingChunks.append(buffer)
@@ -673,7 +723,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         transcribeWindowIfIdle()
     }
 
-    /// Append a freshly-closed VAD segment's audio to the current window. The window
+    /// Append newly captured audio to the current window. The window
     /// holds all audio since the last reset; the whole window is re-transcribed each
     /// pass so every hypothesis carries sentence context.
     private func appendToWindow(_ buffer: AVAudioPCMBuffer) {
@@ -691,9 +741,9 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         guard !transcriptionInFlight else { windowDirty = true; return }
         guard !windowSamples.isEmpty else { return }
 
-        // Incremental mode has no VAD in front of it, so keep silence away from
+        // There is no VAD in front of the window, so keep silence away from
         // the model: an all-quiet window is dropped instead of transcribed.
-        if incrementalMode, Self.isSilent(windowSamples) {
+        if Self.isSilent(windowSamples) {
             windowSamples.removeAll(keepingCapacity: true)
             return
         }
@@ -706,6 +756,9 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         transcriptionInFlight = true
         windowDirty = false
         let lang = self.language
+        let generation = sessionGeneration
+        // Audio keeps arriving while the pass runs; only this much is in it.
+        let sentSamples = windowSamples.count
         Task.detached { [weak self, wavURL, lang] in
             guard let self else {
                 try? FileManager.default.removeItem(at: wavURL)
@@ -723,14 +776,19 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
             try? FileManager.default.removeItem(at: wavURL)
             let hypothesis = text
             await MainActor.run {
-                self.handleWindowHypothesis(hypothesis)
+                self.handleWindowHypothesis(hypothesis, generation: generation, coveredSamples: sentSamples)
             }
         }
     }
 
     /// Fold a completed window hypothesis into the aggregator and inject only the
     /// newly-stable text. Resets the window past the cap so per-pass cost stays bounded.
-    private func handleWindowHypothesis(_ text: String?) {
+    ///
+    /// - Parameter coveredSamples: how much of the window the pass transcribed.
+    private func handleWindowHypothesis(_ text: String?, generation: Int, coveredSamples: Int) {
+        // A pass that outlived its session reports to nobody: the next session
+        // has its own in-flight flag, window and aggregator.
+        guard isCurrent(generation) else { return }
         transcriptionInFlight = false
         guard case .streaming = sessionState else { return }
 
@@ -739,12 +797,11 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
             if !delta.isEmpty { injectDelta(delta) }
         }
 
-        // Incremental mode: two passes that agree word for word mean the speaker
+        // Two passes that agree word for word mean the speaker
         // paused. Close the window there — a clean sentence boundary — rather
         // than letting it run to the hard cap and cut mid-word. `windowDirty`
         // means newer audio is already waiting, so the pause is over; keep going.
-        let pausedAtBoundary = incrementalMode
-            && !windowDirty
+        let pausedAtBoundary = !windowDirty
             && aggregator.lastPassFullyAgreed
             && windowSamples.count >= Int(Self.chunkSampleRate * Self.minPauseResetSeconds)
 
@@ -756,7 +813,9 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
                 tail = Self.droppingTrailingSentenceEnd(tail)
             }
             if !tail.isEmpty { injectDelta(tail) }
-            windowSamples.removeAll(keepingCapacity: true)
+            // Drop only the audio this pass heard. Audio captured while it ran
+            // has not been transcribed yet; it opens the next window.
+            windowSamples.removeFirst(min(coveredSamples, windowSamples.count))
             pendingWindowSeparator = true
             logger.info("StreamingCoordinator: window \(pausedAtBoundary ? "closed at pause" : "cap reached") — flushed + reset")
         }
@@ -804,7 +863,9 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
             while !self.pendingInjections.isEmpty {
                 let text = self.pendingInjections.joined()
                 self.pendingInjections.removeAll()
-                await self.performInjection(text)
+                // The queue is emptied when a session ends or begins, so what
+                // is in it belongs to the session that is current right now.
+                await self.performInjection(text, generation: self.sessionGeneration)
             }
             self.isDrainingInjections = false
         }
@@ -818,7 +879,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         }
     }
 
-    private func performInjection(_ textToInject: String) async {
+    private func performInjection(_ textToInject: String, generation: Int) async {
         // DA-P0-2: Verify AX cursor has not moved mid-session before injecting.
         // If the cursor offset differs from our expectation, the user edited mid-session;
         // invalidate the tracker so full-pass replacement is skipped (spec §5 rule 3).
@@ -832,6 +893,8 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
 
         do {
             try await self.injection.appendText(textToInject)
+            // The paste can outlast the session; the tracker then belongs to another one.
+            guard isCurrent(generation) else { return }
             // Use UTF-16 code unit count to match AX kAXSelectedTextRangeAttribute units.
             self.rangeTracker?.recordInjection(length: textToInject.utf16.count)
 
@@ -867,63 +930,95 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     /// After this many seconds, the pill should show a "still refining" warning.
     static let fullPassWarningSeconds: TimeInterval = 15.0
 
-    /// Preview sessions: the full pass was unavailable, so fall back to the
-    /// streamed text, completed up to the end of the recording.
-    private func finishPreviewWithStreamedText() async {
-        await finishStreamedText()
-        finalResult = TranscriptionResult(text: streamingChunks.joined(), language: .unknown, durationMs: 0)
+    /// The full pass was unavailable: the session ends with the streamed text.
+    /// A preview session has typed nothing yet, so its streamed text is
+    /// completed up to the end of the recording and becomes `finalResult`.
+    private func finishWithStreamedText(generation: Int, transcribeFinalWindow: Bool = true) async {
+        if isPreviewSession {
+            await finishStreamedText(generation: generation, transcribeFinalWindow: transcribeFinalWindow)
+            guard isCurrent(generation) else { return }
+            finalResult = TranscriptionResult(text: streamingChunks.joined(), language: .unknown, durationMs: 0)
+        }
+        transition(to: .done)
     }
 
-    private func runFullPass() async {
+    /// Runs `operation` and returns its value, or nil when it has not finished
+    /// within `seconds`.
+    ///
+    /// The operation runs in a task of its own, and on timeout that task is
+    /// abandoned rather than awaited. A speech decode cannot be interrupted,
+    /// and a task group returns only when all its children have: with one, the
+    /// "timeout" would last as long as the decode. An abandoned operation runs
+    /// to its end and its value is dropped.
+    nonisolated static func firstResult<T: Sendable>(
+        within seconds: TimeInterval,
+        of operation: @escaping @Sendable () async -> T
+    ) async -> T? {
+        let (stream, continuation) = AsyncStream<T?>.makeStream()
+        let work = Task.detached {
+            continuation.yield(await operation())
+        }
+        let timer = Task.detached {
+            try? await Task.sleep(for: .seconds(seconds))
+            continuation.yield(nil)
+        }
+        var first: T?
+        for await value in stream {
+            first = value
+            break
+        }
+        timer.cancel()
+        // An operation that honours cancellation stops early; nothing waits
+        // for one that does not.
+        work.cancel()
+        return first
+    }
+
+    private func runFullPass(generation: Int) async {
+        guard isCurrent(generation) else { return }
         guard let wavURL = fullWavURL else {
-            if isPreviewSession { await finishPreviewWithStreamedText() }
-            transition(to: .done)
+            await finishWithStreamedText(generation: generation)
             return
         }
 
         // DA-P1-5: Race full-pass transcription against a 30s hard timeout.
-        // Uses a throwing task group: transcription throws CancellationError on timeout,
-        // timeout throws a sentinel error when transcription finishes first.
         let transcription = self.transcription
         let language = self.language
 
-        enum FullPassResult {
+        enum FullPassResult: Sendable {
             case transcribed(TranscriptionResult)
             case timedOut
             case failed
         }
 
         let timeoutSeconds = self.fullPassTimeoutSeconds
-        let passResult: FullPassResult = await withTaskGroup(of: FullPassResult.self) { group in
-            group.addTask {
-                do {
-                    let r = try await transcription.transcribe(audioURL: wavURL, language: language)
-                    return .transcribed(r)
-                } catch {
-                    return .failed
-                }
+        let passResult: FullPassResult = await Self.firstResult(within: timeoutSeconds) {
+            do {
+                let r = try await transcription.transcribe(audioURL: wavURL, language: language)
+                return FullPassResult.transcribed(r)
+            } catch {
+                return FullPassResult.failed
             }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(timeoutSeconds))
-                return .timedOut
-            }
-            // Take whichever finishes first.
-            let first = await group.next() ?? .failed
-            group.cancelAll()
-            return first
+        } ?? .timedOut
+
+        // The pass can outlast the session (cancelled by the owner's backstop,
+        // or already followed by the next one). Its result then belongs nowhere.
+        guard isCurrent(generation) else {
+            logger.info("StreamingCoordinator: full-pass finished after its session ended — result dropped")
+            return
         }
 
         let result: TranscriptionResult
         switch passResult {
         case .timedOut:
             logger.warning("StreamingCoordinator: full-pass exceeded \(Int(timeoutSeconds))s — keeping streaming version")
-            if isPreviewSession { await finishPreviewWithStreamedText() }
-            transition(to: .done)
+            // The abandoned decode still holds the engine, so the final
+            // window cannot be transcribed either.
+            await finishWithStreamedText(generation: generation, transcribeFinalWindow: false)
             return
         case .failed:
             logger.warning("StreamingCoordinator: full-pass transcription failed — keeping streaming version")
-            if isPreviewSession { await finishPreviewWithStreamedText() }
-            transition(to: .done)
+            await finishWithStreamedText(generation: generation)
             return
         case .transcribed(let r):
             result = r
@@ -932,7 +1027,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         if isPreviewSession {
             // Nothing was typed, so there is nothing to replace: hand the
             // full-pass text to the owner to insert in one go.
-            lastEditDistanceRatio = computeEditDistanceRatio(a: streamingChunks.joined(), b: result.text)
+            lastEditDistanceRatio = Self.editDistanceRatio(streamingChunks.joined(), result.text)
             finalResult = result
             onPreviewText?(result.text)
             logger.info("StreamingCoordinator: full-pass complete (preview session)")
@@ -943,7 +1038,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         let fullText = result.text
         // Deltas are verbatim slices that already carry their own spacing — join with "".
         let streamedText = streamingChunks.joined()
-        let editDistance = computeEditDistanceRatio(a: streamedText, b: fullText)
+        let editDistance = Self.editDistanceRatio(streamedText, fullText)
         lastEditDistanceRatio = editDistance
         logger.info("StreamingCoordinator: full-pass complete. edit_distance_ratio=\(editDistance, format: .fixed(precision: 3))")
 
@@ -961,19 +1056,24 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
                     try? await Task.sleep(for: .seconds(Self.replaceWindowSeconds))
                 }
 
+                var replaced = false
                 do {
                     try await injection.replaceRange(
                         start: tracker.startOffset,
                         length: tracker.totalLength,
                         with: fullText
                     )
-                    fullPassReplacedText = fullText
-                    logger.info("StreamingCoordinator: replaced \(tracker.totalLength) UTF-16 units with full-pass result")
+                    replaced = true
                 } catch {
                     logger.warning("StreamingCoordinator: replaceRange failed — keeping streaming version: \(error)")
                 }
 
                 replaceDeadline.cancel()
+                guard isCurrent(generation) else { return }
+                if replaced {
+                    fullPassReplacedText = fullText
+                    logger.info("StreamingCoordinator: replaced \(tracker.totalLength) UTF-16 units with full-pass result")
+                }
             }
         }
 
@@ -984,16 +1084,18 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
 
     private func setupFocusGuard(targetAppPID: pid_t) {
         let guard_ = FocusGuard(targetAppPID: targetAppPID)
+        let generation = sessionGeneration
         guard_.onEvent = { [weak self] event in
             Task { @MainActor in
-                self?.handleFocusEvent(event)
+                self?.handleFocusEvent(event, generation: generation)
             }
         }
         guard_.start()
         self.focusGuard = guard_
     }
 
-    private func handleFocusEvent(_ event: FocusGuard.Event) {
+    private func handleFocusEvent(_ event: FocusGuard.Event, generation: Int) {
+        guard isCurrent(generation) else { return }
         switch event {
         case .focusLeft:
             isFocusPaused = true
@@ -1006,7 +1108,7 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
             focusAbandonTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 try? await Task.sleep(for: .seconds(Self.focusAbandonSeconds))
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, self.isCurrent(generation) else { return }
                 guard self.isFocusPaused, case .streaming = self.sessionState else { return }
                 self.logger.warning("StreamingCoordinator: focus lost >10s — abandoning session")
                 self.cancellationReason = .focusAbandoned
@@ -1033,16 +1135,17 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
     // MARK: - CPU Monitor
 
     private func setupCPUMonitor() {
+        let generation = sessionGeneration
         cpuMonitor.onSustainedHighLoad = { [weak self] in
             Task { @MainActor in
-                self?.handleCPUFallback()
+                self?.handleCPUFallback(generation: generation)
             }
         }
         cpuMonitor.start()
     }
 
-    private func handleCPUFallback() {
-        guard case .streaming = sessionState else { return }
+    private func handleCPUFallback(generation: Int) {
+        guard isCurrent(generation), case .streaming = sessionState else { return }
         logger.warning("StreamingCoordinator: CPU fallback triggered — stopping streaming inference")
         cpuFallbackTriggered = true
         accumulator?.onChunkReady = nil   // stop processing new chunks
@@ -1125,14 +1228,14 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
 
     /// Simple edit-distance ratio: edits / max(|a|, |b|).
     /// Returns 0.0 for equal strings, 1.0 for completely different strings.
-    private func computeEditDistanceRatio(a: String, b: String) -> Double {
+    nonisolated static func editDistanceRatio(_ a: String, _ b: String) -> Double {
         guard !a.isEmpty || !b.isEmpty else { return 0.0 }
         let distance = levenshtein(Array(a), Array(b))
         let maxLen = max(a.count, b.count)
         return Double(distance) / Double(maxLen)
     }
 
-    private func levenshtein<T: Equatable>(_ a: [T], _ b: [T]) -> Int {
+    private nonisolated static func levenshtein<T: Equatable>(_ a: [T], _ b: [T]) -> Int {
         let m = a.count, n = b.count
         if m == 0 { return n }
         if n == 0 { return m }
