@@ -1005,6 +1005,9 @@ final class AppCoordinator: ObservableObject {
     private func applyASRPunctuationIfEnabled(text rawText: String, language: String) async -> String {
         guard let svc = asrPunc else { return rawText }
         guard Self.looksChineseEnough(rawText) else { return rawText }
+        // Qwen3-ASR and Cohere punctuate their own output; the model would
+        // add a second mark next to each existing one.
+        guard !ASRPunctuationService.isAlreadyPunctuated(rawText) else { return rawText }
         let punctuated = await svc.addPunctuation(to: rawText)
         if !hasLoggedASRPuncFailureThisSession && punctuated.isEmpty && !rawText.isEmpty {
             hasLoggedASRPuncFailureThisSession = true

@@ -38,6 +38,28 @@ actor ASRPunctuationService {
         }
     }
 
+    /// True when `text` already carries sentence punctuation, so running the
+    /// model on it would double the marks.
+    ///
+    /// The CT-Transformer is trained on bare transcripts and does not look at
+    /// punctuation already present: given "你好呀，现在可以了吗？" it returns
+    /// "你好呀，，现在可以了吗？？". FireRed output is always bare; Qwen3-ASR
+    /// and Cohere punctuate themselves.
+    nonisolated static func isAlreadyPunctuated(_ text: String) -> Bool {
+        let chars = Array(text)
+        for (index, char) in chars.enumerated() {
+            if "，。？！；、".contains(char) { return true }
+            if ",?!".contains(char) { return true }
+            // An ASCII full stop counts only as a sentence end, not inside
+            // "3.11" or "example.com".
+            if char == "." {
+                let next = index + 1 < chars.count ? chars[index + 1] : " "
+                if next.isWhitespace { return true }
+            }
+        }
+        return false
+    }
+
     /// Add punctuation to bare text.
     ///
     /// Idempotent on already-punctuated input (the model is conservative —
