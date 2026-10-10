@@ -35,8 +35,9 @@ struct StreamingPreviewBubbleView: View {
         .frame(width: StreamingPreviewController.size.width,
                height: StreamingPreviewController.size.height,
                alignment: .top)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Dictation preview: \(model.text)")
+        // Partial text changes every second and nothing may be spoken while
+        // the microphone is open. The pill announces the result.
+        .accessibilityHidden(true)
     }
 }
 

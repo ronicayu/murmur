@@ -20,7 +20,7 @@ struct HotkeyRecorderView: View {
         } label: {
             HStack(spacing: 4) {
                 if isRecording {
-                    Text("Press shortcut...")
+                    Text("Press shortcut, or Esc")
                         .foregroundStyle(.orange)
                         .italic()
                 } else {
@@ -33,7 +33,8 @@ struct HotkeyRecorderView: View {
         }
         .buttonStyle(.plain)
         .onDisappear { stopRecording() }
-        .accessibilityLabel(isRecording ? "Recording shortcut. Press a key combination." : "Hotkey: \(shortcutLabel). Click to change.")
+        .accessibilityLabel(isRecording ? "Recording shortcut. Press a key combination, or Escape to keep the current one." : "Hotkey: \(shortcutLabel)")
+        .accessibilityHint(isRecording ? "" : "Records a new shortcut")
     }
 
     private var shortcutLabel: String {
@@ -55,6 +56,13 @@ struct HotkeyRecorderView: View {
 
         let handler: (NSEvent) -> Void = { [self] event in
             guard !handled else { return }
+            // Escape leaves recording without a change; without this the
+            // keyboard has no way out except to record a new shortcut.
+            if event.keyCode == 53 {
+                handled = true
+                stopRecording()
+                return
+            }
             guard let capturedKey = Key(carbonKeyCode: UInt32(event.keyCode)) else { return }
 
             let mods = event.modifierFlags.intersection([.control, .option, .shift, .command])

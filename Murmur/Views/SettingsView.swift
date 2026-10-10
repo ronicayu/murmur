@@ -70,7 +70,7 @@ struct SettingsView: View {
                     }
                 }
                 LabeledContent("Right Command") {
-                    Toggle("", isOn: $useRightCommand)
+                    Toggle("Right Command", isOn: $useRightCommand)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .onChange(of: useRightCommand) { _, newValue in
@@ -86,7 +86,7 @@ struct SettingsView: View {
 
             Section("Recording") {
                 LabeledContent("Mode") {
-                    Picker("", selection: $recordingMode) {
+                    Picker("Mode", selection: $recordingMode) {
                         Text("Toggle").tag(RecordingMode.toggle.rawValue)
                         Text("Hold").tag(RecordingMode.hold.rawValue)
                         Text("Hands-free").tag(RecordingMode.handsFree.rawValue)
@@ -112,6 +112,8 @@ struct SettingsView: View {
                                 step: 0.5
                             )
                             .frame(width: 160)
+                            .accessibilityLabel("Auto-stop after")
+                            .accessibilityValue(String(format: "%.1f seconds", handsFreeTrailingSilenceSeconds))
                             .onChange(of: handsFreeTrailingSilenceSeconds) { _, _ in
                                 coordinator.applyRecordingMode(.handsFree)
                             }
@@ -128,17 +130,17 @@ struct SettingsView: View {
                 }
                 SpokenLanguagesSetting()
                 LabeledContent("Sound effects") {
-                    Toggle("", isOn: $soundEffects)
+                    Toggle("Sound effects", isOn: $soundEffects)
                         .labelsHidden()
                         .toggleStyle(.switch)
                 }
                 LabeledContent("Undo after transcription") {
-                    Toggle("", isOn: $undoAfterTranscription)
+                    Toggle("Undo after transcription", isOn: $undoAfterTranscription)
                         .labelsHidden()
                         .toggleStyle(.switch)
                 }
                 LabeledContent("Launch at login") {
-                    Toggle("", isOn: $launchAtLogin)
+                    Toggle("Launch at login", isOn: $launchAtLogin)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .onChange(of: launchAtLogin) { _, newValue in
@@ -149,7 +151,7 @@ struct SettingsView: View {
 
             Section("Experimental") {
                 LabeledContent {
-                    Toggle("", isOn: $streamingInputEnabled)
+                    Toggle("Streaming input", isOn: $streamingInputEnabled)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .onChange(of: streamingInputEnabled) { _, newValue in
@@ -173,7 +175,7 @@ struct SettingsView: View {
                 if streamingInputEnabled {
                     LabeledContent("Preview bubble") {
                         VStack(alignment: .trailing, spacing: 4) {
-                            Toggle("", isOn: $streamingPreviewBubble)
+                            Toggle("Preview bubble", isOn: $streamingPreviewBubble)
                                 .labelsHidden()
                                 .toggleStyle(.switch)
                             Text(streamingPreviewBubble
@@ -192,6 +194,8 @@ struct SettingsView: View {
                         HStack(spacing: 8) {
                             Slider(value: $focusAbandonSeconds, in: 5...30, step: 5)
                                 .frame(width: 120)
+                                .accessibilityLabel("Focus timeout")
+                                .accessibilityValue("\(Int(focusAbandonSeconds)) seconds")
                             Text("\(Int(focusAbandonSeconds))s")
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
@@ -394,7 +398,7 @@ struct SettingsView: View {
     private var transcriptionCorrectionRow: some View {
         VStack(alignment: .leading, spacing: 10) {
             LabeledContent {
-                Toggle("", isOn: $correctTranscription)
+                Toggle("Correct transcription errors", isOn: $correctTranscription)
                     .labelsHidden()
                     .toggleStyle(.switch)
             } label: {
@@ -445,6 +449,7 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             TextField("OKR, shipping, 对齐, k8s", text: $correctionGlossary)
                 .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Glossary")
         }
     }
 
@@ -468,6 +473,7 @@ struct SettingsView: View {
             ZStack(alignment: .topLeading) {
                 TextEditor(text: $correctionSystemPrompt)
                     .font(.system(.body, design: .monospaced))
+                    .accessibilityLabel("Correction prompt")
                     .frame(minHeight: 160, maxHeight: 240)
                     .overlay(
                         RoundedRectangle(cornerRadius: 4)
@@ -502,7 +508,7 @@ struct SettingsView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Spacer()
-            Text("\(count) / 4000")
+            Text(isOver ? "\(count) / 4000 (over limit)" : "\(count) / 4000")
                 .font(.caption2)
                 .foregroundStyle(isOver ? .red : .secondary)
         }

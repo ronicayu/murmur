@@ -11,6 +11,13 @@
 ### Added
 - **Retry for a failed file transcription.** When transcription of a recording made in the Transcription window fails, the recording is kept. The history context menu and the result view now have Retry, which transcribes it again into the same entry.
 
+### Accessibility
+- **VoiceOver hears the end of a dictation.** The pill never takes focus, so VoiceOver did not read it. Murmur now announces "Transcribing", "Inserted" and errors. Nothing is announced while the microphone is open.
+- **Escape leaves the shortcut recorder.** Before, the only way out with the keyboard was to record a new shortcut.
+- Settings switches, sliders and text fields, the Cancel button on the pill, the status icons in the Transcription window and its progress bar have names for VoiceOver. The live preview bubble is hidden from VoiceOver.
+- Pulsing icons stop when Reduce Motion is on.
+- Export in the Transcription window answers to ⌘S as shown. The ⌘C hint on Copy All is gone: ⌘C copies the selected text.
+
 ### Fixed
 - **Onboarding did not save the replacement shortcut.** On the "Hotkey Conflict Detected" screen, the shortcut you recorded was not put into effect, so Ctrl+Space stayed the hotkey.
 - **A second recording could start while the first start was stuck.** When the audio engine took more than 5 s to start, pressing the hotkey again entered the engine a second time. A new start is now refused until the stuck one returns.

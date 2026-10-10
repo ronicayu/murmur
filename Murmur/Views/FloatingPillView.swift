@@ -13,8 +13,12 @@ struct FloatingPillView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            stateIcon
-            stateText
+            HStack(spacing: 8) {
+                stateIcon
+                stateText
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(pillAccessibilityLabel)
             if isRecordingState, let onCancel {
                 Button(action: onCancel) {
                     Image(systemName: "xmark.circle.fill")
@@ -23,6 +27,7 @@ struct FloatingPillView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Cancel recording")
+                .accessibilityLabel("Cancel recording")
             }
         }
         .padding(.horizontal, 16)
@@ -30,8 +35,7 @@ struct FloatingPillView: View {
         .background(.ultraThinMaterial, in: Capsule())
         .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
         .frame(minWidth: 120)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(pillAccessibilityLabel)
+        .accessibilityElement(children: .contain)
     }
 
     var isRecordingState: Bool {
@@ -68,7 +72,7 @@ struct FloatingPillView: View {
             Image(systemName: "waveform")
                 .font(.caption)
                 .foregroundStyle(.orange)
-                .symbolEffect(.pulse, options: .repeating)
+                .pulsing()
         case .transcribing:
             ProgressView()
                 .controlSize(.small)
@@ -97,7 +101,7 @@ struct FloatingPillView: View {
                 Text("Recording...")
                     .font(.system(.caption, design: .rounded, weight: .medium))
                 Text("Esc to cancel")
-                    .font(.system(size: 9))
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
             }
         case .streaming:
@@ -105,7 +109,7 @@ struct FloatingPillView: View {
                 Text("Listening...")
                     .font(.system(.caption, design: .rounded, weight: .medium))
                 Text("Esc to cancel")
-                    .font(.system(size: 9))
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
             }
         case .transcribing:
@@ -150,9 +154,40 @@ final class FloatingPillController: PillControlling {
     private var window: NSWindow?
     private var hostingView: NSHostingView<FloatingPillView>?
     private var hideTask: Task<Void, Never>?
+    private var lastAnnouncement: String?
+
+    /// What VoiceOver says when the pill changes to `state`. The pill is a
+    /// panel that never takes focus, so VoiceOver does not read it by itself.
+    /// Nothing is said while the microphone is open: the speech would be
+    /// recorded. The start of a recording has its sound.
+    static func announcement(for state: AppState) -> String? {
+        switch state {
+        case .transcribing: return "Transcribing"
+        case .undoable: return "Inserted"
+        case .error(let err): return "Error: \(err.shortMessage). \(err.errorDescription ?? "")"
+        case .idle, .recording, .streaming, .injecting: return nil
+        }
+    }
+
+    /// `show` runs on every audio-level update, so the same text is posted once.
+    private func announce(_ state: AppState) {
+        let text = Self.announcement(for: state)
+        guard text != lastAnnouncement else { return }
+        lastAnnouncement = text
+        guard let text, let app = NSApp else { return }
+        NSAccessibility.post(
+            element: app,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: text,
+                .priority: NSAccessibilityPriorityLevel.high.rawValue,
+            ]
+        )
+    }
 
     func show(state: AppState, audioLevel: Float, onCancel: (() -> Void)?) {
         hideTask?.cancel()
+        announce(state)
 
         let pillView = FloatingPillView(state: state, audioLevel: audioLevel, onCancel: onCancel)
 

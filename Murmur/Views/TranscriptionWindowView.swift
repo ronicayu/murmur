@@ -119,7 +119,7 @@ struct TranscriptionWindowView: View {
                 Circle()
                     .fill(Color.red)
                     .frame(width: 8, height: 8)
-                    .symbolEffect(.pulse)
+                    .pulsing()
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Recording")
                         .font(.system(.caption, design: .rounded))
@@ -237,13 +237,16 @@ struct TranscriptionWindowView: View {
             Image(systemName: "checkmark.circle.fill")
                 .font(.caption2)
                 .foregroundStyle(.green)
+                .accessibilityLabel("Completed")
         case .failed:
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.caption2)
                 .foregroundStyle(.orange)
+                .accessibilityLabel("Failed")
         case .inProgress:
             ProgressView()
                 .controlSize(.mini)
+                .accessibilityLabel("In progress")
         }
     }
 
