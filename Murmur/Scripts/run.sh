@@ -17,6 +17,7 @@ swift build
 # Create .app structure
 mkdir -p "$MACOS" "$RESOURCES"
 cp "$BUILD_DIR/$APP_NAME" "$MACOS/$APP_NAME"
+cp "$BUILD_DIR/MurmurEngine" "$MACOS/MurmurEngine"
 cp Info.plist "$CONTENTS/Info.plist"
 cp Murmur.entitlements "$CONTENTS/" 2>/dev/null || true
 

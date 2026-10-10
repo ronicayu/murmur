@@ -26,9 +26,10 @@ struct MurmurApp: App {
         }
 
         let mm = ModelManager()
-        // One engine, one service, for the life of the app. It loads the model
-        // lazily, so it can be created before the model has been downloaded.
-        let ts = Qwen3TranscriptionService(modelDirectory: mm.modelDirectory(for: .qwen3))
+        // One engine for the life of the app, in a helper process when the
+        // app has one. It loads the model lazily, so it can be created
+        // before the model has been downloaded.
+        let ts = EngineProcessClient.makeDefault(modelDirectory: mm.modelDirectory(for: .qwen3))
         let coord = AppCoordinator(transcription: ts)
 
         // Local-only session metrics: JSON lines in Application Support, so

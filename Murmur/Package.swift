@@ -7,6 +7,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "Murmur", targets: ["Murmur"]),
+        .executable(name: "MurmurEngine", targets: ["MurmurEngine"]),
     ],
     dependencies: [
         .package(url: "https://github.com/soffes/HotKey.git", from: "0.2.1"),
@@ -27,8 +28,23 @@ let package = Package(
                 "SherpaOnnxC",
             ],
             path: ".",
-            exclude: ["Package.swift", "Scripts", "Tests"],
+            exclude: ["Package.swift", "Scripts", "Tests", "EngineHelper"],
             resources: [.copy("Resources")],
+            linkerSettings: [
+                .linkedLibrary("c++"),
+            ]
+        ),
+        // The speech engine as a process of its own, so that the gigabytes it
+        // holds go back to the system when the app ends that process. Its
+        // sources are symbolic links to the app's own engine files: one copy
+        // of the code, compiled into both.
+        .executableTarget(
+            name: "MurmurEngine",
+            dependencies: [
+                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
+                "SherpaOnnxC",
+            ],
+            path: "EngineHelper",
             linkerSettings: [
                 .linkedLibrary("c++"),
             ]
