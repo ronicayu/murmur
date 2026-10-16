@@ -273,13 +273,15 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
     /// Decode one segment, decoding again from a slightly later start when the
     /// result cannot be trusted as it stands.
     ///
-    /// Two different things can be wrong with a result (see `judge`):
+    /// Two kinds of thing can be wrong with a result (see `judge`):
     ///
     /// - **Corrupt.** The int8 model has a rare failure where a clip of
     ///   ordinary speech comes back as a few characters of chat-template debris
     ///   (`�斯系统`, `<asr_text>system…`). It is deterministic for a given
     ///   input but chaotic — moving the start by a single sample gives a
     ///   correct transcript — so decoding again 10 ms later recovers it.
+    ///   A **repetition loop** ("Then I, I, I, I, …" for 39 s of speech) is
+    ///   the same kind of failure and is recovered the same way.
     /// - **Unexpected script.** Text in a writing system none of the user's
     ///   languages uses. That is either a misfire or the user speaking a
     ///   language they have not listed, and a second decode tells them apart:
@@ -320,6 +322,9 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
         case debris
         /// Almost no text for several seconds of audible speech.
         case tooShort
+        /// The decoder got stuck repeating a few characters ("I, I, I, …") and
+        /// the speech after that point is lost.
+        case repetitionLoop
         /// Clean text, but mostly in a script the user's languages do not use.
         case unexpectedScript(WritingScript)
     }
@@ -340,6 +345,7 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
         raw: String, cleaned: String, speechSeconds: Double, expected: Set<WritingScript>
     ) -> DecodeJudgement {
         if raw.contains("<asr_text>") || raw.contains("<|") || raw.contains("\u{FFFD}") { return .debris }
+        if !repetitionLoops(in: cleaned).isEmpty { return .repetitionLoop }
         if speechSeconds >= 4 && Double(cleaned.count) < speechSeconds * 0.5 { return .tooShort }
 
         if let script = unexpectedScript(in: cleaned, expected: expected) { return .unexpectedScript(script) }
@@ -394,14 +400,52 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
     }
 
     /// What to return when no attempt settled. A transcript that is merely
-    /// short is still the best guess; debris and an unconfirmed foreign script
-    /// are not worth typing, so the result may be empty. `judge` decides
-    /// "too short" before it looks at the script, so the script is checked here.
+    /// short is still the best guess, and so is one stuck in a loop once the
+    /// loop is cut down; debris and an unconfirmed foreign script are not
+    /// worth typing, so the result may be empty. `judge` decides "too short"
+    /// before it looks at the script, so the script is checked here.
     nonisolated static func lastResort(_ attempts: [DecodeAttempt], expected: Set<WritingScript>) -> String {
         attempts
-            .filter { $0.judgement == .tooShort && unexpectedScript(in: $0.text, expected: expected) == nil }
-            .map(\.text)
+            .compactMap { attempt -> String? in
+                switch attempt.judgement {
+                case .tooShort: return attempt.text
+                case .repetitionLoop: return collapsingLoops(attempt.text)
+                default: return nil
+                }
+            }
+            .filter { unexpectedScript(in: $0, expected: expected) == nil }
             .max { $0.count < $1.count } ?? ""
+    }
+
+    // MARK: - Repetition loops
+
+    /// A unit of up to 20 characters said again and again. Eight times over 24
+    /// characters or more is a loop; real repetition ("哈哈哈哈", "嗯嗯嗯",
+    /// "from, from, from") is shorter.
+    private static let loopPattern = try! NSRegularExpression(
+        pattern: "(.{1,20}?)\\1{7,}", options: [.dotMatchesLineSeparators])
+    private static let minLoopCharacters = 24
+    /// How many times a loop's unit is kept when nothing better was decoded.
+    private static let keptLoopRepeats = 3
+
+    /// The loops in `text`, each with its repeated unit.
+    nonisolated static func repetitionLoops(in text: String) -> [(range: Range<String.Index>, unit: String)] {
+        let whole = NSRange(text.startIndex..., in: text)
+        return loopPattern.matches(in: text, range: whole).compactMap { match in
+            guard let range = Range(match.range, in: text),
+                  let unitRange = Range(match.range(at: 1), in: text),
+                  text[range].count >= minLoopCharacters else { return nil }
+            return (range, String(text[unitRange]))
+        }
+    }
+
+    /// `text` with each loop cut down to `keptLoopRepeats` of its unit.
+    nonisolated static func collapsingLoops(_ text: String) -> String {
+        var result = text
+        for loop in repetitionLoops(in: text).reversed() {
+            result.replaceSubrange(loop.range, with: String(repeating: loop.unit, count: keptLoopRepeats))
+        }
+        return result
     }
 
     /// Character edit distance divided by the longer length (0 = identical).

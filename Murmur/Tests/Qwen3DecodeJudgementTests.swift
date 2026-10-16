@@ -60,6 +60,24 @@ final class Qwen3DecodeJudgementTests: XCTestCase {
         XCTAssertEqual(judge("他说的那个词是ありがとう，我们都听懂了，然后大家继续开会讨论"), .accepted)
     }
 
+    func test_judge_aLongRunOfOneShortUnitIsALoop() {
+        let loop = "Okay. Hmm. Then I" + String(repeating: ", I", count: 40)
+        XCTAssertEqual(judge(loop, speechSeconds: 39), .repetitionLoop)
+        XCTAssertEqual(judge("我们" + String(repeating: "对", count: 30), speechSeconds: 10), .repetitionLoop)
+    }
+
+    func test_judge_realRepetitionIsAccepted() {
+        XCTAssertEqual(judge("哈哈哈哈哈哈哈哈，太好笑了。"), .accepted)
+        XCTAssertEqual(judge("嗯嗯嗯。对对对对，就是这样。"), .accepted)
+        XCTAssertEqual(judge("Taiwan, from, from, from, from, from Taipei."), .accepted)
+    }
+
+    func test_collapsingLoops_keepsThreeOfTheUnit() {
+        XCTAssertEqual(Service.collapsingLoops("Then I" + String(repeating: ", I", count: 40) + "."), "Then I, I, I, I.")
+        XCTAssertEqual(Service.collapsingLoops("好的" + String(repeating: "对", count: 30)), "好的对对对")
+        XCTAssertEqual(Service.collapsingLoops("哈哈哈哈，好。"), "哈哈哈哈，好。")
+    }
+
     // MARK: - settledText
 
     func test_settled_acceptedAttemptSettlesImmediately() {
@@ -129,6 +147,13 @@ final class Qwen3DecodeJudgementTests: XCTestCase {
             ], expected: chineseAndEnglish),
             "好的"
         )
+    }
+
+    func test_aLoopIsNeverSettled_butIsTheLastResortCutDown() {
+        let loop = Attempt(text: "Then I" + String(repeating: ", I", count: 40), judgement: .repetitionLoop)
+        XCTAssertNil(Service.settledText([loop, loop]))
+        XCTAssertEqual(Service.lastResort([loop, Attempt(text: "x", judgement: .debris)], expected: chineseAndEnglish),
+                       "Then I, I, I, I")
     }
 
     func test_lastResort_isEmptyWhenOnlyDebrisOrUnconfirmedScriptsRemain() {

@@ -27,6 +27,7 @@
 - Export in the Transcription window answers to ⌘S as shown. The ⌘C hint on Copy All is gone: ⌘C copies the selected text.
 
 ### Fixed
+- **A transcript could lose up to 40 s of speech to a repetition loop.** The model sometimes gets stuck on a few characters ("Then I, I, I, I, …") until the end of a piece, and the rest of the piece is lost. In a 39 s piece of a test conversation, about 330 characters were lost this way. Decoding again from 10 ms later gives the full text, as for the other decode failures Murmur already retries. A unit of up to 20 characters said 8 times or more, over 24 characters or more, now counts as a loop and is decoded again. If every retry loops, the loop is cut down to 3 repeats. In three test conversations (56 min) the check caught the loops at all 4 places where one occurred, and the retry recovered each of them. Over those conversations the error rate fell from 15.9% to 13.9%; none of the 1,082 human-written reference lines would trip it.
 - **Onboarding did not save the replacement shortcut.** On the "Hotkey Conflict Detected" screen, the shortcut you recorded was not put into effect, so Ctrl+Space stayed the hotkey.
 - **A second recording could start while the first start was stuck.** When the audio engine took more than 5 s to start, pressing the hotkey again entered the engine a second time. A new start is now refused until the stuck one returns.
 
