@@ -44,6 +44,7 @@ struct EngineReply: Codable, Equatable, Sendable {
     var text: String?
     var language: String?
     var durationMs: Int?
+    var segments: [TranscriptSegment]?
 
     // .progress
     var currentChunk: Int?
@@ -61,6 +62,7 @@ extension EngineReply {
         reply.text = result.text
         reply.language = result.language.rawValue
         reply.durationMs = result.durationMs
+        reply.segments = result.segments.isEmpty ? nil : result.segments
         return reply
     }
 
@@ -101,7 +103,8 @@ extension EngineReply {
         return TranscriptionResult(
             text: text,
             language: language.flatMap(DetectedLanguage.init(rawValue:)) ?? .unknown,
-            durationMs: durationMs ?? 0
+            durationMs: durationMs ?? 0,
+            segments: segments ?? []
         )
     }
 }

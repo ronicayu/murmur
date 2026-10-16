@@ -10,6 +10,19 @@ struct TranscriptionResult: Sendable {
     let text: String
     let language: DetectedLanguage
     let durationMs: Int
+    /// Where each part of `text` was said. Only long transcriptions have them.
+    var segments: [TranscriptSegment] = []
+}
+
+/// One stretch of speech in a long transcription, with its place in the audio.
+struct TranscriptSegment: Codable, Equatable, Sendable {
+    /// Seconds from the start of the audio to the first speech of the segment.
+    let start: TimeInterval
+    /// Seconds from the start of the audio to the end of the segment's speech.
+    let end: TimeInterval
+    let text: String
+    /// A long silence comes before this segment, so its text starts a paragraph.
+    var startsParagraph = false
 }
 
 /// Reports per-chunk progress during a long transcription.

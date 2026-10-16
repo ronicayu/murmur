@@ -134,21 +134,23 @@ final class LongAudioSourceTests: XCTestCase {
             .filter { $0.hasPrefix("murmur_long_") })
     }
 
-    // MARK: Same paragraphs and cuts as the in-memory functions
+    // MARK: Same spans and cuts as the in-memory functions
 
-    func test_paragraphsFromDisk_equalParagraphsFromMemory() throws {
-        // Silences on and off frame and block edges; 2 s is the paragraph gap.
+    func test_spansFromDisk_equalSpansFromMemory() throws {
+        // Silences on and off frame and block edges; 2 s is the paragraph gap,
+        // 1 s a pause that ends a span of 10 s or more.
         let samples = makeSamples(seconds: 47.37, silences: [
-            (at: 3.0, length: 2.5), (at: 9.95, length: 2.2), (at: 20.0, length: 1.5), (at: 31.13, length: 4.0),
+            (at: 3.0, length: 2.5), (at: 9.95, length: 2.2), (at: 20.0, length: 1.5), (at: 23.4, length: 1.1),
+            (at: 31.13, length: 4.0),
         ])
         let source = try LongAudioSource(url: try write(samples, name: "a.wav"))
 
-        let fromDisk = Qwen3TranscriptionService.paragraphRanges(
+        let fromDisk = Qwen3TranscriptionService.speechSpans(
             loud: try Qwen3TranscriptionService.loudFrames(of: source), sampleCount: source.count, sampleRate: 16_000)
-        let fromMemory = Qwen3TranscriptionService.paragraphRanges(samples: samples, sampleRate: 16_000)
+        let fromMemory = Qwen3TranscriptionService.speechSpans(samples: samples, sampleRate: 16_000)
 
         XCTAssertEqual(fromDisk, fromMemory)
-        XCTAssertEqual(fromMemory.count, 4, "Precondition: the fixture has paragraphs to compare")
+        XCTAssertEqual(fromMemory.count, 5, "Precondition: the fixture has spans to compare")
     }
 
     func test_cutsFromDisk_equalCutsFromMemory() throws {
