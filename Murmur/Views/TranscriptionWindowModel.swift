@@ -444,9 +444,16 @@ final class TranscriptionWindowModel: ObservableObject {
                 text: result.text,
                 language: result.language.rawValue,
                 status: .completed,
-                m4aPath: nil
+                m4aPath: nil,
+                segments: result.segments.isEmpty ? nil : result.segments
             )
-            try? historyService.completeEntry(id: session.entryID, text: result.text, language: result.language.rawValue, audioDuration: dur)
+            try? historyService.completeEntry(
+                id: session.entryID,
+                text: result.text,
+                language: result.language.rawValue,
+                audioDuration: dur,
+                segments: completedEntry.segments
+            )
 
             // Murmur's own recording is no longer needed once transcribed
             deleteAudio(at: session.audioURL, source: session.source)

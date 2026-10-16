@@ -165,27 +165,49 @@ final class Qwen3TranscriptionServiceTests: XCTestCase {
         XCTAssertEqual(Qwen3TranscriptionService.joined(["我们用", "Python"]), "我们用Python")
     }
 
-    func test_paragraphRanges_splitAtLongSilenceOnly() {
-        // speech 0–5 s, 1 s pause, speech 6–10 s, 3 s silence, speech 13–16 s
-        var samples = [Float](repeating: 0, count: 16000 * 16)
-        for range in [0..<5, 6..<10, 13..<16] {
-            for i in (16000 * range.lowerBound)..<(16000 * range.upperBound) { samples[i] = 0.1 }
+    /// 16 kHz samples, loud (0.1) inside each `(start, end)` in seconds and silent elsewhere.
+    private func speech(_ parts: [(Double, Double)], seconds: Double) -> [Float] {
+        var samples = [Float](repeating: 0, count: Int(seconds * 16000))
+        for (start, end) in parts {
+            for i in Int(start * 16000)..<Int(end * 16000) { samples[i] = 0.1 }
         }
-        let ranges = Qwen3TranscriptionService.paragraphRanges(samples: samples, sampleRate: 16000)
-
-        XCTAssertEqual(ranges.count, 2, "only the 3 s silence is a paragraph break")
-        // First paragraph spans both utterances, including the 1 s pause between them.
-        XCTAssertLessThanOrEqual(ranges[0].lowerBound, 0)
-        XCTAssertGreaterThanOrEqual(ranges[0].upperBound, 16000 * 10)
-        XCTAssertLessThan(ranges[0].upperBound, 16000 * 11)
-        // Second paragraph starts just before the last utterance.
-        XCTAssertLessThanOrEqual(ranges[1].lowerBound, 16000 * 13)
-        XCTAssertGreaterThan(ranges[1].lowerBound, 16000 * 12)
-        XCTAssertEqual(ranges[1].upperBound, samples.count)
+        return samples
     }
 
-    func test_paragraphRanges_silenceOnlyAudioHasNoParagraphs() {
+    func test_speechSpans_breakAtEveryLongSilence_andAtAPauseOnlyAfterTenSeconds() {
+        // 1.2 s pause after 5 s of speech: too early. 1.5 s pause after 14 s: a
+        // break. 2.5 s silence after 4.5 s: a paragraph break.
+        let samples = speech([(0, 5), (6.2, 14), (15.5, 20), (22.5, 24)], seconds: 24)
+
+        let spans = Qwen3TranscriptionService.speechSpans(samples: samples, sampleRate: 16000)
+
+        XCTAssertEqual(spans.map(\.speech), [0..<(14 * 16000), (15.5 * 16000).asInt..<(20 * 16000), (22.5 * 16000).asInt..<(24 * 16000)])
+        XCTAssertEqual(spans.map(\.startsParagraph), [false, false, true])
+    }
+
+    func test_speechSpans_decodeAMarginAroundTheSpeech() {
+        let samples = speech([(1, 12), (13.5, 20)], seconds: 21)
+
+        let spans = Qwen3TranscriptionService.speechSpans(samples: samples, sampleRate: 16000)
+
+        XCTAssertEqual(spans.map(\.range), [(0.7 * 16000).asInt..<(12.3 * 16000).asInt, (13.2 * 16000).asInt..<(20.3 * 16000).asInt])
+    }
+
+    func test_speechSpans_silenceOnlyAudioHasNone() {
         let samples = [Float](repeating: 0, count: 16000 * 5)
-        XCTAssertTrue(Qwen3TranscriptionService.paragraphRanges(samples: samples, sampleRate: 16000).isEmpty)
+        XCTAssertTrue(Qwen3TranscriptionService.speechSpans(samples: samples, sampleRate: 16000).isEmpty)
     }
+
+    func test_textOfSegments_blankLineBeforeEachParagraph() {
+        let segments = [
+            TranscriptSegment(start: 0, end: 4, text: "Hello there."),
+            TranscriptSegment(start: 5, end: 9, text: "How are you?"),
+            TranscriptSegment(start: 12, end: 14, text: "我很好。", startsParagraph: true),
+        ]
+        XCTAssertEqual(Qwen3TranscriptionService.text(of: segments), "Hello there. How are you?\n\n我很好。")
+    }
+}
+
+private extension Double {
+    var asInt: Int { Int(self.rounded()) }
 }

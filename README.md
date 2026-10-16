@@ -106,6 +106,8 @@ Open the transcription window from the menu bar to transcribe long audio files:
 
 Before transcription starts, you can select the language (auto-detect, Chinese, English, etc.). Transcription history is saved and searchable in the sidebar.
 
+The transcript has a time stamp for each stretch of speech, `[mm:ss]` at the start of its line. A stretch ends at a pause of 1 second once it is 10 seconds long, at every silence of 2 seconds, and after 40 seconds at the latest; 2-second silences also start a new paragraph. The model gives no word times, so a stamp marks where the stretch starts, to about a quarter of a second. Turn off **Timestamps** in the result view for the plain text; Copy All and Export .txt follow that setting. **Export .srt** saves the transcript as subtitles.
+
 ### Language
 
 There is no language to select. The speech model works out what you are speaking for each recording, so you can switch between languages freely.

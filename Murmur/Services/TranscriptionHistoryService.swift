@@ -11,6 +11,8 @@ struct TranscriptionEntry: Identifiable, Codable {
     var language: String
     var status: TranscriptionStatus
     var m4aPath: String?              // nil once transcription completes (m4a deleted)
+    /// Time-stamped parts of `text`. nil for entries made before time stamps.
+    var segments: [TranscriptSegment]? = nil
 }
 
 enum TranscriptionStatus: String, Codable {
@@ -124,10 +126,18 @@ final class TranscriptionHistoryService: ObservableObject {
         try persist()
     }
 
-    /// Marks an entry as completed: sets text, language, duration, status, and clears m4aPath.
-    func completeEntry(id: UUID, text: String, language: String, audioDuration: TimeInterval? = nil) throws {
+    /// Marks an entry as completed: sets text, segments, language, duration,
+    /// status, and clears m4aPath.
+    func completeEntry(
+        id: UUID,
+        text: String,
+        language: String,
+        audioDuration: TimeInterval? = nil,
+        segments: [TranscriptSegment]? = nil
+    ) throws {
         guard let idx = entries.firstIndex(where: { $0.id == id }) else { return }
         entries[idx].text = text
+        entries[idx].segments = segments
         entries[idx].language = language
         entries[idx].status = .completed
         entries[idx].m4aPath = nil

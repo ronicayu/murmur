@@ -26,6 +26,7 @@ struct TranscriptionWindowView: View {
     @State private var showCancelConfirm = false
     // P1-1: sidebar search
     @State private var searchQuery: String = ""
+    @AppStorage(TranscriptFormat.showTimestampsKey) private var showTimestamps = true
 
     init(historyService: TranscriptionHistoryService, coordinator: AppCoordinator) {
         self.historyService = historyService
@@ -202,7 +203,7 @@ struct TranscriptionWindowView: View {
             Label("Export .txt", systemImage: "square.and.arrow.up")
         }
         Button {
-            copyToClipboard(entry.text)
+            copyToClipboard(entry.displayText(withTimestamps: showTimestamps))
         } label: {
             Label("Copy All", systemImage: "doc.on.doc")
         }
@@ -405,7 +406,7 @@ struct TranscriptionWindowView: View {
         panel.nameFieldStringValue = "Transcription \(dateStr).txt"
         panel.allowedContentTypes = [.plainText]
         if panel.runModal() == .OK, let url = panel.url {
-            try? entry.text.write(to: url, atomically: true, encoding: .utf8)
+            try? entry.displayText(withTimestamps: showTimestamps).write(to: url, atomically: true, encoding: .utf8)
         }
     }
 }

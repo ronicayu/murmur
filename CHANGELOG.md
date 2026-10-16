@@ -9,6 +9,7 @@
 ## [Unreleased]
 
 ### Added
+- **Time stamps in file transcriptions.** Each stretch of speech in the transcript starts with `[mm:ss]`. A stretch ends at a pause of 1 s once it is 10 s long, at every silence of 2 s (which also starts a paragraph), and after 40 s at the latest. The model gives no word times, so the stamps come from where Murmur cuts the audio: on three mixed Chinese–English conversations (56 min) they were 0.1 s from where the speaker started (median; 0.17 s for 9 in 10), one about every 13 to 19 s. Accuracy is unchanged (14.6% vs 14.4% errors) and transcription is 6% faster. A **Timestamps** switch in the result view turns them off; Copy All and Export .txt follow it. **Export .srt** saves the transcript as subtitles. Entries transcribed before this version have no time stamps.
 - **Retry for a failed file transcription.** When transcription of a recording made in the Transcription window fails, the recording is kept. The history context menu and the result view now have Retry, which transcribes it again into the same entry.
 
 ### Changed

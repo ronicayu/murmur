@@ -88,8 +88,9 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
         return TranscriptionResult(text: text, language: Self.detectLanguage(text), durationMs: elapsedMs)
     }
 
-    /// Transcribe a long file, reporting progress after each piece. Long
-    /// silences are skipped and become paragraph breaks.
+    /// Transcribe a long file, reporting progress after each piece. Silences
+    /// are skipped; long ones become paragraph breaks. Each decoded piece is a
+    /// segment of the result, with the time it was said.
     ///
     /// The file stays on disk: one pass finds the loud stretches, a second
     /// finds where to cut, and each piece is read only to be decoded. At most
@@ -105,35 +106,63 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
         let source = try LongAudioSource(url: audioURL)
         let sampleRate = LongAudioSource.sampleRate
 
-        // Paragraphs first (split at long silences), then each paragraph into
-        // pieces short enough for one decode.
+        // Stretches of speech first (split at pauses), then each stretch into
+        // pieces short enough for one decode. Every piece is a segment with
+        // its own time stamp.
         let loud = try Self.loudFrames(of: source)
-        var paragraphs: [[Range<Int>]] = []
-        for paragraph in Self.paragraphRanges(loud: loud, sampleCount: source.count, sampleRate: sampleRate) {
+        var spans: [(span: SpeechSpan, pieces: [Range<Int>])] = []
+        for span in Self.speechSpans(loud: loud, sampleCount: source.count, sampleRate: sampleRate) {
             try Task.checkCancellation()
-            paragraphs.append(try Self.segmentRanges(of: paragraph, in: source))
+            spans.append((span, try Self.segmentRanges(of: span.range, in: source)))
         }
-        let totalPieces = paragraphs.reduce(0) { $0 + $1.count }
+        let totalPieces = spans.reduce(0) { $0 + $1.pieces.count }
 
-        var paragraphTexts: [String] = []
+        var segments: [TranscriptSegment] = []
         var done = 0
-        for pieces in paragraphs {
-            var texts: [String] = []
-            for range in pieces {
+        for (span, pieces) in spans {
+            var startsParagraph = span.startsParagraph
+            for (index, range) in pieces.enumerated() {
                 try Task.checkCancellation()
-                let piece = decodeWithRetry(try source.read(range), sampleRate: sampleRate, language: language, recognizer: recognizer)
-                if !piece.isEmpty { texts.append(piece) }
+                let text = decodeWithRetry(try source.read(range), sampleRate: sampleRate, language: language, recognizer: recognizer)
+                // The span's speech, not its margin, gives the first start and
+                // the last end; inside the span the cuts do.
+                let from = index == 0 ? span.speech.lowerBound : range.lowerBound
+                let to = index == pieces.count - 1 ? span.speech.upperBound : range.upperBound
+                if !text.isEmpty {
+                    segments.append(TranscriptSegment(
+                        start: Double(from) / Double(sampleRate),
+                        end: Double(to) / Double(sampleRate),
+                        text: text,
+                        startsParagraph: startsParagraph && !segments.isEmpty
+                    ))
+                    startsParagraph = false
+                }
                 done += 1
-                let partial = (paragraphTexts + [Self.joined(texts)]).filter { !$0.isEmpty }.joined(separator: "\n\n")
-                onProgress(TranscriptionProgress(currentChunk: done, totalChunks: totalPieces, partialText: partial))
+                onProgress(TranscriptionProgress(currentChunk: done, totalChunks: totalPieces, partialText: Self.text(of: segments)))
             }
-            let paragraphText = Self.joined(texts)
-            if !paragraphText.isEmpty { paragraphTexts.append(paragraphText) }
         }
 
-        let fullText = paragraphTexts.joined(separator: "\n\n")
+        let fullText = Self.text(of: segments)
         let elapsedMs = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
-        return TranscriptionResult(text: fullText, language: Self.detectLanguage(fullText), durationMs: elapsedMs)
+        return TranscriptionResult(
+            text: fullText,
+            language: Self.detectLanguage(fullText),
+            durationMs: elapsedMs,
+            segments: segments
+        )
+    }
+
+    /// The transcript of `segments`: paragraphs separated by a blank line.
+    nonisolated static func text(of segments: [TranscriptSegment]) -> String {
+        var paragraphs: [[String]] = []
+        for segment in segments {
+            if segment.startsParagraph || paragraphs.isEmpty {
+                paragraphs.append([segment.text])
+            } else {
+                paragraphs[paragraphs.count - 1].append(segment.text)
+            }
+        }
+        return paragraphs.map(joined).joined(separator: "\n\n")
     }
 
     /// Transcribe samples already in memory (16 kHz mono).
@@ -494,14 +523,31 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
 
     // MARK: - Long audio
 
-    /// Splits a recording into paragraphs at silences of at least
-    /// `paragraphBreakGapSeconds`, dropping the silence itself (a short margin
-    /// is kept on each side so no word edge is clipped). Audio with no such
-    /// silence comes back as one range; all-silent audio as none.
-    nonisolated static func paragraphRanges(samples: [Float], sampleRate: Int) -> [Range<Int>] {
+    /// A stretch of speech in a long recording.
+    struct SpeechSpan: Equatable, Sendable {
+        /// The samples to decode: the speech and a short margin on each side,
+        /// so no word edge is clipped.
+        let range: Range<Int>
+        /// The speech alone, to 100 ms. Its edges are the time stamps.
+        let speech: Range<Int>
+        /// The silence before it is at least `paragraphBreakGapSeconds`.
+        let startsParagraph: Bool
+    }
+
+    /// A pause this long ends a span once the span is `minSpanSeconds` long.
+    static let spanPauseSeconds: Double = 1.0
+    /// Spans shorter than this run on through pauses shorter than a paragraph
+    /// break: very short pieces give the model too little context.
+    static let minSpanSeconds: Double = 10.0
+
+    /// Splits a recording into spans of speech, dropping the silence between
+    /// them. A span ends at every silence of `paragraphBreakGapSeconds`, and at
+    /// a pause of `spanPauseSeconds` once it is `minSpanSeconds` long. Audio
+    /// with no such pause comes back as one span; all-silent audio as none.
+    nonisolated static func speechSpans(samples: [Float], sampleRate: Int) -> [SpeechSpan] {
         var loud: [Bool] = []
         appendLoudFrames(of: samples, sampleRate: sampleRate, to: &loud)
-        return paragraphRanges(loud: loud, sampleCount: samples.count, sampleRate: sampleRate)
+        return speechSpans(loud: loud, sampleCount: samples.count, sampleRate: sampleRate)
     }
 
     /// Whether each 100 ms frame of a recording on disk reaches whisper level.
@@ -530,31 +576,41 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
         }
     }
 
-    /// `paragraphRanges(samples:sampleRate:)` from the per-frame loudness.
-    nonisolated static func paragraphRanges(loud: [Bool], sampleCount: Int, sampleRate: Int) -> [Range<Int>] {
+    /// `speechSpans(samples:sampleRate:)` from the per-frame loudness.
+    nonisolated static func speechSpans(loud: [Bool], sampleCount: Int, sampleRate: Int) -> [SpeechSpan] {
         let frame = max(1, sampleRate / 10)
-        let frameCount = loud.count
-
-        let gapFrames = Int(paragraphBreakGapSeconds * 10)
+        let paragraphGapFrames = Int(paragraphBreakGapSeconds * 10)
+        let pauseFrames = Int(spanPauseSeconds * 10)
+        let minSpanFrames = Int(minSpanSeconds * 10)
         let margin = 3  // 0.3 s of the silence kept around speech
-        var ranges: [Range<Int>] = []
-        var blockStart: Int?
+
+        var spans: [(frames: Range<Int>, startsParagraph: Bool)] = []
+        var spanStart: Int?
+        var startsParagraph = false
         var lastLoud = -1
-        for index in 0..<frameCount where loud[index] {
-            if let start = blockStart, index - lastLoud > gapFrames {
-                ranges.append(start..<(lastLoud + 1))
-                blockStart = index
-            } else if blockStart == nil {
-                blockStart = index
+        for index in 0..<loud.count where loud[index] {
+            if let start = spanStart {
+                let silent = index - lastLoud - 1
+                let paragraphBreak = silent >= paragraphGapFrames
+                if paragraphBreak || (silent >= pauseFrames && lastLoud + 1 - start >= minSpanFrames) {
+                    spans.append((start..<(lastLoud + 1), startsParagraph))
+                    spanStart = index
+                    startsParagraph = paragraphBreak
+                }
+            } else {
+                spanStart = index
             }
             lastLoud = index
         }
-        if let start = blockStart { ranges.append(start..<(lastLoud + 1)) }
+        if let start = spanStart { spans.append((start..<(lastLoud + 1), startsParagraph)) }
 
-        return ranges.map { frames in
-            let start = max(0, frames.lowerBound - margin) * frame
-            let end = min(sampleCount, (frames.upperBound + margin) * frame)
-            return start..<end
+        return spans.map { span in
+            let frames = span.frames
+            return SpeechSpan(
+                range: (max(0, frames.lowerBound - margin) * frame)..<min(sampleCount, (frames.upperBound + margin) * frame),
+                speech: (frames.lowerBound * frame)..<min(sampleCount, frames.upperBound * frame),
+                startsParagraph: span.startsParagraph
+            )
         }
     }
 

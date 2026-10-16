@@ -189,6 +189,29 @@ final class TranscriptionHistoryServiceTests: XCTestCase {
         XCTAssertEqual(updated.status, .completed)
     }
 
+    func test_completeEntry_keepsTheSegments() throws {
+        let entry = makeEntry(text: "", status: .inProgress)
+        try sut.add(entry)
+        let segments = [TranscriptSegment(start: 1.5, end: 4, text: "Final text")]
+
+        try sut.completeEntry(id: entry.id, text: "Final text", language: "en", segments: segments)
+
+        XCTAssertEqual(sut.getAll()[0].segments, segments)
+        XCTAssertEqual(TranscriptionHistoryService(storeURL: storeURL).getAll()[0].segments, segments)
+    }
+
+    func test_entryStoredWithoutSegments_loadsWithNone() throws {
+        let json = """
+            [{"id":"\(UUID().uuidString)","date":"2026-01-01T00:00:00Z","audioDuration":3,"text":"old","language":"en","status":"completed"}]
+            """
+        try Data(json.utf8).write(to: storeURL)
+
+        let entries = TranscriptionHistoryService(storeURL: storeURL).getAll()
+
+        XCTAssertEqual(entries.map(\.text), ["old"])
+        XCTAssertNil(entries.first?.segments)
+    }
+
     // MARK: - m4aPath management
 
     func test_completed_entry_has_nil_m4aPath() throws {

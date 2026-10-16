@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import UniformTypeIdentifiers
 
 // MARK: - IdleView
 //
@@ -537,6 +538,10 @@ struct ResultView: View {
     var onRetry: (() -> Void)? = nil
 
     @State private var copyButtonLabel = "Copy All"
+    @AppStorage(TranscriptFormat.showTimestampsKey) private var showTimestamps = true
+
+    /// What the text view shows and Copy and Export use.
+    private var shownText: String { entry.displayText(withTimestamps: showTimestamps) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -559,6 +564,11 @@ struct ResultView: View {
                     .foregroundStyle(.secondary)
                 }
                 Spacer()
+                if entry.hasTimestamps {
+                    Toggle("Timestamps", isOn: $showTimestamps)
+                        .toggleStyle(.checkbox)
+                        .help("Show when each part was said. Copy and Export follow this setting.")
+                }
                 if let onRetry {
                     Button("Retry", systemImage: "arrow.clockwise", action: onRetry)
                         .help("Transcribe the kept recording again")
@@ -585,7 +595,7 @@ struct ResultView: View {
             Divider()
 
             // Transcript text — NSTextView via ScrollView for full selection + Cmd+F support
-            SelectableTextView(text: entry.text)
+            SelectableTextView(text: shownText)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
 
@@ -599,7 +609,7 @@ struct ResultView: View {
                     shortcut: nil
                 ) {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(entry.text, forType: .string)
+                    NSPasteboard.general.setString(shownText, forType: .string)
                     copyButtonLabel = "Copied!"
                     Task {
                         try? await Task.sleep(for: .seconds(1.5))
@@ -616,6 +626,18 @@ struct ResultView: View {
                     keyEquivalent: "s"
                 ) {
                     exportText(entry)
+                }
+
+                if let segments = entry.segments, !segments.isEmpty {
+                    Divider().frame(height: 24)
+
+                    actionButton(
+                        icon: "captions.bubble",
+                        label: "Export .srt",
+                        shortcut: nil
+                    ) {
+                        exportSubtitles(entry, segments: segments)
+                    }
                 }
 
                 Divider().frame(height: 24)
@@ -671,13 +693,21 @@ struct ResultView: View {
     }
 
     private func exportText(_ entry: TranscriptionEntry) {
+        save(shownText, as: "txt", type: .plainText, for: entry)
+    }
+
+    private func exportSubtitles(_ entry: TranscriptionEntry, segments: [TranscriptSegment]) {
+        save(TranscriptFormat.srt(segments), as: "srt", type: UTType(filenameExtension: "srt") ?? .plainText, for: entry)
+    }
+
+    private func save(_ text: String, as fileExtension: String, type: UTType, for entry: TranscriptionEntry) {
         let panel = NSSavePanel()
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH-mm"
-        panel.nameFieldStringValue = "Transcription \(formatter.string(from: entry.date)).txt"
-        panel.allowedContentTypes = [.plainText]
+        panel.nameFieldStringValue = "Transcription \(formatter.string(from: entry.date)).\(fileExtension)"
+        panel.allowedContentTypes = [type]
         if panel.runModal() == .OK, let url = panel.url {
-            try? entry.text.write(to: url, atomically: true, encoding: .utf8)
+            try? text.write(to: url, atomically: true, encoding: .utf8)
         }
     }
 }

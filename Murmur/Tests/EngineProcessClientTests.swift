@@ -350,6 +350,19 @@ final class EngineServerTests: XCTestCase {
         XCTAssertEqual(replies.first?.transcriptionResult?.text, "hello")
     }
 
+    func test_resultReply_carriesTheSegments() throws {
+        let segments = [
+            TranscriptSegment(start: 0.3, end: 9.8, text: "one"),
+            TranscriptSegment(start: 12.1, end: 15, text: "two", startsParagraph: true),
+        ]
+        let result = TranscriptionResult(text: "one\n\ntwo", language: .english, durationMs: 5, segments: segments)
+        let line = String(decoding: try EngineWire.line(EngineReply.result(id: 3, result)), as: UTF8.self)
+
+        let reply = try EngineWire.decode(EngineReply.self, from: line)
+
+        XCTAssertEqual(reply.transcriptionResult?.segments, segments)
+    }
+
     func test_transcribeLong_repliesWithProgressThenTheResult() async throws {
         let service = SpyTranscriptionService()
         var request = EngineRequest(id: 9, operation: .transcribeLong)
