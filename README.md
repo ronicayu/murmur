@@ -104,7 +104,7 @@ Open the transcription window from the menu bar to transcribe long audio files:
 - **Upload** — Import .mp3, .m4a, .caf, .wav, or .ogg files (up to 2 hours)
 - **Drag and drop** — Drop an audio file onto the window
 
-Before transcription starts, you can select the language (auto-detect, Chinese, English, etc.). Transcription history is saved and searchable in the sidebar.
+The model detects the language; **Languages you speak** in Settings tells it which writing systems to expect. Transcription history is saved and searchable in the sidebar.
 
 The transcript has a time stamp for each stretch of speech, `[mm:ss]` at the start of its line. A stretch ends at a pause of 1 second once it is 10 seconds long, at every silence of 2 seconds, and after 40 seconds at the latest; 2-second silences also start a new paragraph. The model gives no word times, so a stamp marks where the stretch starts, to about a quarter of a second. Turn off **Timestamps** in the result view for the plain text; Copy All and Export .txt follow that setting. **Export .srt** saves the transcript as subtitles.
 
@@ -180,7 +180,7 @@ Open Settings from the menu bar dropdown.
 
 ### Sleep / Wake
 
-Murmur unloads the model when your Mac sleeps to free memory, and reloads it when you wake. The first transcription after wake may take 1-2 extra seconds.
+Murmur unloads the model when your Mac sleeps, and after 5 minutes without use. It loads it again when you start the next recording, which takes about a second while you speak.
 
 ## Architecture
 
