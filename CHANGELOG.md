@@ -6,7 +6,9 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
-## [Unreleased]
+## [0.5.1] — 2026-10-16
+
+Murmur gives its memory back when you are not dictating: the speech engine runs in a helper process that ends after 5 idle minutes. File transcriptions have time stamps and can be exported as subtitles, no longer lose speech when the model gets stuck repeating, and can be retried. Streaming has one mode.
 
 ### Added
 - **Time stamps in file transcriptions.** Each stretch of speech in the transcript starts with `[mm:ss]`. A stretch ends at a pause of 1 s once it is 10 s long, at every silence of 2 s (which also starts a paragraph), and after 40 s at the latest. The model gives no word times, so the stamps come from where Murmur cuts the audio: on three mixed Chinese–English conversations (56 min) they were 0.1 s from where the speaker started (median; 0.17 s for 9 in 10), one about every 13 to 19 s. Accuracy is unchanged (14.6% vs 14.4% errors) and transcription is 6% faster. A **Timestamps** switch in the result view turns them off; Copy All and Export .txt follow it. **Export .srt** saves the transcript as subtitles. Entries transcribed before this version have no time stamps.
