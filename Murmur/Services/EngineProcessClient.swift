@@ -35,6 +35,9 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     private var pending: [Int: Pending] = [:]
     private var idleStop: IdleTrigger?
     private var lastUse = Date.distantPast
+    /// `unloadModel` came while requests were under way: the helper ends
+    /// when the last of them finishes.
+    private var stopWhenDone = false
 
     // The app does not know whether the helper has the model loaded.
     nonisolated var isModelLoaded: Bool { false }
@@ -88,12 +91,20 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
         try await result(of: perform(.transcribeLong, audioURL: audioURL, language: language, onProgress: onProgress))
     }
 
+    /// Releases the model by ending the helper. Requests under way finish
+    /// first: the Mac going to sleep must not throw away an hour of file
+    /// transcription.
     func unloadModel() async {
-        stop(failingPendingWith: MurmurError.transcriptionFailed("The speech engine was stopped"))
+        if pending.isEmpty {
+            stop(failingPendingWith: MurmurError.transcriptionFailed("The speech engine was stopped"))
+        } else {
+            stopWhenDone = true
+        }
     }
 
+    /// Ends the helper at once, failing the requests under way.
     func killProcess() async {
-        await unloadModel()
+        stop(failingPendingWith: MurmurError.transcriptionFailed("The speech engine was stopped"))
     }
 
     /// True while the helper process is running. For tests and diagnostics.
@@ -149,7 +160,12 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     private func finish(_ id: Int, with outcome: Result<EngineReply, Error>) {
         guard let request = pending.removeValue(forKey: id) else { return }
         request.continuation.resume(with: outcome)
-        noteUse()
+        if stopWhenDone, pending.isEmpty {
+            logger.info("Speech engine process ended after the requests under way")
+            stop(failingPendingWith: MurmurError.transcriptionFailed("The speech engine was stopped"))
+        } else {
+            noteUse()
+        }
     }
 
     // MARK: - The process
@@ -196,6 +212,7 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
 
     private func stop(failingPendingWith error: Error) {
         generation += 1
+        stopWhenDone = false
         idleStop?.cancel()
         helper = nil   // ends the process
         let waiting = pending

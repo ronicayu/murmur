@@ -25,6 +25,9 @@ struct MurmurApp: App {
             defaults.set(true, forKey: "voiceProcessingMigrationV1")
         }
 
+        // Speech left in temporary WAV files by a crash or a forced quit.
+        TemporaryAudio.removeLeftovers(in: FileManager.default.temporaryDirectory)
+
         let mm = ModelManager()
         // One engine for the life of the app, in a helper process when the
         // app has one. It loads the model lazily, so it can be created

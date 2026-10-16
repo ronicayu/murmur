@@ -102,6 +102,10 @@ final class TranscriptionWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - Hotkey (Cmd+Shift+T)
 
+    /// A listen-only monitor, not a registered hot key: a registered hot key
+    /// takes the keystroke away from every other app, and Cmd+Shift+T is
+    /// "reopen closed tab" in browsers. The monitor sees every key press in
+    /// other apps; it reads only this one combination and keeps nothing.
     private func registerGlobalHotkey() {
         globalHotkeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard

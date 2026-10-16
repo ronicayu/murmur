@@ -385,4 +385,25 @@ final class ClipboardInjectionTests: XCTestCase {
 
         XCTAssertEqual(pasteboard.string(forType: .string), "dictated text")
     }
+
+    func test_dictatedText_isMarkedSoClipboardManagersDoNotKeepIt() async throws {
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        pasteboard.setString("the user's clipboard", forType: .string)
+        let before = pasteboard.changeCount
+
+        try await TextInjectionService().injectViaClipboard(
+            text: "dictated text",
+            pasteboard: pasteboard,
+            postPaste: {}
+        )
+
+        let types = Set(pasteboard.types ?? [])
+        for marker in TextInjectionService.privateMarkers {
+            XCTAssertTrue(types.contains(marker), "missing \(marker.rawValue)")
+        }
+        XCTAssertEqual(pasteboard.changeCount, before + 1,
+                       "The restore of the user's clipboard expects exactly one change")
+    }
 }

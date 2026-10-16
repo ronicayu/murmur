@@ -5,6 +5,13 @@ import XCTest
 
 final class AppStateTests: XCTestCase {
 
+    func testLogDescription_leavesOutTheInsertedText() {
+        let state = AppState.undoable(text: "my password is hunter2", method: .clipboard)
+        XCTAssertFalse(state.logDescription.contains("hunter2"))
+        XCTAssertEqual(state.logDescription, "undoable(22 characters, clipboard)")
+        XCTAssertEqual(AppState.recording.logDescription, "recording")
+    }
+
     func testIdleIsNotActive() {
         XCTAssertFalse(AppState.idle.isActive)
     }

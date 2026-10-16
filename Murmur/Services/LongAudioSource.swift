@@ -5,7 +5,9 @@ import AVFoundation
 ///
 /// A file that is already 16 kHz mono linear PCM is read in place. Anything
 /// else (compressed, another rate, stereo) is converted once, in small
-/// pieces, to a temporary WAV that is deleted when the source goes away.
+/// pieces, to a temporary WAV. The WAV is deleted as soon as it is open: the
+/// open file stays readable, and the system frees it when the source goes
+/// away, however the process ends.
 final class LongAudioSource {
     static let sampleRate = 16_000
 
@@ -13,8 +15,6 @@ final class LongAudioSource {
     let count: Int
 
     private let file: AVAudioFile
-    /// The converted copy, when one was made. It holds the user's audio.
-    private let temporaryURL: URL?
 
     private static let format = AVAudioFormat(
         commonFormat: .pcmFormatFloat32, sampleRate: Double(sampleRate), channels: 1, interleaved: false)!
@@ -28,28 +28,19 @@ final class LongAudioSource {
             && original.processingFormat.commonFormat == .pcmFormatFloat32
         if readableInPlace {
             file = original
-            temporaryURL = nil
         } else {
             let converted = FileManager.default.temporaryDirectory
                 .appendingPathComponent("murmur_long_\(UUID().uuidString).wav")
-            do {
-                try Self.convert(original, to: converted)
-                file = try AVAudioFile(forReading: converted)
-            } catch {
-                try? FileManager.default.removeItem(at: converted)
-                throw error
-            }
-            temporaryURL = converted
+            // The copy holds the user's audio. Deleted here, it cannot be
+            // left behind when the engine process is ended mid-transcription.
+            defer { try? FileManager.default.removeItem(at: converted) }
+            try Self.convert(original, to: converted)
+            file = try AVAudioFile(forReading: converted)
         }
         count = Int(file.length)
         if count == 0 {
-            if let temporaryURL { try? FileManager.default.removeItem(at: temporaryURL) }
             throw MurmurError.transcriptionFailed("No audio data")
         }
-    }
-
-    deinit {
-        if let temporaryURL { try? FileManager.default.removeItem(at: temporaryURL) }
     }
 
     /// The samples in `range`, clamped to the recording.

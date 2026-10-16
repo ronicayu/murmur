@@ -198,6 +198,33 @@ final class Qwen3TranscriptionServiceTests: XCTestCase {
         XCTAssertTrue(Qwen3TranscriptionService.speechSpans(samples: samples, sampleRate: 16000).isEmpty)
     }
 
+    func test_segmentBuilder_timesComeFromTheSpeechAtTheEdgesAndFromTheCutsInside() {
+        typealias Span = Qwen3TranscriptionService.SpeechSpan
+        // A 70 s span (speech 1–71 s, decoded with a 0.3 s margin) cut at 40.7 s.
+        let span = Span(range: 11_200..<1_140_800, speech: 16_000..<1_136_000, startsParagraph: false)
+        var builder = Qwen3TranscriptionService.SegmentBuilder(sampleRate: 16_000)
+
+        builder.add("one", piece: 11_200..<651_200, index: 0, of: 2, in: span)
+        builder.add("two", piece: 651_200..<1_140_800, index: 1, of: 2, in: span)
+
+        XCTAssertEqual(builder.segments.map(\.start), [1.0, 40.7])
+        XCTAssertEqual(builder.segments.map(\.end), [40.7, 71.0])
+    }
+
+    func test_segmentBuilder_paragraphBreakSurvivesASpanThatDecodesToNothing() {
+        typealias Span = Qwen3TranscriptionService.SpeechSpan
+        let first = Span(range: 0..<160_000, speech: 0..<160_000, startsParagraph: false)
+        let cough = Span(range: 200_000..<210_000, speech: 200_000..<210_000, startsParagraph: true)
+        let next = Span(range: 230_000..<300_000, speech: 230_000..<300_000, startsParagraph: false)
+        var builder = Qwen3TranscriptionService.SegmentBuilder(sampleRate: 16_000)
+
+        builder.add("Before the break.", piece: first.range, index: 0, of: 1, in: first)
+        builder.add("", piece: cough.range, index: 0, of: 1, in: cough)
+        builder.add("After the break.", piece: next.range, index: 0, of: 1, in: next)
+
+        XCTAssertEqual(builder.segments.map(\.startsParagraph), [false, true])
+    }
+
     func test_textOfSegments_blankLineBeforeEachParagraph() {
         let segments = [
             TranscriptSegment(start: 0, end: 4, text: "Hello there."),

@@ -424,6 +424,27 @@ final class TranscriptionWindowModelTests: XCTestCase {
                        "The recording is deleted once it is transcribed")
     }
 
+    func test_cancelling_a_retry_keeps_the_failed_entry_and_its_recording() async throws {
+        // Arrange
+        let failed = try await failOwnRecording()
+        let audio = try XCTUnwrap(sut.retryableAudio(for: failed))
+        spyTranscription.shouldBlock = true
+        sut.retryTranscription(of: failed)
+        await drainMainActor()
+
+        // Act
+        sut.cancelTranscription()
+        await drainMainActor()
+
+        // Assert — as it was before the retry
+        let all = historyService.getAll()
+        XCTAssertEqual(all.map(\.id), [failed.id], "Cancelling a retry must not delete the entry")
+        XCTAssertEqual(all.first?.status, .failed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audio.path),
+                      "The kept recording must survive a cancelled retry")
+        XCTAssertNotNil(sut.retryableAudio(for: try XCTUnwrap(all.first)), "It can be retried again")
+    }
+
     func test_failed_upload_has_nothing_to_retry() async throws {
         // Arrange — a file the user picked is never kept by Murmur
         spyTranscription.stubbedError = MurmurError.transcriptionFailed("engine failed")

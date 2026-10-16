@@ -6,6 +6,21 @@
      3. Tag `vX.Y.Z` on main; CI's release.yml overrides the plist from the tag
         anyway, but keeping the plist in sync prevents confusion for local builds. -->
 
+## [Unreleased]
+
+### Privacy
+- **Transcripts no longer go into the system log in readable form.** The first 200 characters of every transcription, the text of rejected decodes, and (with Undo on) the whole inserted text were logged as public. The unified log is kept for days and any administrator, sysdiagnose or Console can read it. They are now private (redacted unless private logging is turned on); the state log gives only the length of the inserted text.
+- **Dictated text on the clipboard is marked transient and concealed.** Clipboard managers and history tools that follow the nspasteboard.org convention (Raycast, Paste, Maccy, password managers) no longer keep a copy of every dictation.
+- **Temporary audio is not left on disk.** The 16 kHz copy of a long file is deleted as soon as it is open, so cancelling, quitting or a crash during a file transcription no longer leaves the whole recording (about 460 MB for 2 hours) in the temporary folder. At launch, Murmur deletes any of its WAV files that a crash left there.
+- **LLM correction is sent only over https, or over http to this Mac.** Before, plain http to another machine was allowed when no API key was set, so anyone on the same network could read every transcript and change the reply that Murmur types. A server on another machine now needs an https:// URL.
+- **A correction that adds a line break or a control character is not used.** The corrected text is typed into whatever app has focus; in a terminal a line break runs the line. The raw transcript is used instead.
+
+### Fixed
+- **Sleep no longer stops a file transcription.** Since 0.5.1 the engine is a separate process, and releasing the model at sleep ended it mid-transcription, so the entry failed. The release now waits for the transcription to finish, and a file transcription keeps the Mac from idle sleep.
+- **Cancelling a Retry keeps the failed entry and its recording.** Before, it deleted both, though the failure had kept the recording for a retry.
+- **Switching streaming on or off while recording no longer loses the dictation.** The stop followed the new setting, found no session, waited 50 s and dropped the recording. The stop now follows the mode the recording started in.
+- **A paragraph break is kept when the speech right after a long silence decodes to nothing** (a cough, a click). The two paragraphs around it were merged.
+
 ## [0.5.1] — 2026-10-16
 
 Murmur gives its memory back when you are not dictating: the speech engine runs in a helper process that ends after 5 idle minutes. File transcriptions have time stamps and can be exported as subtitles, no longer lose speech when the model gets stuck repeating, and can be retried. Streaming has one mode.

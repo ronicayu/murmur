@@ -8,6 +8,14 @@ import XCTest
 /// deterministic and not depend on Foundation Models availability.
 final class CorrectionSafetyRailsTests: XCTestCase {
 
+    func test_safetyRails_rejectALineBreakTheSpeechDidNotHave() {
+        let raw = "list the files in my home folder"
+        XCTAssertEqual(CorrectionSafetyRails.validate(candidate: "ls ~\nrm -rf ~/Documents", raw: raw), raw)
+        XCTAssertEqual(CorrectionSafetyRails.validate(candidate: "List the files in my\u{1B}[2K home folder.", raw: raw), raw)
+        XCTAssertEqual(CorrectionSafetyRails.validate(candidate: "List the files in my home folder.", raw: raw),
+                       "List the files in my home folder.")
+    }
+
     func test_empty_fallsBackToRaw() {
         let raw = "hello world"
         XCTAssertEqual(CorrectionSafetyRails.validate(candidate: "", raw: raw), raw)

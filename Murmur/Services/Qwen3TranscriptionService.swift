@@ -117,39 +117,55 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
         }
         let totalPieces = spans.reduce(0) { $0 + $1.pieces.count }
 
-        var segments: [TranscriptSegment] = []
+        var segments = SegmentBuilder(sampleRate: sampleRate)
         var done = 0
         for (span, pieces) in spans {
-            var startsParagraph = span.startsParagraph
             for (index, range) in pieces.enumerated() {
                 try Task.checkCancellation()
                 let text = decodeWithRetry(try source.read(range), sampleRate: sampleRate, language: language, recognizer: recognizer)
-                // The span's speech, not its margin, gives the first start and
-                // the last end; inside the span the cuts do.
-                let from = index == 0 ? span.speech.lowerBound : range.lowerBound
-                let to = index == pieces.count - 1 ? span.speech.upperBound : range.upperBound
-                if !text.isEmpty {
-                    segments.append(TranscriptSegment(
-                        start: Double(from) / Double(sampleRate),
-                        end: Double(to) / Double(sampleRate),
-                        text: text,
-                        startsParagraph: startsParagraph && !segments.isEmpty
-                    ))
-                    startsParagraph = false
-                }
+                segments.add(text, piece: range, index: index, of: pieces.count, in: span)
                 done += 1
-                onProgress(TranscriptionProgress(currentChunk: done, totalChunks: totalPieces, partialText: Self.text(of: segments)))
+                onProgress(TranscriptionProgress(currentChunk: done, totalChunks: totalPieces, partialText: Self.text(of: segments.segments)))
             }
         }
 
-        let fullText = Self.text(of: segments)
+        let fullText = Self.text(of: segments.segments)
         let elapsedMs = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
         return TranscriptionResult(
             text: fullText,
             language: Self.detectLanguage(fullText),
             durationMs: elapsedMs,
-            segments: segments
+            segments: segments.segments
         )
+    }
+
+    /// Turns decoded pieces into time-stamped segments.
+    struct SegmentBuilder {
+        let sampleRate: Int
+        private(set) var segments: [TranscriptSegment] = []
+        /// A paragraph break that no segment has carried yet: the span after
+        /// the long silence may decode to nothing (a cough), and the break
+        /// then belongs to the next speech.
+        private var paragraphPending = false
+
+        init(sampleRate: Int) { self.sampleRate = sampleRate }
+
+        /// Adds piece `index` of the `count` pieces of `span`, which decoded to
+        /// `text`. The span's speech, not its margin, gives the first start
+        /// and the last end; inside the span the cuts do.
+        mutating func add(_ text: String, piece range: Range<Int>, index: Int, of count: Int, in span: SpeechSpan) {
+            if index == 0, span.startsParagraph { paragraphPending = true }
+            guard !text.isEmpty else { return }
+            let from = index == 0 ? span.speech.lowerBound : range.lowerBound
+            let to = index == count - 1 ? span.speech.upperBound : range.upperBound
+            segments.append(TranscriptSegment(
+                start: Double(from) / Double(sampleRate),
+                end: Double(to) / Double(sampleRate),
+                text: text,
+                startsParagraph: paragraphPending && !segments.isEmpty
+            ))
+            paragraphPending = false
+        }
     }
 
     /// The transcript of `segments`: paragraphs separated by a blank line.
@@ -228,7 +244,9 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
             if !piece.isEmpty { pieces.append(piece) }
         }
         let text = Self.joined(pieces)
-        logger.info("Qwen3 text: \(text.prefix(200), privacy: .public)")
+        // Speech stays out of the shared system log: private, so redacted
+        // unless private logging is turned on for debugging.
+        logger.info("Qwen3 text (\(text.count) characters): \(text.prefix(200), privacy: .private)")
         return text
     }
 
@@ -308,7 +326,7 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
                 if offset > 0 { logger.info("Qwen3 decode settled after retry at +\(offset) samples") }
                 return settled
             }
-            logger.warning("Qwen3 decode not accepted at +\(offset) samples (\(String(describing: judgement), privacy: .public)): \(raw.prefix(60), privacy: .public)")
+            logger.warning("Qwen3 decode not accepted at +\(offset) samples (\(String(describing: judgement), privacy: .public)): \(raw.prefix(60), privacy: .private)")
         }
         return Self.lastResort(attempts, expected: expected)
     }
