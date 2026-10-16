@@ -15,6 +15,15 @@ enum AppState: Equatable, Sendable {
     case undoable(text: String, method: InjectionMethod)
     case error(MurmurError)
 
+    /// The state for the log. Leaves out the text an `.undoable` state
+    /// carries: the log is readable by any administrator for days.
+    var logDescription: String {
+        if case .undoable(let text, let method) = self {
+            return "undoable(\(text.count) characters, \(method))"
+        }
+        return String(describing: self)
+    }
+
     static func == (lhs: AppState, rhs: AppState) -> Bool {
         switch (lhs, rhs) {
         case (.idle, .idle), (.recording, .recording),
@@ -120,6 +129,12 @@ final class AppCoordinator: ObservableObject {
     private var isStreamingEnabled: Bool {
         UserDefaults.standard.bool(forKey: "streamingInputEnabled")
     }
+
+    /// The mode the current recording started in. Stop follows it, not the
+    /// setting: switching streaming in Settings mid-recording must not send
+    /// the stop down the other flow, which has no session and loses the
+    /// dictation.
+    private var recordingIsStreaming = false
 
     /// Shows the streamed text while the user speaks. Only the final text is
     /// inserted, once, after recording stops.
@@ -366,7 +381,8 @@ final class AppCoordinator: ObservableObject {
         // must not put a live recording back to idle.
         undoWindow.cancel()
         preloadModelInBackground()
-        if isStreamingEnabled {
+        recordingIsStreaming = isStreamingEnabled
+        if recordingIsStreaming {
             await startStreamingRecordingFlow()
         } else {
             await startV1RecordingFlow()
@@ -621,7 +637,7 @@ final class AppCoordinator: ObservableObject {
     // MARK: - V1 Stop & Transcribe (unchanged logic, extracted)
 
     private func stopAndTranscribe() async {
-        if isStreamingEnabled {
+        if recordingIsStreaming {
             await stopAndTranscribeStreaming()
             return
         }
@@ -837,7 +853,7 @@ final class AppCoordinator: ObservableObject {
 
         let old = state
         state = effectiveState
-        Self.log.info("State: \(String(describing: old), privacy: .public) → \(String(describing: effectiveState), privacy: .public)")
+        Self.log.info("State: \(old.logDescription, privacy: .public) → \(effectiveState.logDescription, privacy: .public)")
 
         if case .error(let err) = effectiveState {
             Self.log.error("Entered error state: \(String(describing: err), privacy: .public) — \(err.localizedDescription, privacy: .public)")

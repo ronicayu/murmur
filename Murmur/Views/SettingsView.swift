@@ -498,10 +498,9 @@ struct SettingsView: View {
                     .onSubmit { coordinator.reconfigureCorrectionEngine() }
             }
 
-            if !localLLMAPIKey.isEmpty,
-               let url = URL(string: localLLMBaseURL),
-               !OpenAICompatibleCorrector.allowsAPIKey(over: url) {
-                Text("The API key is not sent over plain http:// to another machine, so correction is off for this server. Use an https:// URL, or clear the API key.")
+            if let url = URL(string: localLLMBaseURL),
+               !OpenAICompatibleCorrector.isPrivateConnection(to: url) {
+                Text("Transcripts are not sent over plain http:// to another machine, so correction is off for this server. Use an https:// URL, or a server on this Mac.")
                     .font(.caption)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)

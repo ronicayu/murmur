@@ -175,6 +175,11 @@ enum CorrectionSafetyRails {
         let ratio = Double(trimmed.count) / Double(rawCount)
         guard ratio <= maxLengthRatio && ratio >= minLengthRatio else { return raw }
 
+        // Line breaks and control characters the speech did not have. The
+        // text is typed into whatever app has focus; in a terminal a line
+        // break runs the line.
+        if hasLineBreakOrControl(trimmed) && !hasLineBreakOrControl(raw) { return raw }
+
         // Refusal / meta-commentary guard.
         let lower = trimmed.lowercased()
         for marker in refusalMarkers where lower.contains(marker.lowercased()) {
@@ -182,6 +187,12 @@ enum CorrectionSafetyRails {
         }
 
         return trimmed
+    }
+
+    private static func hasLineBreakOrControl(_ text: String) -> Bool {
+        text.unicodeScalars.contains {
+            CharacterSet.newlines.contains($0) || CharacterSet.controlCharacters.contains($0)
+        }
     }
 }
 

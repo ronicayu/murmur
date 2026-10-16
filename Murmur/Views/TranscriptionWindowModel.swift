@@ -76,6 +76,9 @@ final class TranscriptionWindowModel: ObservableObject {
         let entryID: UUID
         let audioURL: URL
         let source: AudioSource
+        /// The run transcribes a failed entry again. Cancelling it leaves the
+        /// entry failed with its recording, as it was before.
+        let isRetry: Bool
     }
 
     /// The recording in progress or waiting in the confirm screen: not yet
@@ -331,7 +334,7 @@ final class TranscriptionWindowModel: ObservableObject {
             ))
         }
 
-        startTranscription(audioURL: audioURL, entryID: entryID, source: source)
+        startTranscription(audioURL: audioURL, entryID: entryID, source: source, isRetry: false)
     }
 
     /// The audio of an entry whose transcription failed, when it is Murmur's
@@ -354,10 +357,10 @@ final class TranscriptionWindowModel: ObservableObject {
         }
         guard activeTranscription == nil, let url = retryableAudio(for: entry) else { return }
         try? historyService.updateStatus(id: entry.id, status: .inProgress)
-        startTranscription(audioURL: url, entryID: entry.id, source: .ownRecording)
+        startTranscription(audioURL: url, entryID: entry.id, source: .ownRecording, isRetry: true)
     }
 
-    private func startTranscription(audioURL: URL, entryID: UUID, source: AudioSource) {
+    private func startTranscription(audioURL: URL, entryID: UUID, source: AudioSource, isRetry: Bool) {
         // The model detects the language; the user's "Languages you speak"
         // only tell it which scripts to expect.
         let hint = SpokenLanguages.hint(for: SpokenLanguages.current())
@@ -373,7 +376,8 @@ final class TranscriptionWindowModel: ObservableObject {
             generation: nextGeneration,
             entryID: entryID,
             audioURL: audioURL,
-            source: source
+            source: source,
+            isRetry: isRetry
         )
         nextGeneration += 1
         activeTranscription = session
@@ -384,6 +388,13 @@ final class TranscriptionWindowModel: ObservableObject {
         let progressPersistInterval = 5
 
         transcriptionTask = Task {
+            // A long file takes many minutes; idle sleep would end the engine
+            // process part-way through.
+            let activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .idleSystemSleepDisabled],
+                reason: "Transcribing an audio file"
+            )
+            defer { ProcessInfo.processInfo.endActivity(activity) }
             let outcome: Result<(TranscriptionResult, TimeInterval), Error>
             do {
                 let result = try await transcriptionService.transcribeLong(
@@ -461,7 +472,7 @@ final class TranscriptionWindowModel: ObservableObject {
 
         case .failure(let error) where error is CancellationError:
             // Silent cleanup — cancellation is intentional, not a failure
-            discard(session)
+            abandon(session)
             windowState = .idle
 
         case .failure(let error):
@@ -472,9 +483,15 @@ final class TranscriptionWindowModel: ObservableObject {
         }
     }
 
-    /// Removes the history entry of a cancelled session, and its audio if
-    /// that is Murmur's own recording.
-    private func discard(_ session: TranscriptionSession) {
+    /// Cleans up after a cancelled session. A first transcription leaves
+    /// nothing behind: its history entry goes, and its audio if that is
+    /// Murmur's own recording. A retry leaves the entry failed and keeps the
+    /// recording, as they were before it started.
+    private func abandon(_ session: TranscriptionSession) {
+        if session.isRetry {
+            try? historyService.updateStatus(id: session.entryID, status: .failed)
+            return
+        }
         try? historyService.delete(id: session.entryID)
         deleteAudio(at: session.audioURL, source: session.source)
     }
@@ -492,7 +509,7 @@ final class TranscriptionWindowModel: ObservableObject {
         // only releases the voice-input pause.
         if let session = activeTranscription {
             activeTranscription = nil
-            discard(session)
+            abandon(session)
         }
         windowState = .idle
     }

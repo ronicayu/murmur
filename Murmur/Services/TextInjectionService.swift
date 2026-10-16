@@ -68,6 +68,11 @@ final class TextInjectionService: TextInjectionServiceProtocol {
         keyUp.post(tap: .cghidEventTap)
     }
 
+    static let privateMarkers: [NSPasteboard.PasteboardType] = [
+        NSPasteboard.PasteboardType("org.nspasteboard.TransientType"),
+        NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"),
+    ]
+
     private static func restore(_ savedItems: [[(String, Data)]], to pasteboard: NSPasteboard) {
         pasteboard.clearContents()
         for itemTypes in savedItems {
@@ -95,9 +100,13 @@ final class TextInjectionService: TextInjectionServiceProtocol {
             }
         } ?? []
 
-        // Set our text
+        // Set our text, marked (nspasteboard.org convention) as passing
+        // through and private, so clipboard managers and history tools do
+        // not keep a copy of every dictation. Adding types to the item does
+        // not change `changeCount` again, which the restore below relies on.
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        for marker in Self.privateMarkers { pasteboard.setData(Data(), forType: marker) }
 
         // Simulate Cmd+V
         do {

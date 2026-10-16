@@ -61,44 +61,46 @@ final class OpenAICompatibleCorrectorTests: XCTestCase {
 
     // MARK: - API key transport rule
 
-    func test_allowsAPIKey_overHTTPS() {
-        XCTAssertTrue(OpenAICompatibleCorrector.allowsAPIKey(over: URL(string: "https://api.example.com/v1")!))
-        XCTAssertTrue(OpenAICompatibleCorrector.allowsAPIKey(over: URL(string: "HTTPS://api.example.com/v1")!))
+    func test_isPrivateConnection_overHTTPS() {
+        XCTAssertTrue(OpenAICompatibleCorrector.isPrivateConnection(to: URL(string: "https://api.example.com/v1")!))
+        XCTAssertTrue(OpenAICompatibleCorrector.isPrivateConnection(to: URL(string: "HTTPS://api.example.com/v1")!))
     }
 
-    func test_allowsAPIKey_overLoopbackHTTP() {
+    func test_isPrivateConnection_overLoopbackHTTP() {
         for base in ["http://localhost:11434/v1", "http://LOCALHOST:1234/v1",
                      "http://127.0.0.1:11434/v1", "http://[::1]:11434/v1"] {
-            XCTAssertTrue(OpenAICompatibleCorrector.allowsAPIKey(over: URL(string: base)!), base)
+            XCTAssertTrue(OpenAICompatibleCorrector.isPrivateConnection(to: URL(string: base)!), base)
         }
     }
 
-    func test_allowsAPIKey_refusesNonLoopbackHTTP() {
+    func test_isPrivateConnection_refusesNonLoopbackHTTP() {
         for base in ["http://api.example.com/v1", "http://192.168.1.20:11434/v1",
                      "http://localhost.example.com/v1", "http://127.0.0.1.example.com/v1"] {
-            XCTAssertFalse(OpenAICompatibleCorrector.allowsAPIKey(over: URL(string: base)!), base)
+            XCTAssertFalse(OpenAICompatibleCorrector.isPrivateConnection(to: URL(string: base)!), base)
         }
     }
 
-    func test_allowsAPIKey_refusesOtherSchemes() {
-        XCTAssertFalse(OpenAICompatibleCorrector.allowsAPIKey(over: URL(string: "ftp://localhost/v1")!))
-        XCTAssertFalse(OpenAICompatibleCorrector.allowsAPIKey(over: URL(string: "localhost:11434/v1")!))
+    func test_isPrivateConnection_refusesOtherSchemes() {
+        XCTAssertFalse(OpenAICompatibleCorrector.isPrivateConnection(to: URL(string: "ftp://localhost/v1")!))
+        XCTAssertFalse(OpenAICompatibleCorrector.isPrivateConnection(to: URL(string: "localhost:11434/v1")!))
     }
 
-    func test_makeRequest_throws_whenApiKeyWouldCrossNetworkInClearText() {
-        XCTAssertThrowsError(try OpenAICompatibleCorrector.makeRequest(
-            baseURL: URL(string: "http://api.example.com/v1")!,
-            modelName: "m",
-            apiKey: "sk-test-123",
-            language: "en",
-            glossary: [],
-            trimmed: "hello"
-        )) { error in
-            guard case MurmurError.transcriptionFailed(let message) = error else {
-                return XCTFail("Expected transcriptionFailed, got \(error)")
+    func test_makeRequest_throws_whenTheTranscriptWouldCrossTheNetworkInClearText() {
+        for apiKey in ["sk-test-123", nil] {
+            XCTAssertThrowsError(try OpenAICompatibleCorrector.makeRequest(
+                baseURL: URL(string: "http://192.168.1.20:11434/v1")!,
+                modelName: "m",
+                apiKey: apiKey,
+                language: "en",
+                glossary: [],
+                trimmed: "hello"
+            )) { error in
+                guard case MurmurError.transcriptionFailed(let message) = error else {
+                    return XCTFail("Expected transcriptionFailed, got \(error)")
+                }
+                XCTAssertTrue(message.contains("https"), "The error must tell the user what to change")
+                XCTAssertFalse(message.contains("sk-test-123"), "The error must not carry the key")
             }
-            XCTAssertTrue(message.contains("https"), "The error must tell the user what to change")
-            XCTAssertFalse(message.contains("sk-test-123"), "The error must not carry the key")
         }
     }
 
@@ -112,19 +114,6 @@ final class OpenAICompatibleCorrectorTests: XCTestCase {
             trimmed: "hello"
         )
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer sk-test-123")
-    }
-
-    func test_makeRequest_keylessNonLoopbackHTTP_isStillAllowed() throws {
-        // A keyless LAN server (Ollama on another machine) has no secret to leak.
-        let request = try OpenAICompatibleCorrector.makeRequest(
-            baseURL: URL(string: "http://192.168.1.20:11434/v1")!,
-            modelName: "m",
-            apiKey: nil,
-            language: "en",
-            glossary: [],
-            trimmed: "hello"
-        )
-        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
     }
 
     func test_makeRequest_bodyContainsSystemAndUserMessages() throws {

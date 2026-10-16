@@ -218,6 +218,56 @@ final class EngineProcessClientTests: XCTestCase {
         XCTAssertFalse(runningAfter)
     }
 
+    /// A helper that answers each request only once `go` exists, and notes
+    /// in `received` that a request came.
+    private func makeHeldClient(received: URL, go: URL) -> EngineProcessClient {
+        makeClient(#"""
+        while IFS= read -r line; do
+          echo got >> "\#(received.path)"
+          while [ ! -f "\#(go.path)" ]; do sleep 0.05; done
+          printf '{"id":%s,"kind":"result","text":"done","language":"en","durationMs":1}\n' "$(id "$line")"
+        done
+        """#)
+    }
+
+    func test_unloadModel_duringARequest_letsItFinish_thenEndsTheHelper() async throws {
+        let received = directory.appendingPathComponent("received")
+        let go = directory.appendingPathComponent("go")
+        let client = makeHeldClient(received: received, go: go)
+        let request = Task { try await client.transcribeLong(audioURL: audio, language: "en") { _ in } }
+        let started = await eventually { FileManager.default.fileExists(atPath: received.path) }
+        XCTAssertTrue(started)
+
+        await client.unloadModel()
+        let runningWhileBusy = await client.isRunning
+        XCTAssertTrue(runningWhileBusy, "the Mac going to sleep must not end a transcription under way")
+        try Data().write(to: go)
+
+        let result = try await request.value
+        XCTAssertEqual(result.text, "done")
+        let stopped = await eventually { await client.isRunning == false }
+        XCTAssertTrue(stopped, "the model is released once the request is done")
+    }
+
+    func test_killProcess_endsTheHelperAtOnce_andFailsTheRequest() async throws {
+        let received = directory.appendingPathComponent("received")
+        let client = makeHeldClient(received: received, go: directory.appendingPathComponent("never"))
+        let request = Task { try await client.transcribe(audioURL: audio, language: "en") }
+        let started = await eventually { FileManager.default.fileExists(atPath: received.path) }
+        XCTAssertTrue(started)
+
+        await client.killProcess()
+
+        do {
+            _ = try await request.value
+            XCTFail("a request to a helper that was ended must fail")
+        } catch {
+            XCTAssertFalse(error is CancellationError, "\(error)")
+        }
+        let running = await client.isRunning
+        XCTAssertFalse(running)
+    }
+
     func test_helperIsEnded_afterTheIdleTime_andStartedAgainByTheNextRequest() async throws {
         let starts = directory.appendingPathComponent("starts")
         let client = makeClient(#"""

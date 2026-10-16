@@ -110,12 +110,14 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // The request carries the transcript, and the reply is typed into
+        // the user's app: neither may cross the network in clear text.
+        guard isPrivateConnection(to: baseURL) else {
+            throw MurmurError.transcriptionFailed(
+                "Local LLM: refusing to send the transcript over an unencrypted connection. Use an https:// base URL, or http:// to this Mac."
+            )
+        }
         if let apiKey, !apiKey.isEmpty {
-            guard allowsAPIKey(over: baseURL) else {
-                throw MurmurError.transcriptionFailed(
-                    "Local LLM: refusing to send the API key over an unencrypted connection. Use an https:// base URL."
-                )
-            }
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
 
@@ -153,10 +155,12 @@ actor OpenAICompatibleCorrector: TranscriptionCorrection {
         return request
     }
 
-    /// Whether a bearer token may be sent to `baseURL`: only over https, or
-    /// over plain http to this machine (the documented Ollama / LM Studio
-    /// setup). Anything else would put the key on the network in clear text.
-    static func allowsAPIKey(over baseURL: URL) -> Bool {
+    /// Whether the transcript and the API key may be sent to `baseURL`: only
+    /// over https, or over plain http to this machine (the documented Ollama /
+    /// LM Studio setup). Anything else would put them on the network in clear
+    /// text, where anyone on the same Wi-Fi could read the transcript and
+    /// change the reply that Murmur types.
+    static func isPrivateConnection(to baseURL: URL) -> Bool {
         switch baseURL.scheme?.lowercased() {
         case "https":
             return true

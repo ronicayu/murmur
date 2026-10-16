@@ -113,20 +113,18 @@ final class LongAudioSourceTests: XCTestCase {
         let url = try write(original, sampleRate: 44_100, channels: 2, settings: settings, name: "stereo.wav")
         let temporaryFilesBefore = try murmurTemporaryFiles()
 
-        var source: LongAudioSource? = try LongAudioSource(url: url)
-        let count = try XCTUnwrap(source).count
-        let middle = try XCTUnwrap(source).read(8_000..<8_100)
+        let source = try LongAudioSource(url: url)
 
-        XCTAssertEqual(Double(count), 16_000 * seconds, accuracy: 400)
+        // The copy holds the user's audio. It is gone from the disk while the
+        // source is still in use, so no way of ending the process leaves it.
+        XCTAssertEqual(try murmurTemporaryFiles(), temporaryFilesBefore,
+                       "The converted copy must not stay on disk")
+        let middle = try source.read(8_000..<8_100)
+        let start = try source.read(0..<10)
+        XCTAssertEqual(Double(source.count), 16_000 * seconds, accuracy: 400)
         XCTAssertEqual(middle.count, 100)
         for value in middle { XCTAssertEqual(value, 0.25, accuracy: 0.01) }
-        XCTAssertEqual(try murmurTemporaryFiles().subtracting(temporaryFilesBefore).count, 1,
-                       "Precondition: the converted copy exists while the source is in use")
-
-        source = nil
-
-        XCTAssertEqual(try murmurTemporaryFiles(), temporaryFilesBefore,
-                       "The converted copy holds the user's audio and must not be left behind")
+        XCTAssertEqual(start.count, 10, "Reading back towards the start still works")
     }
 
     private func murmurTemporaryFiles() throws -> Set<String> {
