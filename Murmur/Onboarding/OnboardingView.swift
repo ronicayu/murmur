@@ -42,10 +42,14 @@ struct OnboardingView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Progress bar — maps actual step to visible progress (skipping modelChoice)
-            ProgressView(value: Double(viewModel.visibleStepIndex), total: Double(viewModel.visibleStepCount - 1))
-                .padding(.horizontal, 32)
-                .padding(.top, 20)
+            // Progress bar — maps actual step to visible progress (skipping
+            // modelChoice). Only for the first onboarding: a later dictation
+            // set-up would open half full.
+            if viewModel.isFirstRun {
+                ProgressView(value: Double(viewModel.visibleStepIndex), total: Double(viewModel.visibleStepCount - 1))
+                    .padding(.horizontal, 32)
+                    .padding(.top, 20)
+            }
 
             // Step content
             Group {
@@ -167,8 +171,7 @@ struct OnboardingView: View {
                     .controlSize(.large)
 
                     Button("I've already enabled it — Continue") {
-                        viewModel.accessibilityGranted = true
-                        viewModel.nextStep()
+                        viewModel.confirmAccessibilityEnabled()
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
@@ -434,7 +437,7 @@ struct OnboardingView: View {
                     .font(.title.bold())
 
                 VStack(alignment: .leading, spacing: 12) {
-                    Label("**Cmd + Shift + T** — open Transcription to record or import audio", systemImage: "waveform")
+                    Label("**Transcription** in the menu bar — record or import audio", systemImage: "waveform")
                     Label("**Set Up Dictation…** in the menu bar — to dictate into other apps later", systemImage: "keyboard")
                 }
                 .font(.body)
@@ -481,9 +484,11 @@ struct OnboardingView: View {
                 .font(.body)
                 .foregroundStyle(.secondary)
 
-                Text("Murmur lives in your menu bar and will launch at login.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                if viewModel.isFirstRun {
+                    Text("Murmur lives in your menu bar and will launch at login.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
             }
 
             Spacer()

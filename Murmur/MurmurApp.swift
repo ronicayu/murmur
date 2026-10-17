@@ -68,7 +68,7 @@ struct MurmurApp: App {
                 onOpenSettings: { showSettings() },
                 onOpenTranscription: { showTranscriptionWindow() },
                 onOpenRecentHistory: { showRecentHistory() },
-                onSetUpDictation: { showOnboarding(startAt: .accessibility) }
+                onSetUpDictation: { showDictationSetUp() }
             )
         } label: {
             Label(coordinator.state.menuBarAccessibilityName, systemImage: menuBarIconName)
@@ -108,6 +108,10 @@ struct MurmurApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: .openSettings)) { _ in
                     showSettings()
                 }
+                // From the Accessibility alert a hotkey press shows without it.
+                .onReceive(NotificationCenter.default.publisher(for: .setUpDictation)) { _ in
+                    showDictationSetUp()
+                }
         }
         .menuBarExtraStyle(.window)
     }
@@ -136,6 +140,13 @@ struct MurmurApp: App {
         case .error: return "exclamationmark.triangle"
         default: return "mic"
         }
+    }
+
+    private func showDictationSetUp() {
+        showOnboarding(startAt: OnboardingViewModel.setUpDictationStart(
+            onboardingCompleted: UserDefaults.standard.bool(forKey: "onboardingCompleted"),
+            modelReady: modelManager.state == .ready
+        ))
     }
 
     /// - Parameter startAt: `.accessibility` to set up dictation after

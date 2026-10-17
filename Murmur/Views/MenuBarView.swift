@@ -10,10 +10,8 @@ struct MenuBarView: View {
     var onSetUpDictation: () -> Void = {}
 
     /// Dictation cannot work yet: Accessibility was skipped at onboarding or
-    /// taken away since. Read each time the menu opens.
-    private var dictationNeedsSetUp: Bool {
-        coordinator.permissions.checkAll().accessibility != .granted
-    }
+    /// taken away since. Read again each time the menu opens.
+    @State private var dictationNeedsSetUp = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -65,6 +63,9 @@ struct MenuBarView: View {
             .padding(.vertical, 4)
         }
         .frame(width: 300)
+        .onAppear {
+            dictationNeedsSetUp = OnboardingViewModel.dictationNeedsSetUp(coordinator.permissions.checkAll())
+        }
     }
 
     // MARK: - Section Divider

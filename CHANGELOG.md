@@ -16,6 +16,7 @@
 - **A correction that adds a line break or a control character is not used.** The corrected text is typed into whatever app has focus; in a terminal a line break runs the line. The raw transcript is used instead.
 
 ### Fixed
+- **The microphone permission alert opened the Accessibility settings.** Its Open Settings button now opens Privacy & Security > Microphone.
 - **Sleep no longer stops a file transcription.** Since 0.5.1 the engine is a separate process, and releasing the model at sleep ended it mid-transcription, so the entry failed. The release now waits for the transcription to finish, and a file transcription keeps the Mac from idle sleep.
 - **Cancelling a Retry keeps the failed entry and its recording.** Before, it deleted both, though the failure had kept the recording for a retry.
 - **Switching streaming on or off while recording no longer loses the dictation.** The stop followed the new setting, found no session, waited 50 s and dropped the recording. The stop now follows the mode the recording started in.
@@ -28,7 +29,7 @@
 - The recording screen no longer says "Voice input paused". Voice input works while you record.
 
 ### Changed
-- **Dictation set-up can wait.** Onboarding now asks first for what both dictation and transcription need: the microphone and the speech model. Accessibility, which only dictation needs (to type into other apps), comes after, and can be skipped by someone who only transcribes recordings. **Set Up Dictation…** in the menu bar picks it up later; it shows while Murmur has no Accessibility access.
+- **Dictation set-up can wait.** Onboarding now asks first for what both dictation and transcription need: the microphone and the speech model. Accessibility, which only dictation needs (to type into other apps), comes after, and can be skipped by someone who only transcribes recordings. **Set Up Dictation…** in the menu bar picks it up later; it shows while Murmur has no Accessibility access. A shortcut pressed without it no longer says "Murmur needs accessibility access to work": the alert says that only dictation needs it, and its button opens the same set-up. Setting up dictation later leaves Launch at login as you set it.
 - **Dictation works while a file is transcribed.** Murmur now sends a long file to the engine a piece at a time (up to 40 s of audio each), and a dictation goes in between: it waits only for the piece the engine is on. In a test the dictation's text came 1 s after it was asked for; the worst case is about 15 s. The file only gets slower, by the time the dictation takes, and its transcript is the same as before. A dictation made during a file has no live preview: a preview pass every second would go ahead of each piece and stall the file.
 - **Cancelling a file transcription lets the piece the engine is on finish** (a few seconds), so the engine keeps the model for your next dictation. Before, cancelling ended the engine at once.
 - **Start Transcription during a dictation is refused with a message.** The file's first piece would delay the dictation's final text; start the file again when the dictation is done.

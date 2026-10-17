@@ -537,4 +537,6 @@ struct TranscriptionWindowView: View {
 extension Notification.Name {
     static let openSettings = Notification.Name("com.murmur.openSettings")
     static let openTranscriptionWindow = Notification.Name("com.murmur.openTranscriptionWindow")
+    /// Opens the dictation set-up (Accessibility, then a try-out).
+    static let setUpDictation = Notification.Name("com.murmur.setUpDictation")
 }

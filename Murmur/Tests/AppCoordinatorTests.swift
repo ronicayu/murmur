@@ -131,6 +131,7 @@ final class HotkeyEventTests: XCTestCase {
 
 // MARK: - OnboardingStep Tests
 
+@MainActor
 final class OnboardingStepTests: XCTestCase {
 
     func testStepOrder() {

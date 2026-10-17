@@ -21,6 +21,7 @@ protocol PermissionsServiceProtocol {
     func checkAll() -> PermissionsStatus
     func requestMicrophone() async -> Bool
     func openAccessibilitySettings()
+    func openMicrophoneSettings()
     func pollAccessibilityGranted() -> AsyncStream<Bool>
 }
 
@@ -53,6 +54,12 @@ final class PermissionsService: PermissionsServiceProtocol {
         let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
         NSWorkspace.shared.open(url)
         log.info("Opened Accessibility settings")
+    }
+
+    func openMicrophoneSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     func pollAccessibilityGranted() -> AsyncStream<Bool> {
