@@ -29,6 +29,8 @@ struct SettingsView: View {
     @State private var hotkeyKey: Key = HotkeyPreference.defaultCustomKey
     @State private var hotkeyModifiers: NSEvent.ModifierFlags = HotkeyPreference.defaultCustomModifiers
     @AppStorage("localLLMAPIKey") private var localLLMAPIKey: String = ""
+    @AppStorage(MicrophoneMode.reminderKey) private var voiceIsolationReminder = true
+    @State private var voiceIsolationOn = MicrophoneMode.isVoiceIsolationOn
 
     /// Minimum downloaded bytes before the cancel confirmation dialog is shown.
     /// Below this threshold a single click is fine — very little data would be lost.
@@ -47,7 +49,10 @@ struct SettingsView: View {
         }
         .frame(width: 420, height: 460)
         .padding()
-        .onAppear { loadSavedHotkey() }
+        .onAppear {
+            loadSavedHotkey()
+            voiceIsolationOn = MicrophoneMode.isVoiceIsolationOn
+        }
     }
 
     // MARK: - General Tab
@@ -127,6 +132,18 @@ struct SettingsView: View {
                     }
                 }
                 SpokenLanguagesSetting()
+                LabeledContent("Voice Isolation") {
+                    HStack(spacing: 8) {
+                        Text(voiceIsolationOn ? "On" : "Off")
+                            .foregroundStyle(voiceIsolationOn ? .green : .orange)
+                        Toggle("Offer after updates", isOn: $voiceIsolationReminder)
+                            .toggleStyle(.checkbox)
+                    }
+                }
+                Text("Voice Isolation keeps words from getting lost in a noisy place. Turn it on in Control Center → Microphone Mode while you dictate. macOS resets it when Murmur is updated; with the box checked, Murmur opens that menu at the first dictation after an update.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 LabeledContent("Sound effects") {
                     Toggle("Sound effects", isOn: $soundEffects)
                         .labelsHidden()

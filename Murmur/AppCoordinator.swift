@@ -247,6 +247,26 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    /// Opens the Microphone Mode menu once per installed version while Voice
+    /// Isolation is off. The microphone is live now, which the menu needs to
+    /// list the modes. See `MicrophoneMode`.
+    private func offerVoiceIsolationIfNeeded() {
+        // A coordinator built without the global hotkey is a test's: it must
+        // not open system UI or write the user's defaults either.
+        guard registersGlobalHotkey else { return }
+        let defaults = UserDefaults.standard
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        guard MicrophoneMode.shouldOffer(
+            isVoiceIsolationOn: MicrophoneMode.isVoiceIsolationOn,
+            remindersOn: defaults.object(forKey: MicrophoneMode.reminderKey) as? Bool ?? true,
+            remindedVersion: defaults.string(forKey: MicrophoneMode.remindedVersionKey),
+            currentVersion: version
+        ) else { return }
+        defaults.set(version, forKey: MicrophoneMode.remindedVersionKey)
+        Self.log.info("Voice Isolation is off: opening the Microphone Mode menu")
+        MicrophoneMode.showPicker()
+    }
+
     /// Installs the hotkey again. A monitor installed while Murmur had no
     /// Accessibility access may not hear key presses once it has it.
     func reregisterHotkeyAfterAccessibilityChange() {
@@ -483,6 +503,7 @@ final class AppCoordinator: ObservableObject {
                 try await self.audio.startRecording()
             }
             audioStartInFlight = false
+            offerVoiceIsolationIfNeeded()
         } catch {
             // After a timeout the call is still running; the late-completion
             // handler above clears the flag.
