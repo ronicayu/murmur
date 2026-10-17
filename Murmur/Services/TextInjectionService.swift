@@ -84,15 +84,27 @@ final class TextInjectionService: TextInjectionServiceProtocol {
         }
     }
 
-    /// `pasteboard` and `postPaste` are parameters so tests can use a private
-    /// pasteboard and a paste that fails; the app always uses the defaults.
+    /// Whether the user's clipboard may be put back: the clipboard still
+    /// holds the dictated text. Nothing but Murmur changed it, or something
+    /// wrote the same text again — clipboard tools and some input methods
+    /// do that around a paste. Anything else on it is the user's own new
+    /// copy, which is left alone.
+    static func shouldRestore(
+        changeCount: Int, changeCountAfterWrite: Int, currentText: String?, dictated: String
+    ) -> Bool {
+        changeCount == changeCountAfterWrite || currentText == dictated
+    }
+
+    /// `pasteboard`, `postPaste` and `restoreAfter` are parameters so tests
+    /// can use a private pasteboard, a paste that fails and a short wait;
+    /// the app always uses the defaults.
     func injectViaClipboard(
         text: String,
         pasteboard: NSPasteboard = .general,
-        postPaste: () throws -> Void = TextInjectionService.postPasteKeystroke
+        postPaste: () throws -> Void = TextInjectionService.postPasteKeystroke,
+        restoreAfter: Duration = .milliseconds(1500)
     ) async throws {
-        // Save current clipboard (all types per item) and change count
-        let savedChangeCount = pasteboard.changeCount
+        // Save current clipboard (all types per item)
         let savedItems = pasteboard.pasteboardItems?.map { item -> [(String, Data)] in
             item.types.compactMap { type in
                 guard let data = item.data(forType: type) else { return nil }
@@ -102,11 +114,11 @@ final class TextInjectionService: TextInjectionServiceProtocol {
 
         // Set our text, marked (nspasteboard.org convention) as passing
         // through and private, so clipboard managers and history tools do
-        // not keep a copy of every dictation. Adding types to the item does
-        // not change `changeCount` again, which the restore below relies on.
+        // not keep a copy of every dictation.
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         for marker in Self.privateMarkers { pasteboard.setData(Data(), forType: marker) }
+        let changeCountAfterWrite = pasteboard.changeCount
 
         // Simulate Cmd+V
         do {
@@ -126,14 +138,22 @@ final class TextInjectionService: TextInjectionServiceProtocol {
         // The sleep exists to give the target app time to consume the
         // clipboard BEFORE we overwrite it — in practice Cmd+V is handled
         // within a few tens of ms, but we keep the conservative wait.
+        let log = self.log
         Task.detached {
-            try? await Task.sleep(for: .milliseconds(1500))
+            try? await Task.sleep(for: restoreAfter)
             await MainActor.run {
-                guard pasteboard.changeCount == savedChangeCount + 1 else {
-                    // Clipboard was modified by the user or another app — skip restore.
+                let changes = pasteboard.changeCount - changeCountAfterWrite
+                guard Self.shouldRestore(
+                    changeCount: pasteboard.changeCount,
+                    changeCountAfterWrite: changeCountAfterWrite,
+                    currentText: pasteboard.string(forType: .string),
+                    dictated: text
+                ) else {
+                    log.info("Clipboard left as it is: it holds something new (\(changes) changes since the paste)")
                     return
                 }
                 Self.restore(savedItems, to: pasteboard)
+                log.info("Clipboard restored (\(changes) changes by others since the paste)")
             }
         }
     }
