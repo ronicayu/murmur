@@ -1,11 +1,14 @@
 import SwiftUI
 
+/// Steps in order. Dictation's set-up (Accessibility, then trying it out)
+/// comes after what both modes need (the microphone and the model), so a
+/// user who only transcribes recordings can skip it.
 enum OnboardingStep: Int, CaseIterable {
     case welcome = 0
     case microphone
-    case accessibility
     case modelChoice
     case modelDownload
+    case accessibility
     case testTranscription
     case done
 }
@@ -23,10 +26,16 @@ struct OnboardingView: View {
     /// Mirrors the same constant in SettingsView — keep in sync.
     private static let cancelConfirmThresholdBytes: Int64 = 100 * 1_000_000 // 100 MB
 
-    init(coordinator: AppCoordinator, modelManager: ModelManager, onComplete: @escaping () -> Void) {
+    init(
+        coordinator: AppCoordinator,
+        modelManager: ModelManager,
+        startAt: OnboardingStep = .welcome,
+        onComplete: @escaping () -> Void
+    ) {
         _viewModel = StateObject(wrappedValue: OnboardingViewModel(
             coordinator: coordinator,
-            modelManager: modelManager
+            modelManager: modelManager,
+            startAt: startAt
         ))
         self.onComplete = onComplete
     }
@@ -83,6 +92,10 @@ struct OnboardingView: View {
             Text("Speak into your Mac. Text appears.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
+            Text("Dictate into any app, or transcribe recordings and meetings.")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
             Text("Local transcription. No cloud. Chinese + English.")
                 .font(.body)
                 .foregroundStyle(.tertiary)
@@ -121,9 +134,9 @@ struct OnboardingView: View {
             Image(systemName: "hand.raised.circle.fill")
                 .font(.system(size: 48))
                 .foregroundStyle(.purple)
-            Text("Accessibility Permission")
+            Text("Set Up Dictation")
                 .font(.title2.bold())
-            Text("Murmur inserts text into your active app. This requires Accessibility access in System Settings.")
+            Text("Dictation types what you say into the app you are using. For that, Murmur needs Accessibility access in System Settings. Transcribing recordings and files does not need it.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -160,6 +173,14 @@ struct OnboardingView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     .font(.caption)
+
+                    Button("Skip — I'll only transcribe recordings") {
+                        viewModel.skipDictation()
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+                    .help("You can set up dictation later from the menu bar.")
                 }
             }
         }
@@ -405,8 +426,25 @@ struct OnboardingView: View {
         VStack(spacing: 24) {
             Spacer()
 
-            // Ctrl+Space conflict detection for CJK users
-            if viewModel.hotkeyConflictDetected {
+            if viewModel.dictationSkipped {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.green)
+                Text("You're All Set")
+                    .font(.title.bold())
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("**Cmd + Shift + T** — open Transcription to record or import audio", systemImage: "waveform")
+                    Label("**Set Up Dictation…** in the menu bar — to dictate into other apps later", systemImage: "keyboard")
+                }
+                .font(.body)
+                .foregroundStyle(.secondary)
+
+                Text("Murmur lives in your menu bar and will launch at login.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else if viewModel.hotkeyConflictDetected {
+                // Ctrl+Space conflict detection for CJK users
                 VStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 48))
@@ -458,7 +496,7 @@ struct OnboardingView: View {
             .disabled(viewModel.hotkeyConflictDetected)
         }
         .onAppear {
-            viewModel.checkHotkeyConflict()
+            if !viewModel.dictationSkipped { viewModel.checkHotkeyConflict() }
         }
     }
 

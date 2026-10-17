@@ -32,6 +32,38 @@ final class OnboardingViewModelTests: XCTestCase {
         super.tearDown()
     }
 
+    // MARK: - Dictation set-up can wait
+
+    func test_afterWelcome_comesTheModel_notAccessibility() {
+        XCTAssertEqual(viewModel.step, .welcome)
+        viewModel.nextStep()
+        XCTAssertEqual(viewModel.step, .modelDownload, "Precondition: no model in the test's directory")
+    }
+
+    func test_skipDictation_endsOnboarding_withoutAccessibility() {
+        viewModel.step = .accessibility
+
+        viewModel.skipDictation()
+
+        XCTAssertEqual(viewModel.step, .done)
+        XCTAssertTrue(viewModel.dictationSkipped)
+        XCTAssertFalse(viewModel.hotkeyConflictDetected)
+    }
+
+    /// From the menu bar's "Set Up Dictation…".
+    func test_setUpLater_startsAtTheAccessibilityStep() {
+        let later = OnboardingViewModel(
+            coordinator: coordinator,
+            modelManager: makeTestModelManager(),
+            startAt: .accessibility,
+            loadHotkey: { .rightCommand },
+            applyHotkey: { _ in }
+        )
+        defer { later.teardown() }
+        XCTAssertEqual(later.step, .accessibility)
+        XCTAssertFalse(later.dictationSkipped)
+    }
+
     // MARK: - Leaving onboarding
 
     func test_teardown_restoresAccessibilityCheck_afterTestStep() {

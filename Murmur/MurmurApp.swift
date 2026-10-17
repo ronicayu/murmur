@@ -67,7 +67,8 @@ struct MurmurApp: App {
                 coordinator: coordinator,
                 onOpenSettings: { showSettings() },
                 onOpenTranscription: { showTranscriptionWindow() },
-                onOpenRecentHistory: { showRecentHistory() }
+                onOpenRecentHistory: { showRecentHistory() },
+                onSetUpDictation: { showOnboarding(startAt: .accessibility) }
             )
         } label: {
             Label(coordinator.state.menuBarAccessibilityName, systemImage: menuBarIconName)
@@ -137,7 +138,9 @@ struct MurmurApp: App {
         }
     }
 
-    private func showOnboarding() {
+    /// - Parameter startAt: `.accessibility` to set up dictation after
+    ///   onboarding was finished without it.
+    private func showOnboarding(startAt: OnboardingStep = .welcome) {
         if let existing = onboardingWindow, existing.isVisible {
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -146,7 +149,8 @@ struct MurmurApp: App {
 
         let view = OnboardingView(
             coordinator: coordinator,
-            modelManager: modelManager
+            modelManager: modelManager,
+            startAt: startAt
         ) { [self] in
             onboardingWindow?.close()
             onboardingWindow = nil
@@ -158,7 +162,7 @@ struct MurmurApp: App {
             backing: .buffered,
             defer: false
         )
-        window.title = "Welcome to Murmur"
+        window.title = startAt == .welcome ? "Welcome to Murmur" : "Set Up Dictation"
         window.contentView = NSHostingView(rootView: view)
         window.center()
         window.isReleasedWhenClosed = false

@@ -13,6 +13,9 @@ final class OnboardingViewModel: ObservableObject {
     @Published var hotkeyPracticeMode = false
     @Published var hotkeyTestResult: String?
     @Published var hotkeyConflictDetected = false
+    /// The user chose to transcribe recordings only, for now: no
+    /// Accessibility prompt, no hotkey practice.
+    @Published private(set) var dictationSkipped = false
     @Published var customKey: Key = HotkeyPreference.defaultCustomKey
     @Published var customModifiers: NSEvent.ModifierFlags = HotkeyPreference.defaultCustomModifiers
 
@@ -20,8 +23,8 @@ final class OnboardingViewModel: ObservableObject {
     let modelManager: ModelManager
 
     /// Steps actually shown to the user (mic merged into welcome; modelChoice skipped)
-    private static let visibleSteps: [OnboardingStep] = [
-        .welcome, .accessibility, .modelDownload, .testTranscription, .done
+    static let visibleSteps: [OnboardingStep] = [
+        .welcome, .modelDownload, .accessibility, .testTranscription, .done
     ]
 
     var visibleStepCount: Int { Self.visibleSteps.count }
@@ -40,12 +43,16 @@ final class OnboardingViewModel: ObservableObject {
     ///   - loadHotkey: reads the saved shortcut.
     ///   - applyHotkey: puts a shortcut into effect and saves it. `nil`
     ///     registers it with the coordinator's hotkey service.
+    ///   - startAt: `.accessibility` when the user sets up dictation after
+    ///     onboarding, from the menu bar.
     init(
         coordinator: AppCoordinator,
         modelManager: ModelManager,
+        startAt: OnboardingStep = .welcome,
         loadHotkey: @escaping () -> HotkeyTrigger = { HotkeyPreference.load() },
         applyHotkey: ((HotkeyTrigger) -> Void)? = nil
     ) {
+        self.step = startAt
         self.coordinator = coordinator
         self.modelManager = modelManager
         self.loadHotkey = loadHotkey
@@ -94,6 +101,15 @@ final class OnboardingViewModel: ObservableObject {
         }
     }
 
+
+    /// Skips dictation's set-up and goes to the end. Nothing is asked for
+    /// that only dictation needs.
+    func skipDictation() {
+        accessibilityPollTask?.cancel()
+        accessibilityPollTask = nil
+        dictationSkipped = true
+        step = .done
+    }
 
     func requestMicrophone() async {
         micGranted = await coordinator.permissions.requestMicrophone()

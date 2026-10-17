@@ -28,6 +28,7 @@
 - The recording screen no longer says "Voice input paused". Voice input works while you record.
 
 ### Changed
+- **Dictation set-up can wait.** Onboarding now asks first for what both dictation and transcription need: the microphone and the speech model. Accessibility, which only dictation needs (to type into other apps), comes after, and can be skipped by someone who only transcribes recordings. **Set Up Dictation…** in the menu bar picks it up later; it shows while Murmur has no Accessibility access.
 - **Dictation works while a file is transcribed.** Murmur now sends a long file to the engine a piece at a time (up to 40 s of audio each), and a dictation goes in between: it waits only for the piece the engine is on. In a test the dictation's text came 1 s after it was asked for; the worst case is about 15 s. The file only gets slower, by the time the dictation takes, and its transcript is the same as before. A dictation made during a file has no live preview: a preview pass every second would go ahead of each piece and stall the file.
 - **Cancelling a file transcription lets the piece the engine is on finish** (a few seconds), so the engine keeps the model for your next dictation. Before, cancelling ended the engine at once.
 - **Start Transcription during a dictation is refused with a message.** The file's first piece would delay the dictation's final text; start the file again when the dictation is done.
