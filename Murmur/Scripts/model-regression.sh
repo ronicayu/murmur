@@ -81,6 +81,7 @@ swiftc -O -parse-as-library -module-name Murmur -o "$WORK/run" \
     Services/Vendor/SherpaOnnx.swift Services/Qwen3TranscriptionService.swift \
     Services/LongAudioSource.swift Services/IdleTrigger.swift Services/SpokenLanguages.swift \
     Services/TranscriptionTypes.swift MurmurError.swift Services/ModelManager.swift Services/HFDownload.swift \
+    Services/LongTranscription.swift Services/TemporaryAudio.swift \
     Scripts/model-regression/XCTestStandIn.swift "$WORK"/*.swift 2> "$WORK/build.log" \
     || { grep -E "error" "$WORK/build.log" | head -20 >&2; exit 1; }
 

@@ -1,4 +1,5 @@
 import XCTest
+import AVFoundation
 @testable import Murmur
 
 /// The client's side of the engine process, against stand-in helpers: small
@@ -72,23 +73,203 @@ final class EngineProcessClientTests: XCTestCase {
         XCTAssertEqual(sent.language, "zh,en")
     }
 
-    func test_transcribeLong_reportsProgressBeforeTheResult() async throws {
-        let client = makeClient(#"""
+    // MARK: Long files, a piece at a time
+
+    /// A helper that logs each request's operation to `ops`, writes its pid
+    /// to `launches` when it starts, and answers: `ready` to a preload,
+    /// `p<first sample>` to a piece, `dictated` to a transcription. The
+    /// first request whose operation is `hold` waits until `go` exists.
+    private func makePieceClient(ops: URL, launches: URL, hold: String = "", go: URL? = nil) -> EngineProcessClient {
+        let mark = directory.appendingPathComponent("held-\(UUID().uuidString)")
+        let goPath = go?.path ?? "/nonexistent"
+        return makeClient(#"""
+        op() { printf '%s' "$1" | sed -E 's/.*"operation":"([A-Za-z]+)".*/\1/'; }
+        lo() { printf '%s' "$1" | sed -E 's/.*"range":\[([0-9]+),.*/\1/'; }
+        echo $$ >> "\#(launches.path)"
         while IFS= read -r line; do
-          n="$(id "$line")"
-          printf '{"id":%s,"kind":"progress","currentChunk":1,"totalChunks":2,"partialText":"one"}\n' "$n"
-          printf '{"id":%s,"kind":"progress","currentChunk":2,"totalChunks":2,"partialText":"one two"}\n' "$n"
-          printf '{"id":%s,"kind":"result","text":"one two","language":"en","durationMs":5}\n' "$n"
+          o="$(op "$line")"
+          echo "$o" >> "\#(ops.path)"
+          if [ "$o" = "\#(hold)" ] && [ ! -f "\#(mark.path)" ]; then
+            : > "\#(mark.path)"
+            while [ ! -f "\#(goPath)" ]; do sleep 0.05; done
+          fi
+          case "$o" in
+            preload) printf '{"id":%s,"kind":"ready"}\n' "$(id "$line")" ;;
+            transcribePiece) printf '{"id":%s,"kind":"result","text":"p%s"}\n' "$(id "$line")" "$(lo "$line")" ;;
+            *) printf '{"id":%s,"kind":"result","text":"dictated","language":"en","durationMs":1}\n' "$(id "$line")" ;;
+          esac
         done
         """#)
+    }
+
+    /// Speech 0–3 s and 6–9 s, silence between: two spans, one piece each.
+    /// The 3 s silence is a paragraph break.
+    private func writeTwoUtterances(sampleRate: Double = 16_000, channels: AVAudioChannelCount = 1) throws -> URL {
+        let url = directory.appendingPathComponent("long-\(UUID().uuidString).wav")
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: channels, interleaved: false)!
+        let frames = AVAudioFrameCount(sampleRate * 9)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
+        buffer.frameLength = frames
+        for channel in 0..<Int(channels) {
+            for i in 0..<Int(frames) {
+                let seconds = Double(i) / sampleRate
+                let speaking = seconds < 3 || seconds >= 6
+                buffer.floatChannelData![channel][i] = speaking ? 0.1 * sin(Float(i) * 0.05) : 0
+            }
+        }
+        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+        try file.write(from: buffer)
+        return url
+    }
+
+    private func lines(_ file: URL) -> [String] {
+        ((try? String(contentsOf: file, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+    }
+
+    private func convertedCopies() -> Set<String> {
+        Set(((try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)) ?? [])
+            .filter { $0.hasPrefix(TemporaryAudio.prefix + "long_") })
+    }
+
+    func test_transcribeLong_sendsTheFileAPieceAtATime() async throws {
+        let ops = directory.appendingPathComponent("ops")
+        let client = makePieceClient(ops: ops, launches: directory.appendingPathComponent("launches"))
         let progress = LockedList<String>()
 
-        let result = try await client.transcribeLong(audioURL: audio, language: "en") { update in
+        let result = try await client.transcribeLong(audioURL: try writeTwoUtterances(), language: "en") { update in
             progress.append("\(update.currentChunk)/\(update.totalChunks) \(update.partialText)")
         }
 
-        XCTAssertEqual(result.text, "one two")
-        XCTAssertEqual(progress.values, ["1/2 one", "2/2 one two"])
+        // The second span starts 0.3 s (margin) before its speech at 6 s.
+        XCTAssertEqual(result.text, "p0\n\np91200")
+        XCTAssertEqual(result.segments.map(\.start), [0, 6])
+        XCTAssertEqual(result.segments.map(\.startsParagraph), [false, true])
+        XCTAssertEqual(progress.values, ["1/2 p0", "2/2 p0\n\np91200"])
+        XCTAssertEqual(lines(ops), ["preload", "transcribePiece", "transcribePiece"])
+    }
+
+    func test_dictationDuringAPiece_isSentBeforeTheFilesNextPiece() async throws {
+        let ops = directory.appendingPathComponent("ops")
+        let go = directory.appendingPathComponent("go")
+        let client = makePieceClient(
+            ops: ops, launches: directory.appendingPathComponent("launches"), hold: "transcribePiece", go: go)
+        let file = Task { try await client.transcribeLong(audioURL: try self.writeTwoUtterances(), language: "en") { _ in } }
+        let pieceSent = await eventually { self.lines(ops).count == 2 }
+        XCTAssertTrue(pieceSent, "Precondition: the helper has the file's first piece")
+
+        let dictation = Task { try await client.transcribe(audioURL: self.audio, language: "en") }
+        let waiting = await eventually { await client.queuedRequestCount == 1 }
+        XCTAssertTrue(waiting, "Precondition: the dictation waits for the piece")
+        try Data().write(to: go)
+
+        let dictated = try await boundedValue(of: dictation)
+        _ = try await boundedValue(of: file)
+        XCTAssertEqual(dictated.text, "dictated")
+        XCTAssertEqual(lines(ops), ["preload", "transcribePiece", "transcribe", "transcribePiece"])
+    }
+
+    /// The file's waiting request is older, the dictation's newer: the
+    /// dictation still goes first.
+    func test_waitingDictation_goesAheadOfAnOlderFileRequest() async throws {
+        let ops = directory.appendingPathComponent("ops")
+        let go = directory.appendingPathComponent("go")
+        let client = makePieceClient(
+            ops: ops, launches: directory.appendingPathComponent("launches"), hold: "transcribe", go: go)
+        let first = Task { try await client.transcribe(audioURL: self.audio, language: "en") }
+        let firstSent = await eventually { self.lines(ops).count == 1 }
+        XCTAssertTrue(firstSent, "Precondition: the helper has the first dictation")
+        let file = Task { try await client.transcribeLong(audioURL: try self.writeTwoUtterances(), language: "en") { _ in } }
+        let fileWaiting = await eventually { await client.queuedRequestCount == 1 }
+        XCTAssertTrue(fileWaiting, "Precondition: the file's preload waits")
+        let second = Task { try await client.transcribe(audioURL: self.audio, language: "en") }
+        let bothWaiting = await eventually { await client.queuedRequestCount == 2 }
+        XCTAssertTrue(bothWaiting, "Precondition: the second dictation waits behind the file")
+        try Data().write(to: go)
+
+        _ = try await boundedValue(of: first)
+        _ = try await boundedValue(of: second)
+        _ = try await boundedValue(of: file)
+        XCTAssertEqual(lines(ops), ["transcribe", "transcribe", "preload", "transcribePiece", "transcribePiece"])
+    }
+
+    func test_cancellingALongTranscription_letsThePieceFinish_andKeepsTheHelper() async throws {
+        let ops = directory.appendingPathComponent("ops")
+        let launches = directory.appendingPathComponent("launches")
+        let go = directory.appendingPathComponent("go")
+        let client = makePieceClient(ops: ops, launches: launches, hold: "transcribePiece", go: go)
+        let file = Task { try await client.transcribeLong(audioURL: try self.writeTwoUtterances(), language: "en") { _ in } }
+        let pieceSent = await eventually { self.lines(ops).count == 2 }
+        XCTAssertTrue(pieceSent, "Precondition: the helper has the file's first piece")
+
+        file.cancel()
+        try await Task.sleep(for: .milliseconds(300))
+        let stillRunning = await client.isRunning
+        XCTAssertTrue(stillRunning, "The helper keeps the model for the next dictation")
+        try Data().write(to: go)
+
+        do {
+            _ = try await boundedValue(of: file)
+            XCTFail("A cancelled transcription must throw")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        let next = try await client.transcribe(audioURL: audio, language: "en")
+        XCTAssertEqual(next.text, "dictated")
+        XCTAssertEqual(processIDs(launches).count, 1, "The same helper answers the next request")
+        XCTAssertEqual(lines(ops), ["preload", "transcribePiece", "transcribe"], "No piece after the cancel")
+    }
+
+    /// The Mac going to sleep during a file: the helper must not end in the
+    /// gap between two pieces, where no request runs or waits.
+    func test_unloadModel_duringALongTranscription_waitsForItsLastPiece() async throws {
+        let ops = directory.appendingPathComponent("ops")
+        let launches = directory.appendingPathComponent("launches")
+        let go = directory.appendingPathComponent("go")
+        let client = makePieceClient(ops: ops, launches: launches, hold: "transcribePiece", go: go)
+        let file = Task { try await client.transcribeLong(audioURL: try self.writeTwoUtterances(), language: "en") { _ in } }
+        let pieceSent = await eventually { self.lines(ops).count == 2 }
+        XCTAssertTrue(pieceSent, "Precondition: the helper has the file's first piece")
+
+        await client.unloadModel()
+        try Data().write(to: go)
+
+        let result = try await boundedValue(of: file)
+        XCTAssertEqual(result.segments.count, 2)
+        XCTAssertEqual(processIDs(launches).count, 1, "Both pieces in the same helper")
+        let stopped = await eventually { await client.isRunning == false }
+        XCTAssertTrue(stopped, "The model is released once the file is done")
+    }
+
+    func test_convertedCopy_isDeleted_afterTheTranscription() async throws {
+        let client = makePieceClient(
+            ops: directory.appendingPathComponent("ops"), launches: directory.appendingPathComponent("launches"))
+        let stereo = try writeTwoUtterances(sampleRate: 44_100, channels: 2)
+        let before = convertedCopies()
+
+        let result = try await client.transcribeLong(audioURL: stereo, language: "en") { _ in }
+
+        XCTAssertEqual(result.segments.count, 2, "Precondition: the file was converted and cut")
+        XCTAssertEqual(convertedCopies(), before, "The converted copy holds the user's audio")
+    }
+
+    func test_convertedCopy_isDeleted_afterACancel() async throws {
+        let ops = directory.appendingPathComponent("ops")
+        let go = directory.appendingPathComponent("go")
+        let client = makePieceClient(
+            ops: ops, launches: directory.appendingPathComponent("launches"), hold: "transcribePiece", go: go)
+        let stereo = try writeTwoUtterances(sampleRate: 44_100, channels: 2)
+        let before = convertedCopies()
+        let file = Task { try await client.transcribeLong(audioURL: stereo, language: "en") { _ in } }
+        let pieceSent = await eventually { self.lines(ops).count == 2 }
+        XCTAssertTrue(pieceSent, "Precondition: the helper has the file's first piece")
+        XCTAssertEqual(convertedCopies().subtracting(before).count, 1, "Precondition: the copy exists meanwhile")
+
+        file.cancel()
+        try Data().write(to: go)
+        _ = try? await boundedValue(of: file)
+
+        XCTAssertEqual(convertedCopies(), before)
     }
 
     func test_preload_endsWithTheReadyReply() async throws {
@@ -239,7 +420,7 @@ final class EngineProcessClientTests: XCTestCase {
         let received = directory.appendingPathComponent("received")
         let go = directory.appendingPathComponent("go")
         let client = makeHeldClient(received: received, go: go)
-        let request = Task { try await client.transcribeLong(audioURL: audio, language: "en") { _ in } }
+        let request = Task { try await client.transcribe(audioURL: audio, language: "en") }
         let started = await eventually { FileManager.default.fileExists(atPath: received.path) }
         XCTAssertTrue(started)
 
@@ -824,29 +1005,32 @@ final class EngineServerTests: XCTestCase {
         XCTAssertEqual(replies.first?.transcriptionResult?.text, "hello")
     }
 
-    func test_resultReply_carriesTheSegments() throws {
-        let segments = [
-            TranscriptSegment(start: 0.3, end: 9.8, text: "one"),
-            TranscriptSegment(start: 12.1, end: 15, text: "two", startsParagraph: true),
-        ]
-        let result = TranscriptionResult(text: "one\n\ntwo", language: .english, durationMs: 5, segments: segments)
-        let line = String(decoding: try EngineWire.line(EngineReply.result(id: 3, result)), as: UTF8.self)
+    func test_pieceRequest_carriesItsRangeAsAPair() throws {
+        var request = EngineRequest(id: 3, operation: .transcribePiece)
+        request.range = 16_000..<48_000
+        let line = String(decoding: try EngineWire.line(request), as: UTF8.self)
 
-        let reply = try EngineWire.decode(EngineReply.self, from: line)
-
-        XCTAssertEqual(reply.transcriptionResult?.segments, segments)
+        XCTAssertTrue(line.contains(#""range":[16000,48000]"#), line)
+        XCTAssertEqual(try EngineWire.decode(EngineRequest.self, from: line).range, 16_000..<48_000)
     }
 
-    func test_transcribeLong_repliesWithProgressThenTheResult() async throws {
+    func test_transcribePiece_repliesWithThePiecesText() async throws {
         let service = SpyTranscriptionService()
-        var request = EngineRequest(id: 9, operation: .transcribeLong)
+        var request = EngineRequest(id: 9, operation: .transcribePiece)
         request.path = "/tmp/a.wav"
+        request.range = 32_000..<64_000
 
         let replies = try await serve(service, [request])
 
-        XCTAssertEqual(replies.map(\.kind), [.progress, .result])
-        XCTAssertEqual(replies.map(\.id), [9, 9])
-        XCTAssertEqual(replies.first?.partialText, "partial")
+        XCTAssertEqual(replies, [.pieceText(id: 9, "piece 32000")])
+        XCTAssertEqual(service.piecesAsked, [32_000..<64_000])
+    }
+
+    func test_pieceWithoutARange_isAFailure() async throws {
+        var request = EngineRequest(id: 5, operation: .transcribePiece)
+        request.path = "/tmp/a.wav"
+        let replies = try await serve(SpyTranscriptionService(), [request])
+        XCTAssertEqual(replies.map(\.kind), [.failure])
     }
 
     func test_preload_repliesReady() async throws {

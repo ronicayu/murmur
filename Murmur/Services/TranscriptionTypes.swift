@@ -44,6 +44,12 @@ protocol TranscriptionServiceProtocol {
     func setModelPath(_ newPath: URL) async
     func killProcess() async
     var isModelLoaded: Bool { get }
+    /// Decodes `range` of a 16 kHz mono WAV: one piece of a long recording.
+    func transcribePiece(audioURL: URL, range: Range<Int>, language: String) async throws -> String
+    /// Whether a dictation can be transcribed while `transcribeLong` runs:
+    /// the long transcription gives way between its pieces. When false,
+    /// voice input is paused for the whole of a file transcription.
+    var yieldsToDictationDuringLongTranscription: Bool { get }
 }
 
 
@@ -51,4 +57,8 @@ protocol TranscriptionServiceProtocol {
 extension TranscriptionServiceProtocol {
     func setModelPath(_ newPath: URL) async {}
     func killProcess() async {}
+    func transcribePiece(audioURL: URL, range: Range<Int>, language: String) async throws -> String {
+        throw MurmurError.transcriptionFailed("This engine does not decode pieces")
+    }
+    var yieldsToDictationDuringLongTranscription: Bool { false }
 }

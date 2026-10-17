@@ -289,9 +289,17 @@ final class AppCoordinator: ObservableObject {
 
     // MARK: - Window Transcription Coordination
 
-    /// Set while the transcription window owns the engine. Voice input is refused
-    /// while it is set; AppState is .transcribing for the menu bar.
+    /// Set while the transcription window transcribes a file. With an engine
+    /// that gives way between pieces (the engine process), dictation goes on
+    /// as usual, without the live preview. Otherwise voice input is refused
+    /// while it is set, and AppState is .transcribing for the menu bar.
     @Published private(set) var isFileTranscriptionActive = false
+
+    /// Voice input is refused: a file transcription holds an engine that
+    /// cannot fit a dictation in between.
+    private var fileTranscriptionBlocksDictation: Bool {
+        isFileTranscriptionActive && !transcription.yieldsToDictationDuringLongTranscription
+    }
 
     /// Pure rule, tested exhaustively. A file may take the engine only when no
     /// dictation is using or about to use it. .transcribing is excluded because
@@ -304,9 +312,10 @@ final class AppCoordinator: ObservableObject {
     }
 
     /// Called by TranscriptionWindowModel before it starts a file
-    /// transcription. Takes the hold, so voice input is refused until
-    /// `endWindowTranscription()`. Returns false, and changes nothing, while a
-    /// dictation uses the engine or is about to.
+    /// transcription. Takes the hold until `endWindowTranscription()`.
+    /// Returns false, and changes nothing, while a dictation uses the engine
+    /// or is about to: even an engine that gives way between pieces would
+    /// have the file's first piece slow down the dictation's final pass.
     ///
     /// While the hold is already taken it returns true: a new file supersedes
     /// the running one, or starts before a cancelled one has unwound.
@@ -314,13 +323,16 @@ final class AppCoordinator: ObservableObject {
     func beginWindowTranscription() -> Bool {
         if isFileTranscriptionActive { return true }
         guard !pendingRecording, Self.fileTranscriptionMayStart(during: state) else { return false }
+        isFileTranscriptionActive = true
+        // The engine fits dictations in between the file's pieces: voice
+        // input stays on, and the state (an Undo window, an error) is left as it is.
+        if transcription.yieldsToDictationDuringLongTranscription { return true }
         // Leaving .undoable: its timer must not fire later.
         undoWindow.cancel()
         // Leaving .error: a recording that failed to start leaves its
         // "Recording" pill for the error recovery to hide, and that recovery
         // does nothing once the state is .transcribing.
         if state.isError { pill.hide() }
-        isFileTranscriptionActive = true
         transition(to: .transcribing)
         return true
     }
@@ -331,9 +343,11 @@ final class AppCoordinator: ObservableObject {
     /// .transcribing state then belongs to a dictation.
     func endWindowTranscription() {
         guard isFileTranscriptionActive else { return }
+        let heldTheState = fileTranscriptionBlocksDictation
         isFileTranscriptionActive = false
-        // Under the hold only the hold sets .transcribing.
-        if state == .transcribing { transition(to: .idle) }
+        // Under a blocking hold only the hold sets .transcribing. Otherwise a
+        // .transcribing belongs to a dictation.
+        if heldTheState && state == .transcribing { transition(to: .idle) }
     }
 
     /// A hotkey press while the window owns the engine. Tell the user at once;
@@ -355,7 +369,7 @@ final class AppCoordinator: ObservableObject {
         case .startRecording:
             // Refused before the preflight, so a press during a file
             // transcription never brings up the microphone prompt.
-            if isFileTranscriptionActive { refuseVoiceInputDuringFile(); return }
+            if fileTranscriptionBlocksDictation { refuseVoiceInputDuringFile(); return }
             let failure = await startPreflightFailure()
             // The hold may have begun while the preflight waited (for
             // example on the microphone prompt). Checked before the failure
@@ -363,7 +377,7 @@ final class AppCoordinator: ObservableObject {
             // the menu bar would show Ready during the file. Such a failure
             // is not shown; the first press after the file runs the
             // preflight again and reports it then.
-            if isFileTranscriptionActive { refuseVoiceInputDuringFile(); return }
+            if fileTranscriptionBlocksDictation { refuseVoiceInputDuringFile(); return }
             if let failure {
                 // The hotkey service already counts this press as a recording.
                 hotkey.notifyRecordingStopped()
@@ -424,12 +438,14 @@ final class AppCoordinator: ObservableObject {
         // This is the only path to .recording; the hold relies on that. It
         // also catches a recording queued behind a dictation, which both
         // stop flows start here.
-        if isFileTranscriptionActive { refuseVoiceInputDuringFile(); return }
+        if fileTranscriptionBlocksDictation { refuseVoiceInputDuringFile(); return }
         // The undo window of the previous dictation ends here; its timer
         // must not put a live recording back to idle.
         undoWindow.cancel()
         preloadModelInBackground()
-        recordingIsStreaming = isStreamingEnabled
+        // No live preview during a file transcription: a preview pass every
+        // second would go ahead of each of the file's pieces and stall it.
+        recordingIsStreaming = isStreamingEnabled && !isFileTranscriptionActive
         if recordingIsStreaming {
             await startStreamingRecordingFlow()
         } else {

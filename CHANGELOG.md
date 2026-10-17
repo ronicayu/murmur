@@ -11,7 +11,7 @@
 ### Privacy
 - **Transcripts no longer go into the system log in readable form.** The first 200 characters of every transcription, the text of rejected decodes, and (with Undo on) the whole inserted text were logged as public. The unified log is kept for days and any administrator, sysdiagnose or Console can read it. They are now private (redacted unless private logging is turned on); the state log gives only the length of the inserted text.
 - **Dictated text on the clipboard is marked transient and concealed.** Clipboard managers and history tools that follow the nspasteboard.org convention (Raycast, Paste, Maccy, password managers) no longer keep a copy of every dictation.
-- **Temporary audio is not left on disk.** The 16 kHz copy of a long file is deleted as soon as it is open, so cancelling, quitting or a crash during a file transcription no longer leaves the whole recording (about 460 MB for 2 hours) in the temporary folder. At launch, Murmur deletes any of its WAV files that a crash left there.
+- **Temporary audio is not left on disk.** Cancelling, quitting or a crash during a file transcription left the converted 16 kHz copy of the file (about 460 MB for 2 hours) in the temporary folder. The copy is now deleted when the transcription ends or is cancelled, and at launch Murmur deletes any of its WAV files that a crash left there.
 - **LLM correction is sent only over https, or over http to this Mac.** Before, plain http to another machine was allowed when no API key was set, so anyone on the same network could read every transcript and change the reply that Murmur types. A server on another machine now needs an https:// URL.
 - **A correction that adds a line break or a control character is not used.** The corrected text is typed into whatever app has focus; in a terminal a line break runs the line. The raw transcript is used instead.
 
@@ -20,18 +20,18 @@
 - **Cancelling a Retry keeps the failed entry and its recording.** Before, it deleted both, though the failure had kept the recording for a retry.
 - **Switching streaming on or off while recording no longer loses the dictation.** The stop followed the new setting, found no session, waited 50 s and dropped the recording. The stop now follows the mode the recording started in.
 - **A paragraph break is kept when the speech right after a long silence decodes to nothing** (a cough, a click). The two paragraphs around it were merged.
-- **Starting a file transcription during a dictation no longer leaves voice input on.** The Transcription window paused voice input only when Murmur was idle, so a file started while you dictated ran with the hotkey still working, and the two shared the engine.
 - **Finishing a file transcription no longer resets a dictation.** The end of a file put Murmur back to idle even when the "Transcribing" state belonged to a dictation that was still running.
 - **Cancelling a file transcription no longer fails other requests to the engine.** Murmur now sends the engine one request at a time. Cancelling a request that waits only removes it; cancelling the one that runs ends the engine, and the waiting requests continue in a new one. Before, a cancel ended the engine with everything in it.
 - **The model preload is no longer cancelled by the next recording start.** Each recording start cancelled the preload that the one before had started, and a cancel ended the speech engine while it loaded the model.
 - **The Transcription window now tells you when something goes wrong.** Before, most of these sent you back to the start screen without a word. A banner now says what happened and what to do: a file format Murmur can't open, a file it can't read, a file longer than 2 hours, not enough free disk space, a recording that failed to start or stop, a start refused because a dictation is running, a failed transcription, and a recording that reached 2 hours while another file was transcribed. When the failed transcription was of your own recording, the banner has **Try Again**. VoiceOver reads the banner.
 - **Closing the Transcription window no longer loses a running transcription.** Reopened, the window showed "Transcribing" with no progress, its Cancel did nothing, and the result appeared only in the history list. The window now keeps its progress, Cancel, result and banner when you close and reopen it.
-- The recording screen no longer says "Voice input paused". Voice input works while you record; it is paused only while a file is transcribed.
+- The recording screen no longer says "Voice input paused". Voice input works while you record.
 
 ### Changed
-- **A hotkey press during a file transcription now says "Transcribing a file".** Before, the press did nothing you could see. It also no longer asks for the microphone. Voice input comes back when the file is done or cancelled.
-- **Start Transcription during a dictation is refused with a message.** The engine runs one thing at a time; start the file again when the dictation is done.
-- **Starting a file transcription within the Undo window ends that Undo window.**
+- **Dictation works while a file is transcribed.** Murmur now sends a long file to the engine a piece at a time (up to 40 s of audio each), and a dictation goes in between: it waits only for the piece the engine is on. In a test the dictation's text came 1 s after it was asked for; the worst case is about 15 s. The file only gets slower, by the time the dictation takes, and its transcript is the same as before. A dictation made during a file has no live preview: a preview pass every second would go ahead of each piece and stall the file.
+- **Cancelling a file transcription lets the piece the engine is on finish** (a few seconds), so the engine keeps the model for your next dictation. Before, cancelling ended the engine at once.
+- **Start Transcription during a dictation is refused with a message.** The file's first piece would delay the dictation's final text; start the file again when the dictation is done.
+- A build without the engine process (the helper is missing from the app) still pauses voice input during a file transcription. A hotkey press then says "Transcribing a file" at once, and no longer asks for the microphone.
 
 ## [0.5.1] — 2026-10-16
 
