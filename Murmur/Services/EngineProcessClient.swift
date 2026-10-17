@@ -12,6 +12,11 @@ import os
 /// client. Cancelling a waiting request removes it. Cancelling the request
 /// the helper is running ends the helper, since a decode cannot be
 /// interrupted, and the waiting requests continue in a new one.
+///
+/// A long file goes to the helper a piece at a time (`transcribeLong`), and
+/// a dictation's requests go ahead of the file's waiting ones: a dictation
+/// made during a file transcription waits only for the piece the helper is
+/// decoding.
 actor EngineProcessClient: TranscriptionServiceProtocol {
 
     /// How to start the engine process.
@@ -20,16 +25,28 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
         let arguments: [String]
     }
 
+    /// Which waiting request the helper gets next.
+    private enum Priority {
+        /// A dictation: sent before any waiting `.file` request.
+        case dictation
+        /// A piece of a long file.
+        case file
+    }
+
     private struct Request {
         let id: Int
         /// The encoded request, with its newline.
         let line: Data
+        let priority: Priority
         let continuation: CheckedContinuation<EngineReply, Error>
-        let onProgress: ((TranscriptionProgress) -> Void)?
     }
 
     private let launch: Launch
     private let idleSeconds: TimeInterval
+    /// How long a cancelled piece of a file may still run. A piece takes
+    /// seconds; one that has not answered by then is stuck, and the helper
+    /// is ended so that dictation does not wait behind it for good.
+    private let cancelledPieceGrace: TimeInterval
     private let logger = Logger(subsystem: "com.murmur.app", category: "engine-process")
 
     private var helper: RunningHelper?
@@ -45,16 +62,26 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     private var running: Request?
     private var idleStop: IdleTrigger?
     private var lastUse = Date.distantPast
-    /// `unloadModel` came while a request was running or waiting: the helper
-    /// ends when the last of them finishes.
+    /// `unloadModel` came while the client was busy: the helper ends when
+    /// the last request finishes.
     private var stopWhenDone = false
+    /// Long transcriptions under way. Between two of its pieces a long
+    /// transcription has no request in the helper or the queue, and the
+    /// helper must not be ended in that gap.
+    private var activeLongTranscriptions = 0
+
+    /// A request running or waiting, or a long transcription between pieces.
+    private var isBusy: Bool { running != nil || !queue.isEmpty || activeLongTranscriptions > 0 }
 
     // The app does not know whether the helper has the model loaded.
     nonisolated var isModelLoaded: Bool { false }
 
-    init(launch: Launch, idleSeconds: TimeInterval = 300) {
+    nonisolated var yieldsToDictationDuringLongTranscription: Bool { true }
+
+    init(launch: Launch, idleSeconds: TimeInterval = 300, cancelledPieceGrace: TimeInterval = 60) {
         self.launch = launch
         self.idleSeconds = idleSeconds
+        self.cancelledPieceGrace = cancelledPieceGrace
         // A write to a helper that has just exited must be an error, not the
         // signal that ends the app.
         signal(SIGPIPE, SIG_IGN)
@@ -86,30 +113,116 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     // MARK: - TranscriptionServiceProtocol
 
     func preloadModel() async throws {
-        _ = try await perform(.preload, audioURL: nil, language: nil, onProgress: nil)
+        _ = try await perform(.preload, audioURL: nil, language: nil, priority: .dictation)
     }
 
     func transcribe(audioURL: URL, language: String) async throws -> TranscriptionResult {
-        try await result(of: perform(.transcribe, audioURL: audioURL, language: language, onProgress: nil))
+        try await result(of: perform(.transcribe, audioURL: audioURL, language: language, priority: .dictation))
     }
 
+    /// Transcribes a long file a piece at a time. The app converts the file
+    /// to a 16 kHz WAV and cuts it (`LongPlan`), off this actor, so that the
+    /// helper is never busy for more than one piece; then each piece is a
+    /// request of its own, and a dictation's requests go ahead of the next.
+    ///
+    /// Cancelling it lets the piece the helper is decoding finish (seconds),
+    /// rather than end the helper and unload the model the next dictation
+    /// needs; the transcription stops before the next piece.
     func transcribeLong(
         audioURL: URL,
         language: String,
         onProgress: @escaping (TranscriptionProgress) -> Void
     ) async throws -> TranscriptionResult {
-        try await result(of: perform(.transcribeLong, audioURL: audioURL, language: language, onProgress: onProgress))
+        let start = Date()
+        activeLongTranscriptions += 1
+        defer {
+            activeLongTranscriptions -= 1
+            // The idle countdown may have run out while the file was being
+            // prepared, and found the client busy: start it again.
+            if helper != nil { noteUse() }
+            endHelperIfUnloadIsDue()
+        }
+        // The model first, so a missing model is reported before minutes of
+        // conversion.
+        _ = try await perform(.preload, audioURL: nil, language: nil, priority: .file)
+        let prepared = try await Self.prepare(audioURL)
+        defer { prepared.discard() }
+
+        let pieces = prepared.plan.pieces
+        var segments = Qwen3TranscriptionService.SegmentBuilder(sampleRate: LongAudioSource.sampleRate)
+        for (done, piece) in pieces.enumerated() {
+            try Task.checkCancellation()
+            let reply = try await perform(
+                .transcribePiece, audioURL: prepared.wav, language: language, range: piece.range, priority: .file
+            )
+            segments.add(reply.text ?? "", piece: piece.range, index: piece.index, of: piece.count, in: piece.span)
+            onProgress(TranscriptionProgress(
+                currentChunk: done + 1,
+                totalChunks: pieces.count,
+                partialText: Qwen3TranscriptionService.text(of: segments.segments)
+            ))
+        }
+        // Cancelled during the last piece: still cancelled.
+        try Task.checkCancellation()
+
+        let text = Qwen3TranscriptionService.text(of: segments.segments)
+        return TranscriptionResult(
+            text: text,
+            language: Qwen3TranscriptionService.detectLanguage(text),
+            durationMs: Int(Date().timeIntervalSince(start) * 1000),
+            segments: segments.segments
+        )
     }
 
-    /// Releases the model by ending the helper. The running request and the
-    /// waiting ones finish first: the Mac going to sleep must not throw away
-    /// an hour of file transcription.
-    func unloadModel() async {
-        if running == nil && queue.isEmpty {
-            endHelper()
-        } else {
-            stopWhenDone = true
+    /// A long file made ready for the helper: a WAV it can read by path, and
+    /// where to cut it.
+    private struct PreparedFile: Sendable {
+        let wav: URL
+        let isTemporary: Bool
+        let plan: LongPlan
+
+        /// Deletes the converted copy, which holds the user's audio.
+        func discard() {
+            if isTemporary { try? FileManager.default.removeItem(at: wav) }
         }
+    }
+
+    /// Converts and cuts `url` in a task of its own: on the actor the
+    /// conversion of a long file would hold up every dictation request.
+    private nonisolated static func prepare(_ url: URL) async throws -> PreparedFile {
+        let work = Task.detached(priority: .userInitiated) { () throws -> PreparedFile in
+            let (wav, isTemporary) = try LongAudioSource.preparedWAV(for: url)
+            do {
+                let plan = try LongPlan(source: try LongAudioSource(url: wav))
+                try Task.checkCancellation()
+                return PreparedFile(wav: wav, isTemporary: isTemporary, plan: plan)
+            } catch {
+                if isTemporary { try? FileManager.default.removeItem(at: wav) }
+                throw error
+            }
+        }
+        return try await withTaskCancellationHandler {
+            try await work.value
+        } onCancel: {
+            work.cancel()
+        }
+    }
+
+    /// Releases the model by ending the helper. Work under way finishes
+    /// first, a long transcription to its last piece: the Mac going to sleep
+    /// must not throw away an hour of file transcription.
+    func unloadModel() async {
+        if isBusy {
+            stopWhenDone = true
+        } else {
+            endHelper()
+        }
+    }
+
+    private func endHelperIfUnloadIsDue() {
+        guard stopWhenDone, !isBusy else { return }
+        logger.info("Speech engine process ended after the work under way")
+        endHelper()
     }
 
     /// Ends the helper at once, failing the running request and the waiting ones.
@@ -143,7 +256,8 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
         _ operation: EngineRequest.Operation,
         audioURL: URL?,
         language: String?,
-        onProgress: ((TranscriptionProgress) -> Void)?
+        range: Range<Int>? = nil,
+        priority: Priority
     ) async throws -> EngineReply {
         // A task cancelled before it got here is never sent. Its cancellation
         // handler would only run once the request had reached the helper, and
@@ -154,11 +268,12 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
         var request = EngineRequest(id: id, operation: operation)
         request.path = audioURL?.path
         request.language = language
+        request.range = range
         let line = try EngineWire.line(request)
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                queue.append(Request(id: id, line: line, continuation: continuation, onProgress: onProgress))
+                queue.append(Request(id: id, line: line, priority: priority, continuation: continuation))
                 pump()
             }
         } onCancel: {
@@ -180,7 +295,8 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
             failAll(error)
             return
         }
-        let next = queue.removeFirst()
+        // The oldest dictation request, else the oldest of the rest.
+        let next = queue.remove(at: queue.firstIndex { $0.priority == .dictation } ?? 0)
         running = next
         do {
             try helper?.send(next.line)
@@ -206,8 +322,34 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
         }
         // Not waiting and not running: it has already finished.
         guard let current = running, current.id == id else { return }
+        // A piece of a file takes seconds. Its reply ends it as usual, and
+        // the long transcription stops before the next piece; ending the
+        // helper would only unload the model. A piece still running after
+        // the grace time is stuck, and is ended like any other request.
+        if current.priority == .file {
+            let grace = cancelledPieceGrace
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(grace))
+                await self?.endStuckRequest(id)
+            }
+            return
+        }
+        endRunning(throwing: CancellationError())
+    }
+
+    /// Ends the helper under a cancelled piece that never answered.
+    private func endStuckRequest(_ id: Int) {
+        guard running?.id == id else { return }
+        logger.warning("Speech engine process ended: a cancelled piece did not finish")
+        endRunning(throwing: CancellationError())
+    }
+
+    /// Fails the running request and ends the helper; the waiting requests
+    /// go on in a new one.
+    private func endRunning(throwing error: Error) {
+        guard let current = running else { return }
         running = nil
-        current.continuation.resume(throwing: CancellationError())
+        current.continuation.resume(throwing: error)
         restartForTheQueue()
     }
 
@@ -216,8 +358,8 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
         guard let current = running else { return }
         running = nil
         current.continuation.resume(with: outcome)
-        if stopWhenDone, queue.isEmpty {
-            logger.info("Speech engine process ended after the requests under way")
+        if stopWhenDone, !isBusy {
+            logger.info("Speech engine process ended after the work under way")
             endHelper()
         } else {
             noteUse()
@@ -248,13 +390,8 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
         guard generation == self.generation,
               let reply = try? EngineWire.decode(EngineReply.self, from: line) else { return }
         // A reply to anything but the running request is stale or unknown.
-        guard let current = running, reply.id == current.id else { return }
+        guard running?.id == reply.id else { return }
         switch reply.kind {
-        case .progress:
-            guard let chunk = reply.currentChunk, let total = reply.totalChunks else { return }
-            current.onProgress?(TranscriptionProgress(
-                currentChunk: chunk, totalChunks: total, partialText: reply.partialText ?? ""
-            ))
         case .ready, .result:
             finish(.success(reply))
         case .failure:
@@ -282,7 +419,7 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     private func restartForTheQueue() {
         let keepStopping = stopWhenDone
         endHelper()
-        stopWhenDone = keepStopping && !queue.isEmpty
+        stopWhenDone = keepStopping && isBusy
         pump()
     }
 
@@ -315,8 +452,7 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     }
 
     private func stopIfIdle() {
-        guard helper != nil, running == nil, queue.isEmpty,
-              Date().timeIntervalSince(lastUse) >= idleSeconds else { return }
+        guard helper != nil, !isBusy, Date().timeIntervalSince(lastUse) >= idleSeconds else { return }
         logger.info("Speech engine process ended after \(Int(self.idleSeconds)) s without use")
         endHelper()
     }

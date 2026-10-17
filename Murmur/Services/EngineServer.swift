@@ -31,15 +31,14 @@ struct EngineServer {
                     audioURL: try audioURL(of: request), language: request.language ?? ""
                 )
                 send(.result(id: request.id, result))
-            case .transcribeLong:
-                let id = request.id
-                let write = self.write
-                let result = try await service.transcribeLong(
-                    audioURL: try audioURL(of: request), language: request.language ?? ""
-                ) { progress in
-                    if let line = try? EngineWire.line(EngineReply.progress(id: id, progress)) { write(line) }
+            case .transcribePiece:
+                guard let range = request.range else {
+                    throw MurmurError.transcriptionFailed("The request names no piece")
                 }
-                send(.result(id: request.id, result))
+                let text = try await service.transcribePiece(
+                    audioURL: try audioURL(of: request), range: range, language: request.language ?? ""
+                )
+                send(.pieceText(id: request.id, text))
             }
         } catch {
             send(.failure(id: request.id, error))

@@ -8,24 +8,26 @@ struct EngineRequest: Codable, Equatable, Sendable {
     enum Operation: String, Codable, Sendable {
         case preload
         case transcribe
-        case transcribeLong
+        /// One piece of a long recording. The app cuts a long file and sends
+        /// it a piece at a time, so a dictation can go in between.
+        case transcribePiece
     }
 
     /// Chosen by the app; every reply to this request carries it.
     let id: Int
     let operation: Operation
-    /// The audio file, for the two transcriptions.
+    /// The audio file, for the transcriptions. For a piece, a 16 kHz mono WAV.
     var path: String?
-    /// The language hint, for the two transcriptions.
+    /// The language hint, for the transcriptions.
     var language: String?
+    /// The samples to decode, for a piece. On the wire: `[lower, upper]`.
+    var range: Range<Int>?
 }
 
 struct EngineReply: Codable, Equatable, Sendable {
     enum Kind: String, Codable, Sendable {
         /// The model is loaded. Ends a `preload`.
         case ready
-        /// One more piece of a long transcription is done. Does not end it.
-        case progress
         /// The transcript. Ends a transcription.
         case result
         /// The request failed. Ends it.
@@ -44,12 +46,6 @@ struct EngineReply: Codable, Equatable, Sendable {
     var text: String?
     var language: String?
     var durationMs: Int?
-    var segments: [TranscriptSegment]?
-
-    // .progress
-    var currentChunk: Int?
-    var totalChunks: Int?
-    var partialText: String?
 
     // .failure
     var failure: Failure?
@@ -62,15 +58,13 @@ extension EngineReply {
         reply.text = result.text
         reply.language = result.language.rawValue
         reply.durationMs = result.durationMs
-        reply.segments = result.segments.isEmpty ? nil : result.segments
         return reply
     }
 
-    static func progress(id: Int, _ progress: TranscriptionProgress) -> EngineReply {
-        var reply = EngineReply(id: id, kind: .progress)
-        reply.currentChunk = progress.currentChunk
-        reply.totalChunks = progress.totalChunks
-        reply.partialText = progress.partialText
+    /// The transcript of one piece of a long recording.
+    static func pieceText(id: Int, _ text: String) -> EngineReply {
+        var reply = EngineReply(id: id, kind: .result)
+        reply.text = text
         return reply
     }
 
@@ -103,8 +97,7 @@ extension EngineReply {
         return TranscriptionResult(
             text: text,
             language: language.flatMap(DetectedLanguage.init(rawValue:)) ?? .unknown,
-            durationMs: durationMs ?? 0,
-            segments: segments ?? []
+            durationMs: durationMs ?? 0
         )
     }
 }

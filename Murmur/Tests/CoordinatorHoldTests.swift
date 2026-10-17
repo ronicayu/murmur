@@ -44,6 +44,25 @@ private final class GatedPreloadEngine: TranscriptionServiceProtocol, @unchecked
     }
 }
 
+/// An engine that fits a dictation in between the pieces of a long
+/// transcription, as the engine process does.
+private final class YieldingEngine: TranscriptionServiceProtocol, @unchecked Sendable {
+    var isModelLoaded: Bool { true }
+    var yieldsToDictationDuringLongTranscription: Bool { true }
+    func preloadModel() async throws {}
+    func unloadModel() async {}
+    func transcribe(audioURL: URL, language: String) async throws -> TranscriptionResult {
+        TranscriptionResult(text: "dictated", language: .english, durationMs: 1)
+    }
+    func transcribeLong(
+        audioURL: URL,
+        language: String,
+        onProgress: @escaping (TranscriptionProgress) -> Void
+    ) async throws -> TranscriptionResult {
+        TranscriptionResult(text: "file", language: .english, durationMs: 1)
+    }
+}
+
 /// A shown pill that says voice input is paused for a file. `AppState`'s ==
 /// treats all errors as equal, so the case is matched by hand.
 private func isVoiceInputPaused(_ call: SpyPillController.ShowCall) -> Bool {
@@ -238,6 +257,75 @@ final class CoordinatorHoldTests: XCTestCase {
 
         XCTAssertEqual(pill.hideCalls, [0])
         XCTAssertEqual(coordinator.state, .transcribing)
+        coordinator.endWindowTranscription()
+        coordinator.stop()
+    }
+
+    // MARK: With an engine that gives way between pieces
+
+    /// The file takes the hold but not the state: voice input stays on.
+    func test_yieldingEngine_fileLeavesTheStateAndVoiceInputOn() async {
+        let pill = SpyPillController()
+        let coordinator = makeTestCoordinator(transcription: YieldingEngine(), pill: pill)
+        let preflights = LockedCounter()
+        coordinator.startPreflightOverride = {
+            preflights.increment()
+            // Ends the press here, before the microphone.
+            return .microphoneBusy
+        }
+
+        XCTAssertTrue(coordinator.beginWindowTranscription())
+        XCTAssertTrue(coordinator.isFileTranscriptionActive)
+        XCTAssertEqual(coordinator.state, .idle, "The menu bar shows dictation states, not the file")
+
+        coordinator.hotkey.handleKeyDown()
+        let reachedPreflight = await pollUntil { preflights.value == 1 }
+        XCTAssertTrue(reachedPreflight, "A press during the file must go on to start a recording")
+        XCTAssertFalse(pill.showCalls.contains(where: isVoiceInputPaused), "Nothing is refused")
+
+        coordinator.endWindowTranscription()
+        XCTAssertFalse(coordinator.isFileTranscriptionActive)
+        coordinator.stop()
+    }
+
+    /// The end of the file leaves a dictation that is being transcribed alone.
+    func test_yieldingEngine_endWindowTranscription_leavesADictationsTranscribing() {
+        let coordinator = makeTestCoordinator(transcription: YieldingEngine())
+        XCTAssertTrue(coordinator.beginWindowTranscription())
+        coordinator.forceStateForTesting(.transcribing)
+
+        coordinator.endWindowTranscription()
+
+        XCTAssertEqual(coordinator.state, .transcribing)
+        XCTAssertFalse(coordinator.isFileTranscriptionActive)
+        coordinator.stop()
+    }
+
+    /// A file still waits for a dictation under way: its first piece would
+    /// slow the dictation's final pass.
+    func test_yieldingEngine_fileDoesNotStartDuringADictation() {
+        let coordinator = makeTestCoordinator(transcription: YieldingEngine())
+        coordinator.forceStateForTesting(.recording)
+
+        XCTAssertFalse(coordinator.beginWindowTranscription())
+        XCTAssertFalse(coordinator.isFileTranscriptionActive)
+        coordinator.stop()
+    }
+
+    /// No state is left, so nothing of it is cleaned up: an error pill stays
+    /// for its own recovery.
+    func test_yieldingEngine_fileStartLeavesAnErrorAsItIs() {
+        let pill = SpyPillController()
+        let coordinator = makeTestCoordinator(transcription: YieldingEngine(), pill: pill)
+        coordinator.forceStateForTesting(.error(.microphoneBusy))
+        pill.reset()
+
+        XCTAssertTrue(coordinator.beginWindowTranscription())
+
+        XCTAssertEqual(pill.hideCalls, [])
+        guard case .error = coordinator.state else {
+            return XCTFail("The error must stay, but the state is \(coordinator.state)")
+        }
         coordinator.endWindowTranscription()
         coordinator.stop()
     }

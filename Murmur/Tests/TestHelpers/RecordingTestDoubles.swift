@@ -35,8 +35,17 @@ final class SpyTranscriptionService: TranscriptionServiceProtocol, @unchecked Se
     /// When true, transcribeLong suspends until cancelled — used to test cancel paths.
     nonisolated(unsafe) var shouldBlock: Bool = false
 
+    /// The pieces asked for with `transcribePiece`, in order.
+    nonisolated(unsafe) var piecesAsked: [Range<Int>] = []
+
     func preloadModel() async throws {}
     func unloadModel() async {}
+
+    func transcribePiece(audioURL: URL, range: Range<Int>, language: String) async throws -> String {
+        if let error = stubbedError { throw error }
+        piecesAsked.append(range)
+        return "piece \(range.lowerBound)"
+    }
 
     func transcribe(audioURL: URL, language: String) async throws -> TranscriptionResult {
         if shouldBlock {

@@ -109,24 +109,16 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
         // Stretches of speech first (split at pauses), then each stretch into
         // pieces short enough for one decode. Every piece is a segment with
         // its own time stamp.
-        let loud = try Self.loudFrames(of: source)
-        var spans: [(span: SpeechSpan, pieces: [Range<Int>])] = []
-        for span in Self.speechSpans(loud: loud, sampleCount: source.count, sampleRate: sampleRate) {
-            try Task.checkCancellation()
-            spans.append((span, try Self.segmentRanges(of: span.range, in: source)))
-        }
-        let totalPieces = spans.reduce(0) { $0 + $1.pieces.count }
+        let plan = try LongPlan(source: source)
 
         var segments = SegmentBuilder(sampleRate: sampleRate)
-        var done = 0
-        for (span, pieces) in spans {
-            for (index, range) in pieces.enumerated() {
-                try Task.checkCancellation()
-                let text = decodeWithRetry(try source.read(range), sampleRate: sampleRate, language: language, recognizer: recognizer)
-                segments.add(text, piece: range, index: index, of: pieces.count, in: span)
-                done += 1
-                onProgress(TranscriptionProgress(currentChunk: done, totalChunks: totalPieces, partialText: Self.text(of: segments.segments)))
-            }
+        for (done, piece) in plan.pieces.enumerated() {
+            try Task.checkCancellation()
+            let text = decodeWithRetry(try source.read(piece.range), sampleRate: sampleRate, language: language, recognizer: recognizer)
+            segments.add(text, piece: piece.range, index: piece.index, of: piece.count, in: piece.span)
+            onProgress(TranscriptionProgress(
+                currentChunk: done + 1, totalChunks: plan.pieces.count, partialText: Self.text(of: segments.segments)
+            ))
         }
 
         let fullText = Self.text(of: segments.segments)
@@ -136,6 +128,19 @@ actor Qwen3TranscriptionService: TranscriptionServiceProtocol {
             language: Self.detectLanguage(fullText),
             durationMs: elapsedMs,
             segments: segments.segments
+        )
+    }
+
+    /// Decodes one piece of a long recording: `range` of `audioURL`, which
+    /// the engine-process client has already made a 16 kHz mono WAV, so
+    /// opening it reads it in place. The client sends a long file one piece
+    /// at a time so that a dictation can be decoded between two pieces.
+    func transcribePiece(audioURL: URL, range: Range<Int>, language: String) async throws -> String {
+        defer { noteUse() }
+        let recognizer = try loadedRecognizer()
+        let source = try LongAudioSource(url: audioURL)
+        return decodeWithRetry(
+            try source.read(range), sampleRate: LongAudioSource.sampleRate, language: language, recognizer: recognizer
         )
     }
 

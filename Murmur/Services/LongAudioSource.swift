@@ -21,16 +21,10 @@ final class LongAudioSource {
 
     init(url: URL) throws {
         let original = try AVAudioFile(forReading: url)
-        let description = original.fileFormat.streamDescription.pointee
-        let readableInPlace = description.mFormatID == kAudioFormatLinearPCM
-            && original.processingFormat.sampleRate == Double(Self.sampleRate)
-            && original.processingFormat.channelCount == 1
-            && original.processingFormat.commonFormat == .pcmFormatFloat32
-        if readableInPlace {
+        if Self.isReadableInPlace(original) {
             file = original
         } else {
-            let converted = FileManager.default.temporaryDirectory
-                .appendingPathComponent("murmur_long_\(UUID().uuidString).wav")
+            let converted = Self.temporaryWAVURL()
             // The copy holds the user's audio. Deleted here, it cannot be
             // left behind when the engine process is ended mid-transcription.
             defer { try? FileManager.default.removeItem(at: converted) }
@@ -41,6 +35,36 @@ final class LongAudioSource {
         if count == 0 {
             throw MurmurError.transcriptionFailed("No audio data")
         }
+    }
+
+    /// A 16 kHz mono Float32 WAV of `url` that another process can open by
+    /// path: `url` itself when it already is one, otherwise a converted copy
+    /// in the temporary directory. The caller deletes a copy
+    /// (`isTemporary`) when it is done; a crash leaves it for
+    /// `TemporaryAudio.removeLeftovers` at the next launch.
+    static func preparedWAV(for url: URL) throws -> (url: URL, isTemporary: Bool) {
+        let original = try AVAudioFile(forReading: url)
+        if isReadableInPlace(original) { return (url, false) }
+        let converted = temporaryWAVURL()
+        do {
+            try convert(original, to: converted)
+        } catch {
+            try? FileManager.default.removeItem(at: converted)
+            throw error
+        }
+        return (converted, true)
+    }
+
+    private static func isReadableInPlace(_ file: AVAudioFile) -> Bool {
+        file.fileFormat.streamDescription.pointee.mFormatID == kAudioFormatLinearPCM
+            && file.processingFormat.sampleRate == Double(sampleRate)
+            && file.processingFormat.channelCount == 1
+            && file.processingFormat.commonFormat == .pcmFormatFloat32
+    }
+
+    private static func temporaryWAVURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(TemporaryAudio.prefix)long_\(UUID().uuidString).wav")
     }
 
     /// The samples in `range`, clamped to the recording.
@@ -84,6 +108,7 @@ final class LongAudioSource {
             let block = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: 16_384)!
             var copied: AVAudioFramePosition = 0
             while copied < source.length {
+                try Task.checkCancellation()
                 do {
                     try source.read(into: block)
                 } catch {
@@ -116,6 +141,7 @@ final class LongAudioSource {
         let chunk = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096)!
         var status: AVAudioConverterOutputStatus
         repeat {
+            try Task.checkCancellation()
             var convertError: NSError?
             chunk.frameLength = 0
             status = converter.convert(to: chunk, error: &convertError, withInputFrom: inputBlock)
