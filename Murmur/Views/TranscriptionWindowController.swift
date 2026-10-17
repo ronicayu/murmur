@@ -23,6 +23,13 @@ final class TranscriptionWindowController: NSObject, NSWindowDelegate {
     // Dependencies passed through to the SwiftUI view
     private let historyService: TranscriptionHistoryService
     private let coordinator: AppCoordinator
+    /// One model for the app's lifetime: a running transcription, its
+    /// progress, its Cancel, its result and any problem survive the window
+    /// being closed and opened again.
+    private lazy var windowModel = TranscriptionWindowModel(
+        historyService: historyService,
+        coordinator: coordinator
+    )
 
     init(historyService: TranscriptionHistoryService, coordinator: AppCoordinator) {
         self.historyService = historyService
@@ -56,7 +63,8 @@ final class TranscriptionWindowController: NSObject, NSWindowDelegate {
 
         let contentView = TranscriptionWindowView(
             historyService: historyService,
-            coordinator: coordinator
+            coordinator: coordinator,
+            windowModel: windowModel
         )
 
         let win = NSWindow(

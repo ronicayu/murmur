@@ -277,49 +277,52 @@ final class CoordinatorHotkeySyncTests: XCTestCase {
         coordinator.stop()
     }
 
-    /// A press during a file transcription queues a recording. Ending the file
-    /// transcription must drop it, or the microphone opens by itself after
-    /// the next, unrelated dictation.
-    func test_endWindowTranscription_dropsTheQueuedRecording() async {
-        let coordinator = makeTestCoordinator(transcription: StubDictationEngine(text: ""), pill: SpyPillController())
+    /// A press during a file transcription is refused, not queued: a queued
+    /// recording would open the microphone by itself later. The press after
+    /// the file is a start again.
+    func test_pressDuringFileTranscription_isRefused_notQueued() async {
+        let pill = SpyPillController()
+        let coordinator = makeTestCoordinator(transcription: StubDictationEngine(text: ""), pill: pill)
         let attempts = LockedCounter()
         coordinator.startPreflightOverride = {
             attempts.increment()
-            // First press: allowed, and queued behind the file transcription.
-            // Later presses: refused, so the test never opens the microphone.
-            return attempts.value == 1 ? nil : .microphoneBusy
+            // Refused, so the test never opens the microphone.
+            return .microphoneBusy
         }
 
-        coordinator.beginWindowTranscription()
+        XCTAssertTrue(coordinator.beginWindowTranscription())
         coordinator.hotkey.handleKeyDown()
-        let queued = await pollUntil { coordinator.pendingRecording }
-        XCTAssertTrue(queued, "A press during a file transcription queues a recording")
+        let refused = await pollUntil { !pill.showCalls.isEmpty }
+        XCTAssertTrue(refused, "The press must be answered at once")
+        XCTAssertFalse(coordinator.pendingRecording, "A press during a file transcription must not be queued")
+        XCTAssertEqual(attempts.value, 0, "A refused press must not reach the start pre-flight")
 
         coordinator.endWindowTranscription()
-        XCTAssertFalse(coordinator.pendingRecording)
         XCTAssertEqual(coordinator.state, .idle)
 
         coordinator.hotkey.handleKeyDown()
-        let startedAgain = await pollUntil { attempts.value == 2 }
+        let startedAgain = await pollUntil { attempts.value == 1 }
         XCTAssertTrue(startedAgain, "The hotkey must be back in step: the next press is a start")
 
         coordinator.stop()
     }
 
+    /// A press while a dictation is transcribed queues a recording; the next
+    /// press takes it back.
     func test_stopEvent_takesBackTheQueuedRecording() async {
         let coordinator = makeTestCoordinator(transcription: StubDictationEngine(text: ""), pill: SpyPillController())
         coordinator.startPreflightOverride = { nil }
 
-        coordinator.beginWindowTranscription()
+        coordinator.forceStateForTesting(.transcribing)
         coordinator.hotkey.emit(.startRecording)
         let queued = await pollUntil { coordinator.pendingRecording }
-        XCTAssertTrue(queued)
+        XCTAssertTrue(queued, "A press while a dictation is transcribed queues a recording")
 
         coordinator.hotkey.emit(.stopRecording)
         let takenBack = await pollUntil { !coordinator.pendingRecording }
         XCTAssertTrue(takenBack, "Releasing or pressing the hotkey again must cancel the queued recording")
 
-        coordinator.endWindowTranscription()
+        coordinator.forceStateForTesting(.idle)
         coordinator.stop()
     }
 }

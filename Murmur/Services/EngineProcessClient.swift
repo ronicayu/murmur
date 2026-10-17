@@ -8,8 +8,10 @@ import os
 /// process the app can give all of it back: the helper is started at the
 /// first request and ended after `idleSeconds` without one.
 ///
-/// Ending the helper is also how a request is cancelled, so a cancelled or
-/// timed-out transcription stops using the CPU at once.
+/// The client sends the helper one request at a time; the rest wait in the
+/// client. Cancelling a waiting request removes it. Cancelling the request
+/// the helper is running ends the helper, since a decode cannot be
+/// interrupted, and the waiting requests continue in a new one.
 actor EngineProcessClient: TranscriptionServiceProtocol {
 
     /// How to start the engine process.
@@ -18,7 +20,10 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
         let arguments: [String]
     }
 
-    private struct Pending {
+    private struct Request {
+        let id: Int
+        /// The encoded request, with its newline.
+        let line: Data
         let continuation: CheckedContinuation<EngineReply, Error>
         let onProgress: ((TranscriptionProgress) -> Void)?
     }
@@ -32,11 +37,16 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     /// earlier process are not taken for the current one's.
     private var generation = 0
     private var nextID = 1
-    private var pending: [Int: Pending] = [:]
+    /// Requests not yet sent to the helper, oldest first.
+    private var queue: [Request] = []
+    /// The one request the helper has. Only `pump` sends, and only when this
+    /// is nil, so the helper never holds a second request behind a decode
+    /// that a cancel would have to end.
+    private var running: Request?
     private var idleStop: IdleTrigger?
     private var lastUse = Date.distantPast
-    /// `unloadModel` came while requests were under way: the helper ends
-    /// when the last of them finishes.
+    /// `unloadModel` came while a request was running or waiting: the helper
+    /// ends when the last of them finishes.
     private var stopWhenDone = false
 
     // The app does not know whether the helper has the model loaded.
@@ -91,24 +101,34 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
         try await result(of: perform(.transcribeLong, audioURL: audioURL, language: language, onProgress: onProgress))
     }
 
-    /// Releases the model by ending the helper. Requests under way finish
-    /// first: the Mac going to sleep must not throw away an hour of file
-    /// transcription.
+    /// Releases the model by ending the helper. The running request and the
+    /// waiting ones finish first: the Mac going to sleep must not throw away
+    /// an hour of file transcription.
     func unloadModel() async {
-        if pending.isEmpty {
-            stop(failingPendingWith: MurmurError.transcriptionFailed("The speech engine was stopped"))
+        if running == nil && queue.isEmpty {
+            endHelper()
         } else {
             stopWhenDone = true
         }
     }
 
-    /// Ends the helper at once, failing the requests under way.
+    /// Ends the helper at once, failing the running request and the waiting ones.
     func killProcess() async {
-        stop(failingPendingWith: MurmurError.transcriptionFailed("The speech engine was stopped"))
+        let error = MurmurError.transcriptionFailed("The speech engine was stopped")
+        if let current = running {
+            running = nil
+            current.continuation.resume(throwing: error)
+        }
+        failAll(error)
+        endHelper()
     }
 
     /// True while the helper process is running. For tests and diagnostics.
     var isRunning: Bool { helper != nil }
+
+    /// The requests waiting for the helper to finish the running one. For
+    /// tests and diagnostics.
+    var queuedRequestCount: Int { queue.count }
 
     // MARK: - Requests
 
@@ -125,46 +145,83 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
         language: String?,
         onProgress: ((TranscriptionProgress) -> Void)?
     ) async throws -> EngineReply {
+        // A task cancelled before it got here is never sent. Its cancellation
+        // handler would only run once the request had reached the helper, and
+        // would then end the helper for nothing.
+        try Task.checkCancellation()
         let id = nextID
         nextID += 1
         var request = EngineRequest(id: id, operation: operation)
         request.path = audioURL?.path
         request.language = language
+        let line = try EngineWire.line(request)
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                do {
-                    try startIfNeeded()
-                    pending[id] = Pending(continuation: continuation, onProgress: onProgress)
-                    try helper?.send(try EngineWire.line(request))
-                } catch {
-                    pending[id] = nil
-                    continuation.resume(throwing: error)
-                    // The helper is of no use if it cannot be written to.
-                    stop(failingPendingWith: MurmurError.transcriptionFailed("The speech engine could not be reached"))
-                }
+                queue.append(Request(id: id, line: line, continuation: continuation, onProgress: onProgress))
+                pump()
             }
         } onCancel: {
             Task { await self.cancel(id) }
         }
     }
 
-    /// The helper cannot abandon a decode, so a cancelled request ends the
-    /// helper. Other requests waiting in it fail; the next one starts it again.
-    private func cancel(_ id: Int) {
-        guard let cancelled = pending.removeValue(forKey: id) else { return }
-        cancelled.continuation.resume(throwing: CancellationError())
-        stop(failingPendingWith: MurmurError.transcriptionFailed("The speech engine was stopped"))
+    /// Sends the next waiting request when the helper has none, starting the
+    /// helper if needed. The only place that writes to the helper.
+    private func pump() {
+        guard running == nil, !queue.isEmpty else { return }
+        do {
+            try startIfNeeded()
+        } catch {
+            // Nothing was sent, and there is no helper to send to. With no
+            // helper and nothing waiting, a pending `unloadModel` is done:
+            // left set, it would end the next helper after its first reply.
+            stopWhenDone = false
+            failAll(error)
+            return
+        }
+        let next = queue.removeFirst()
+        running = next
+        do {
+            try helper?.send(next.line)
+        } catch {
+            // The helper exited, most likely between its last reply and this
+            // write. That is a crash like any other: only this request fails,
+            // and the waiting ones go on in a new helper.
+            logger.warning("Speech engine process could not be written to: \(String(describing: error), privacy: .public)")
+            running = nil
+            next.continuation.resume(throwing: MurmurError.transcriptionFailed("The speech engine could not be reached"))
+            restartForTheQueue()
+        }
     }
 
-    private func finish(_ id: Int, with outcome: Result<EngineReply, Error>) {
-        guard let request = pending.removeValue(forKey: id) else { return }
-        request.continuation.resume(with: outcome)
-        if stopWhenDone, pending.isEmpty {
+    /// A waiting request is only taken out of the queue; the helper does not
+    /// know of it. The helper cannot abandon a decode, so cancelling the
+    /// running request ends the helper, and the waiting requests go on in a
+    /// new one.
+    private func cancel(_ id: Int) {
+        if let index = queue.firstIndex(where: { $0.id == id }) {
+            queue.remove(at: index).continuation.resume(throwing: CancellationError())
+            return
+        }
+        // Not waiting and not running: it has already finished.
+        guard let current = running, current.id == id else { return }
+        running = nil
+        current.continuation.resume(throwing: CancellationError())
+        restartForTheQueue()
+    }
+
+    /// Ends the running request, then sends the next one.
+    private func finish(_ outcome: Result<EngineReply, Error>) {
+        guard let current = running else { return }
+        running = nil
+        current.continuation.resume(with: outcome)
+        if stopWhenDone, queue.isEmpty {
             logger.info("Speech engine process ended after the requests under way")
-            stop(failingPendingWith: MurmurError.transcriptionFailed("The speech engine was stopped"))
+            endHelper()
         } else {
             noteUse()
+            pump()
         }
     }
 
@@ -190,34 +247,59 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     private func receive(_ line: String, generation: Int) {
         guard generation == self.generation,
               let reply = try? EngineWire.decode(EngineReply.self, from: line) else { return }
+        // A reply to anything but the running request is stale or unknown.
+        guard let current = running, reply.id == current.id else { return }
         switch reply.kind {
         case .progress:
-            guard let current = reply.currentChunk, let total = reply.totalChunks else { return }
-            pending[reply.id]?.onProgress?(TranscriptionProgress(
-                currentChunk: current, totalChunks: total, partialText: reply.partialText ?? ""
+            guard let chunk = reply.currentChunk, let total = reply.totalChunks else { return }
+            current.onProgress?(TranscriptionProgress(
+                currentChunk: chunk, totalChunks: total, partialText: reply.partialText ?? ""
             ))
         case .ready, .result:
-            finish(reply.id, with: .success(reply))
+            finish(.success(reply))
         case .failure:
-            finish(reply.id, with: .failure(reply.error))
+            finish(.failure(reply.error))
         }
     }
 
-    /// The helper closed its output: it exited or crashed.
+    /// The helper closed its output: it exited or crashed. Only the running
+    /// request fails; the waiting ones go on in a new helper. Each of them
+    /// gets one attempt per crash, so a helper that always crashes empties
+    /// the queue instead of starting again and again.
     private func outputEnded(generation: Int) {
         guard generation == self.generation else { return }
         logger.warning("Speech engine process ended by itself")
-        stop(failingPendingWith: MurmurError.transcriptionFailed("The speech engine stopped unexpectedly"))
+        if let current = running {
+            running = nil
+            current.continuation.resume(throwing: MurmurError.transcriptionFailed("The speech engine stopped unexpectedly"))
+        }
+        restartForTheQueue()
     }
 
-    private func stop(failingPendingWith error: Error) {
+    /// Ends the helper after its running request went away, and sends the
+    /// waiting requests to a new one. A pending `unloadModel` still applies
+    /// to them.
+    private func restartForTheQueue() {
+        let keepStopping = stopWhenDone
+        endHelper()
+        stopWhenDone = keepStopping && !queue.isEmpty
+        pump()
+    }
+
+    /// Ends the process. Leaves the running request and the queue alone.
+    private func endHelper() {
         generation += 1
         stopWhenDone = false
         idleStop?.cancel()
         helper = nil   // ends the process
-        let waiting = pending
-        pending = [:]
-        for request in waiting.values { request.continuation.resume(throwing: error) }
+    }
+
+    /// Fails every waiting request. For when no helper can be had at all:
+    /// `killProcess`, and a helper that cannot be started.
+    private func failAll(_ error: Error) {
+        let waiting = queue
+        queue = []
+        for request in waiting { request.continuation.resume(throwing: error) }
     }
 
     // MARK: - Idle
@@ -233,9 +315,10 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
     }
 
     private func stopIfIdle() {
-        guard helper != nil, pending.isEmpty, Date().timeIntervalSince(lastUse) >= idleSeconds else { return }
+        guard helper != nil, running == nil, queue.isEmpty,
+              Date().timeIntervalSince(lastUse) >= idleSeconds else { return }
         logger.info("Speech engine process ended after \(Int(self.idleSeconds)) s without use")
-        stop(failingPendingWith: MurmurError.transcriptionFailed("The speech engine was stopped"))
+        endHelper()
     }
 }
 

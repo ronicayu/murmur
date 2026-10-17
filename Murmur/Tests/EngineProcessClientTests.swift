@@ -19,12 +19,17 @@ final class EngineProcessClientTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    /// A client whose helper is `/bin/sh` running `script`. The script reads
-    /// request lines from standard input; `id` extracts a request's id.
-    private func makeClient(_ script: String, idleSeconds: TimeInterval = 300) -> EngineProcessClient {
+    /// A client whose helper is `/bin/sh` (or `executable`, a link to it)
+    /// running `script`. The script reads request lines from standard input;
+    /// `id` extracts a request's id.
+    private func makeClient(
+        _ script: String,
+        idleSeconds: TimeInterval = 300,
+        executable: URL = URL(fileURLWithPath: "/bin/sh")
+    ) -> EngineProcessClient {
         let prelude = #"id() { printf '%s' "$1" | sed -E 's/.*"id":([0-9]+).*/\1/'; }"# + "\n"
         return EngineProcessClient(
-            launch: .init(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", prelude + script]),
+            launch: .init(executable: executable, arguments: ["-c", prelude + script]),
             idleSeconds: idleSeconds
         )
     }
@@ -314,6 +319,377 @@ final class EngineProcessClientTests: XCTestCase {
         _ = try? await waiting.value
     }
 
+    // MARK: One request at a time
+
+    /// A helper that answers each request only once `go` exists. At each
+    /// start it notes its process id in `launches`; for each request it
+    /// notes in `received` that a request came.
+    private func makeHeldClient(
+        received: URL,
+        go: URL,
+        launches: URL,
+        idleSeconds: TimeInterval = 300,
+        executable: URL = URL(fileURLWithPath: "/bin/sh")
+    ) -> EngineProcessClient {
+        makeClient(#"""
+        echo $$ >> "\#(launches.path)"
+        while IFS= read -r line; do
+          echo got >> "\#(received.path)"
+          while [ ! -f "\#(go.path)" ]; do sleep 0.05; done
+          printf '{"id":%s,"kind":"result","text":"done","language":"en","durationMs":1}\n' "$(id "$line")"
+        done
+        """#, idleSeconds: idleSeconds, executable: executable)
+    }
+
+    private func lineCount(_ file: URL) -> Int {
+        ((try? String(contentsOf: file, encoding: .utf8)) ?? "").split(separator: "\n").count
+    }
+
+    private func processIDs(_ file: URL) -> [Int32] {
+        ((try? String(contentsOf: file, encoding: .utf8)) ?? "").split(separator: "\n").compactMap { Int32($0) }
+    }
+
+    /// Starts request A, waits until the helper has it, then starts request B
+    /// and waits until it is queued behind A.
+    private func startRunningAndQueued(
+        _ client: EngineProcessClient, received: URL
+    ) async -> (running: Task<TranscriptionResult, Error>, queued: Task<TranscriptionResult, Error>) {
+        let running = Task { try await client.transcribe(audioURL: audio, language: "en") }
+        let sent = await eventually { self.lineCount(received) == 1 }
+        XCTAssertTrue(sent, "Precondition: the helper has the first request")
+        let queued = Task { try await client.transcribe(audioURL: audio, language: "en") }
+        let waiting = await eventually { await client.queuedRequestCount == 1 }
+        XCTAssertTrue(waiting, "Precondition: the second request waits in the client")
+        return (running, queued)
+    }
+
+    func test_client_sendsOneRequestAtATime() async throws {
+        // This helper reads its input at once, in the background, so that a
+        // second request sent while the first is decoding would show. The
+        // background reader needs `<&0`: without it, it would read /dev/null.
+        let received = directory.appendingPathComponent("received")
+        let go = directory.appendingPathComponent("go")
+        let client = makeClient(#"""
+        ( while IFS= read -r line; do printf '%s\n' "$line" >> "\#(received.path)"; done ) <&0 &
+        answered=0
+        while :; do
+          count=0
+          [ -f "\#(received.path)" ] && count=$(grep -c '' "\#(received.path)")
+          if [ "$count" -gt "$answered" ]; then
+            answered=$((answered + 1))
+            line=$(sed -n "${answered}p" "\#(received.path)")
+            while [ ! -f "\#(go.path)" ]; do sleep 0.05; done
+            printf '{"id":%s,"kind":"result","text":"done","language":"en","durationMs":1}\n' "$(id "$line")"
+          else
+            sleep 0.02
+          fi
+        done
+        """#)
+
+        let first = Task { try await client.transcribe(audioURL: audio, language: "en") }
+        let second = Task { try await client.transcribe(audioURL: audio, language: "en") }
+
+        let sent = await eventually { self.lineCount(received) == 1 }
+        XCTAssertTrue(sent)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(lineCount(received), 1, "the second request must wait until the first is done")
+        try Data().write(to: go)
+
+        let firstResult = try await boundedValue(of: first)
+        let secondResult = try await boundedValue(of: second)
+        XCTAssertEqual(firstResult.text, "done")
+        XCTAssertEqual(secondResult.text, "done")
+        XCTAssertEqual(lineCount(received), 2)
+    }
+
+    func test_cancellingAQueuedRequest_leavesTheHelperAlone() async throws {
+        let received = directory.appendingPathComponent("received")
+        let go = directory.appendingPathComponent("go")
+        let launches = directory.appendingPathComponent("launches")
+        let client = makeHeldClient(received: received, go: go, launches: launches)
+        let (running, queued) = await startRunningAndQueued(client, received: received)
+        let pid = try XCTUnwrap(processIDs(launches).first)
+
+        queued.cancel()
+
+        do {
+            _ = try await boundedValue(of: queued)
+            XCTFail("a cancelled request must throw")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        XCTAssertEqual(kill(pid, 0), 0, "a request that was never sent must not end the helper")
+        XCTAssertEqual(lineCount(received), 1)
+
+        try Data().write(to: go)
+        let result = try await boundedValue(of: running)
+        XCTAssertEqual(result.text, "done")
+        XCTAssertEqual(lineCount(received), 1, "the cancelled request must never be sent")
+        let isRunning = await client.isRunning
+        XCTAssertTrue(isRunning)
+        XCTAssertEqual(processIDs(launches).count, 1)
+    }
+
+    func test_cancellingTheRunningRequest_endsThatHelper_andTheQueueContinuesInANewOne() async throws {
+        let received = directory.appendingPathComponent("received")
+        let go = directory.appendingPathComponent("go")
+        let launches = directory.appendingPathComponent("launches")
+        let client = makeHeldClient(received: received, go: go, launches: launches)
+        let (running, queued) = await startRunningAndQueued(client, received: received)
+        let firstPID = try XCTUnwrap(processIDs(launches).first)
+
+        running.cancel()
+
+        do {
+            _ = try await boundedValue(of: running)
+            XCTFail("a cancelled request must throw")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        let gone = await eventually { kill(firstPID, 0) != 0 }
+        XCTAssertTrue(gone, "the helper must not keep decoding for a caller that left")
+        let restarted = await eventually { self.processIDs(launches).count == 2 }
+        XCTAssertTrue(restarted, "the waiting request must go to a new helper")
+
+        try Data().write(to: go)
+        let result = try await boundedValue(of: queued)
+        XCTAssertEqual(result.text, "done")
+    }
+
+    func test_helperThatCrashes_failsOnlyTheRunningRequest_andTheQueueContinues() async throws {
+        // The first helper process takes a request, then exits without a
+        // reply once `go` exists; later ones answer.
+        let received = directory.appendingPathComponent("received")
+        let go = directory.appendingPathComponent("go")
+        let launches = directory.appendingPathComponent("launches")
+        let client = makeClient(#"""
+        echo $$ >> "\#(launches.path)"
+        if [ "$(grep -c '' "\#(launches.path)")" -eq 1 ]; then
+          read -r line
+          echo got >> "\#(received.path)"
+          while [ ! -f "\#(go.path)" ]; do sleep 0.05; done
+          exit 3
+        fi
+        while IFS= read -r line; do
+          printf '{"id":%s,"kind":"result","text":"second process","language":"en","durationMs":1}\n' "$(id "$line")"
+        done
+        """#)
+        let (running, queued) = await startRunningAndQueued(client, received: received)
+
+        try Data().write(to: go)
+
+        do {
+            _ = try await boundedValue(of: running)
+            XCTFail("the request to a helper that exits must fail")
+        } catch MurmurError.transcriptionFailed(let message) {
+            XCTAssertTrue(message.contains("stopped unexpectedly"), message)
+        } catch {
+            XCTFail("expected transcriptionFailed, got \(error)")
+        }
+        let result = try await boundedValue(of: queued)
+        XCTAssertEqual(result.text, "second process")
+        XCTAssertEqual(processIDs(launches).count, 2)
+    }
+
+    /// The helper survives `unloadModel` while one request runs and one
+    /// waits, and ends after both. The client never holds a waiting request
+    /// with none running, so this cannot tell a busy check that looks only
+    /// at the running request from one that also looks at the queue.
+    func test_unloadModel_withARunningAndAQueuedRequest_letsBothFinish_thenEndsTheHelper() async throws {
+        let received = directory.appendingPathComponent("received")
+        let go = directory.appendingPathComponent("go")
+        let launches = directory.appendingPathComponent("launches")
+        let client = makeHeldClient(received: received, go: go, launches: launches)
+        let (running, queued) = await startRunningAndQueued(client, received: received)
+
+        await client.unloadModel()
+        let runningWhileBusy = await client.isRunning
+        XCTAssertTrue(runningWhileBusy, "the Mac going to sleep must not end the requests under way")
+        try Data().write(to: go)
+
+        let first = try await boundedValue(of: running)
+        let second = try await boundedValue(of: queued)
+        XCTAssertEqual(first.text, "done")
+        XCTAssertEqual(second.text, "done")
+        let stopped = await eventually { await client.isRunning == false }
+        XCTAssertTrue(stopped, "the model is released once the requests are done")
+        XCTAssertEqual(processIDs(launches).count, 1)
+    }
+
+    func test_killProcess_failsTheRunningAndTheQueuedRequest() async throws {
+        let received = directory.appendingPathComponent("received")
+        let launches = directory.appendingPathComponent("launches")
+        let client = makeHeldClient(
+            received: received, go: directory.appendingPathComponent("never"), launches: launches
+        )
+        let (running, queued) = await startRunningAndQueued(client, received: received)
+
+        await client.killProcess()
+
+        for request in [running, queued] {
+            do {
+                _ = try await boundedValue(of: request)
+                XCTFail("a request to a helper that was ended must fail")
+            } catch {
+                XCTAssertFalse(error is CancellationError, "\(error)")
+            }
+        }
+        let isRunning = await client.isRunning
+        XCTAssertFalse(isRunning)
+        XCTAssertEqual(processIDs(launches).count, 1, "the waiting request must not start a new helper")
+    }
+
+    /// The idle countdown runs out while one request runs and one waits, and
+    /// the helper survives it. As with `unloadModel`, the client never holds
+    /// a waiting request with none running, so this proves the busy check,
+    /// not which half of it held.
+    func test_idleStop_doesNotFire_whileARequestIsQueued() async throws {
+        let received = directory.appendingPathComponent("received")
+        let go = directory.appendingPathComponent("go")
+        let launches = directory.appendingPathComponent("launches")
+        let client = makeHeldClient(received: received, go: go, launches: launches, idleSeconds: 0.5)
+        // One finished request starts the idle countdown.
+        try Data().write(to: go)
+        _ = try await client.transcribe(audioURL: audio, language: "en")
+        try FileManager.default.removeItem(at: go)
+        try FileManager.default.removeItem(at: received)
+        let (running, queued) = await startRunningAndQueued(client, received: received)
+
+        try await Task.sleep(for: .milliseconds(800))
+
+        let runningWhileBusy = await client.isRunning
+        XCTAssertTrue(runningWhileBusy, "the idle time must not end a helper with requests to do")
+        XCTAssertEqual(
+            processIDs(launches).count, 1,
+            "the countdown ran out while the helper had the requests, and must have left it alone"
+        )
+        try Data().write(to: go)
+        _ = try await boundedValue(of: running)
+        _ = try await boundedValue(of: queued)
+        let stopped = await eventually { await client.isRunning == false }
+        XCTAssertTrue(stopped, "the helper must not outlive the idle time once the requests are done")
+    }
+
+    func test_requestCancelledBeforeItWasSent_isNeverSent() async throws {
+        let log = directory.appendingPathComponent("requests.log")
+        let client = makeClient(#"""
+        while IFS= read -r line; do
+          printf '%s\n' "$line" >> "\#(log.path)"
+          printf '{"id":%s,"kind":"result","text":"x","language":"en","durationMs":1}\n' "$(id "$line")"
+        done
+        """#)
+        let request = Task {
+            // Asks only once it has been cancelled.
+            while !Task.isCancelled { await Task.yield() }
+            return try await client.transcribe(audioURL: audio, language: "en")
+        }
+
+        request.cancel()
+
+        do {
+            _ = try await boundedValue(of: request)
+            XCTFail("a cancelled request must throw")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        // Requests are numbered from 1. One that was sent, even to a helper
+        // that was then ended, took a number, so the next one would be 2.
+        let next = Task { try await client.transcribe(audioURL: audio, language: "en") }
+        _ = try await boundedValue(of: next)
+        let sent = try String(contentsOf: log, encoding: .utf8)
+            .split(separator: "\n")
+            .map { try EngineWire.decode(EngineRequest.self, from: String($0)) }
+        XCTAssertEqual(sent.map(\.id), [1], "a cancelled request must not reach the helper")
+    }
+
+    /// The helper exits right after a reply, before the client sends the
+    /// next request: the write fails. That is a crash like any other, so
+    /// only the request that could not be sent fails.
+    func test_helperThatExitsRightAfterAReply_failsOnlyTheNextRequest_andTheQueueContinues() async throws {
+        let received = directory.appendingPathComponent("received")
+        let go = directory.appendingPathComponent("go")
+        let launches = directory.appendingPathComponent("launches")
+        // The first helper closes its input before it replies, so the write
+        // of the next request fails for certain, and keeps its output open,
+        // so the client does not see it end first.
+        let client = makeClient(#"""
+        echo $$ >> "\#(launches.path)"
+        if [ "$(grep -c '' "\#(launches.path)")" -eq 1 ]; then
+          read -r line
+          echo got >> "\#(received.path)"
+          while [ ! -f "\#(go.path)" ]; do sleep 0.05; done
+          exec 0<&-
+          printf '{"id":%s,"kind":"result","text":"done","language":"en","durationMs":1}\n' "$(id "$line")"
+          exec sleep 30
+        fi
+        while IFS= read -r line; do
+          printf '{"id":%s,"kind":"result","text":"second process","language":"en","durationMs":1}\n' "$(id "$line")"
+        done
+        """#)
+        let (running, queued) = await startRunningAndQueued(client, received: received)
+        let last = Task { try await client.transcribe(audioURL: audio, language: "en") }
+        let waiting = await eventually { await client.queuedRequestCount == 2 }
+        XCTAssertTrue(waiting, "Precondition: two requests wait in the client")
+
+        try Data().write(to: go)
+
+        let first = try await boundedValue(of: running)
+        XCTAssertEqual(first.text, "done")
+        do {
+            _ = try await boundedValue(of: queued)
+            XCTFail("a request that could not be sent must fail")
+        } catch MurmurError.transcriptionFailed(let message) {
+            XCTAssertTrue(message.contains("could not be reached"), message)
+        } catch {
+            XCTFail("expected transcriptionFailed, got \(error)")
+        }
+        let result = try await boundedValue(of: last)
+        XCTAssertEqual(result.text, "second process", "the waiting request must go to a new helper")
+        XCTAssertEqual(processIDs(launches).count, 2)
+    }
+
+    /// An `unloadModel` came while requests were under way, and the restart
+    /// after a cancel could not start a helper. The unload is done once no
+    /// helper runs; it must not end the next helper after its first reply.
+    func test_unloadModel_whoseRestartFailed_doesNotEndTheNextHelper() async throws {
+        let received = directory.appendingPathComponent("received")
+        let go = directory.appendingPathComponent("go")
+        let launches = directory.appendingPathComponent("launches")
+        // The helper is started through a link that the test takes away.
+        let link = directory.appendingPathComponent("engine")
+        let shell = URL(fileURLWithPath: "/bin/sh")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: shell)
+        let client = makeHeldClient(received: received, go: go, launches: launches, executable: link)
+        let (running, queued) = await startRunningAndQueued(client, received: received)
+        await client.unloadModel()
+        try FileManager.default.removeItem(at: link)
+
+        running.cancel()
+
+        do {
+            _ = try await boundedValue(of: running)
+            XCTFail("a cancelled request must throw")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        do {
+            _ = try await boundedValue(of: queued)
+            XCTFail("a request with no helper to run it must fail")
+        } catch {
+            XCTAssertFalse(error is CancellationError, "\(error)")
+        }
+        let stopped = await client.isRunning
+        XCTAssertFalse(stopped, "Precondition: no helper could be started")
+
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: shell)
+        try Data().write(to: go)
+        let later = Task { try await client.transcribe(audioURL: audio, language: "en") }
+        let result = try await boundedValue(of: later)
+        XCTAssertEqual(result.text, "done")
+        let isRunning = await client.isRunning
+        XCTAssertTrue(isRunning, "the helper must stay for the next request, as after any other")
+    }
+
     // MARK: Lines
 
     func test_lineSplitter_joinsALineThatArrivesInPieces() {
@@ -342,6 +718,54 @@ final class EngineProcessClientTests: XCTestCase {
         // The test runner has no MurmurEngine next to it.
         let service = EngineProcessClient.makeDefault(modelDirectory: directory)
         XCTAssertTrue(service is Qwen3TranscriptionService)
+    }
+}
+
+/// The value of `task`, or a test failure after 5 s. A request that the
+/// client never resumes would otherwise hang the whole suite instead of
+/// failing the one test.
+private func boundedValue<T>(
+    of task: Task<T, Error>, file: StaticString = #filePath, line: UInt = #line
+) async throws -> T {
+    guard let outcome = await outcome(of: task, within: 5) else {
+        XCTFail("the request did not finish within 5 s", file: file, line: line)
+        throw RequestDidNotFinish()
+    }
+    return try outcome.get()
+}
+
+private struct RequestDidNotFinish: Error {}
+
+/// `task`'s outcome, or nil when it has none after `seconds`. Not a task
+/// group: a group waits for all of its tasks, and the one that waits for
+/// `task` would never end.
+private func outcome<T>(of task: Task<T, Error>, within seconds: TimeInterval) async -> Result<T, Error>? {
+    let once = Once()
+    return await withCheckedContinuation { continuation in
+        let timer = Task {
+            try? await Task.sleep(for: .seconds(seconds))
+            if once.claim() { continuation.resume(returning: nil) }
+        }
+        Task {
+            let result = await task.result
+            if once.claim() {
+                timer.cancel()
+                continuation.resume(returning: result)
+            }
+        }
+    }
+}
+
+/// True for the first caller only.
+private final class Once: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.withLock {
+            defer { claimed = true }
+            return !claimed
+        }
     }
 }
 

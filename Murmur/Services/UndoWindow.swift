@@ -8,6 +8,9 @@ final class UndoWindow {
     private var timer: Task<Void, Never>?
     private var monitor: Any?
 
+    /// True from `open` until the window expires or is cancelled.
+    var isOpen: Bool { timer != nil }
+
     /// Opens the window, replacing one that is still open.
     ///
     /// - Parameters:
@@ -29,6 +32,7 @@ final class UndoWindow {
         timer = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
             guard let self, !Task.isCancelled else { return }
+            self.timer = nil
             self.removeMonitor()
             onExpire()
         }
