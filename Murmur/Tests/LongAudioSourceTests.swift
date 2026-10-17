@@ -127,6 +127,24 @@ final class LongAudioSourceTests: XCTestCase {
         XCTAssertEqual(start.count, 10, "Reading back towards the start still works")
     }
 
+    func test_preparedWAV_convertsOnce_andTheCopyIsReadInPlace() throws {
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 44_100.0, AVNumberOfChannelsKey: 2,
+            AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false,
+        ]
+        let stereo = try write(makeSamples(seconds: 2), sampleRate: 44_100, channels: 2, settings: settings, name: "stereo.wav")
+
+        let copy = try LongAudioSource.preparedWAV(for: stereo)
+        defer { try? FileManager.default.removeItem(at: copy.url) }
+        XCTAssertTrue(copy.isTemporary)
+
+        // The engine process opens the copy once per piece: it must not be
+        // converted again each time.
+        let again = try LongAudioSource.preparedWAV(for: copy.url)
+        XCTAssertFalse(again.isTemporary)
+        XCTAssertEqual(again.url, copy.url)
+    }
+
     private func murmurTemporaryFiles() throws -> Set<String> {
         Set(try FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)
             .filter { $0.hasPrefix("murmur_long_") })

@@ -43,6 +43,10 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
 
     private let launch: Launch
     private let idleSeconds: TimeInterval
+    /// How long a cancelled piece of a file may still run. A piece takes
+    /// seconds; one that has not answered by then is stuck, and the helper
+    /// is ended so that dictation does not wait behind it for good.
+    private let cancelledPieceGrace: TimeInterval
     private let logger = Logger(subsystem: "com.murmur.app", category: "engine-process")
 
     private var helper: RunningHelper?
@@ -74,9 +78,10 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
 
     nonisolated var yieldsToDictationDuringLongTranscription: Bool { true }
 
-    init(launch: Launch, idleSeconds: TimeInterval = 300) {
+    init(launch: Launch, idleSeconds: TimeInterval = 300, cancelledPieceGrace: TimeInterval = 60) {
         self.launch = launch
         self.idleSeconds = idleSeconds
+        self.cancelledPieceGrace = cancelledPieceGrace
         // A write to a helper that has just exited must be an error, not the
         // signal that ends the app.
         signal(SIGPIPE, SIG_IGN)
@@ -132,6 +137,9 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
         activeLongTranscriptions += 1
         defer {
             activeLongTranscriptions -= 1
+            // The idle countdown may have run out while the file was being
+            // prepared, and found the client busy: start it again.
+            if helper != nil { noteUse() }
             endHelperIfUnloadIsDue()
         }
         // The model first, so a missing model is reported before minutes of
@@ -154,6 +162,8 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
                 partialText: Qwen3TranscriptionService.text(of: segments.segments)
             ))
         }
+        // Cancelled during the last piece: still cancelled.
+        try Task.checkCancellation()
 
         let text = Qwen3TranscriptionService.text(of: segments.segments)
         return TranscriptionResult(
@@ -314,10 +324,32 @@ actor EngineProcessClient: TranscriptionServiceProtocol {
         guard let current = running, current.id == id else { return }
         // A piece of a file takes seconds. Its reply ends it as usual, and
         // the long transcription stops before the next piece; ending the
-        // helper would only unload the model.
-        if current.priority == .file { return }
+        // helper would only unload the model. A piece still running after
+        // the grace time is stuck, and is ended like any other request.
+        if current.priority == .file {
+            let grace = cancelledPieceGrace
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(grace))
+                await self?.endStuckRequest(id)
+            }
+            return
+        }
+        endRunning(throwing: CancellationError())
+    }
+
+    /// Ends the helper under a cancelled piece that never answered.
+    private func endStuckRequest(_ id: Int) {
+        guard running?.id == id else { return }
+        logger.warning("Speech engine process ended: a cancelled piece did not finish")
+        endRunning(throwing: CancellationError())
+    }
+
+    /// Fails the running request and ends the helper; the waiting requests
+    /// go on in a new one.
+    private func endRunning(throwing error: Error) {
+        guard let current = running else { return }
         running = nil
-        current.continuation.resume(throwing: CancellationError())
+        current.continuation.resume(throwing: error)
         restartForTheQueue()
     }
 

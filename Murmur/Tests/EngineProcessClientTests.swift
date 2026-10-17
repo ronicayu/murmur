@@ -26,12 +26,14 @@ final class EngineProcessClientTests: XCTestCase {
     private func makeClient(
         _ script: String,
         idleSeconds: TimeInterval = 300,
+        cancelledPieceGrace: TimeInterval = 60,
         executable: URL = URL(fileURLWithPath: "/bin/sh")
     ) -> EngineProcessClient {
         let prelude = #"id() { printf '%s' "$1" | sed -E 's/.*"id":([0-9]+).*/\1/'; }"# + "\n"
         return EngineProcessClient(
             launch: .init(executable: executable, arguments: ["-c", prelude + script]),
-            idleSeconds: idleSeconds
+            idleSeconds: idleSeconds,
+            cancelledPieceGrace: cancelledPieceGrace
         )
     }
 
@@ -79,7 +81,9 @@ final class EngineProcessClientTests: XCTestCase {
     /// to `launches` when it starts, and answers: `ready` to a preload,
     /// `p<first sample>` to a piece, `dictated` to a transcription. The
     /// first request whose operation is `hold` waits until `go` exists.
-    private func makePieceClient(ops: URL, launches: URL, hold: String = "", go: URL? = nil) -> EngineProcessClient {
+    private func makePieceClient(
+        ops: URL, launches: URL, hold: String = "", go: URL? = nil, cancelledPieceGrace: TimeInterval = 60
+    ) -> EngineProcessClient {
         let mark = directory.appendingPathComponent("held-\(UUID().uuidString)")
         let goPath = go?.path ?? "/nonexistent"
         return makeClient(#"""
@@ -99,16 +103,20 @@ final class EngineProcessClientTests: XCTestCase {
             *) printf '{"id":%s,"kind":"result","text":"dictated","language":"en","durationMs":1}\n' "$(id "$line")" ;;
           esac
         done
-        """#)
+        """#, cancelledPieceGrace: cancelledPieceGrace)
     }
 
     /// Speech 0–3 s and 6–9 s, silence between: two spans, one piece each.
     /// The 3 s silence is a paragraph break.
-    private func writeTwoUtterances(sampleRate: Double = 16_000, channels: AVAudioChannelCount = 1) throws -> URL {
+    private func writeTwoUtterances(
+        sampleRate: Double = 16_000, channels: AVAudioChannelCount = 1, seconds: Double = 9
+    ) throws -> URL {
         let url = directory.appendingPathComponent("long-\(UUID().uuidString).wav")
         let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: channels, interleaved: false)!
-        let frames = AVAudioFrameCount(sampleRate * 9)
+        let frames = AVAudioFrameCount(sampleRate * seconds)
+        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+        guard frames > 0 else { return url }
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
         buffer.frameLength = frames
         for channel in 0..<Int(channels) {
@@ -118,7 +126,6 @@ final class EngineProcessClientTests: XCTestCase {
                 buffer.floatChannelData![channel][i] = speaking ? 0.1 * sin(Float(i) * 0.05) : 0
             }
         }
-        let file = try AVAudioFile(forWriting: url, settings: format.settings)
         try file.write(from: buffer)
         return url
     }
@@ -149,6 +156,9 @@ final class EngineProcessClientTests: XCTestCase {
         XCTAssertEqual(lines(ops), ["preload", "transcribePiece", "transcribePiece"])
     }
 
+    /// The scenario as the user meets it. The next piece is only asked for
+    /// once the running one answers, so this passes even without priorities;
+    /// `test_waitingDictation_goesAheadOfAnOlderFileRequest` guards those.
     func test_dictationDuringAPiece_isSentBeforeTheFilesNextPiece() async throws {
         let ops = directory.appendingPathComponent("ops")
         let go = directory.appendingPathComponent("go")
@@ -239,6 +249,45 @@ final class EngineProcessClientTests: XCTestCase {
         XCTAssertEqual(processIDs(launches).count, 1, "Both pieces in the same helper")
         let stopped = await eventually { await client.isRunning == false }
         XCTAssertTrue(stopped, "The model is released once the file is done")
+    }
+
+    func test_cancelledPieceThatNeverAnswers_endsTheHelperAfterTheGrace() async throws {
+        let ops = directory.appendingPathComponent("ops")
+        let launches = directory.appendingPathComponent("launches")
+        let client = makePieceClient(
+            ops: ops, launches: launches, hold: "transcribePiece",
+            go: directory.appendingPathComponent("never"), cancelledPieceGrace: 0.3)
+        let file = Task { try await client.transcribeLong(audioURL: try self.writeTwoUtterances(), language: "en") { _ in } }
+        let pieceSent = await eventually { self.lines(ops).count == 2 }
+        XCTAssertTrue(pieceSent, "Precondition: the helper has the file's first piece")
+
+        file.cancel()
+
+        do {
+            _ = try await boundedValue(of: file)
+            XCTFail("A cancelled transcription must throw")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        let next = try await boundedValue(of: Task { try await client.transcribe(audioURL: self.audio, language: "en") })
+        XCTAssertEqual(next.text, "dictated", "Dictation must not wait behind a stuck piece")
+        XCTAssertEqual(processIDs(launches).count, 2, "The stuck helper was ended")
+    }
+
+    func test_fileThatCannotBeCut_failsAndLeavesNoCopy() async throws {
+        let client = makePieceClient(
+            ops: directory.appendingPathComponent("ops"), launches: directory.appendingPathComponent("launches"))
+        // Needs conversion, and converts to an empty WAV, which cannot be cut.
+        let empty = try writeTwoUtterances(sampleRate: 44_100, channels: 2, seconds: 0)
+        let before = convertedCopies()
+
+        do {
+            _ = try await client.transcribeLong(audioURL: empty, language: "en") { _ in }
+            XCTFail("A file without audio must fail")
+        } catch {
+            XCTAssertFalse(error is CancellationError, "\(error)")
+        }
+        XCTAssertEqual(convertedCopies(), before, "The converted copy holds the user's audio")
     }
 
     func test_convertedCopy_isDeleted_afterTheTranscription() async throws {
