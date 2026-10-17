@@ -389,6 +389,73 @@ final class ClipboardInjectionTests: XCTestCase {
         XCTAssertEqual(pasteboard.string(forType: .string), "dictated text")
     }
 
+    func test_usersClipboard_isPutBack_afterThePaste() async throws {
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        pasteboard.setString("the user's clipboard", forType: .string)
+
+        try await TextInjectionService().injectViaClipboard(
+            text: "dictated text", pasteboard: pasteboard, postPaste: {}, restoreAfter: .milliseconds(50)
+        )
+
+        let restored = await pollUntil { pasteboard.string(forType: .string) == "the user's clipboard" }
+        XCTAssertTrue(restored)
+    }
+
+    /// Clipboard tools and some input methods write the pasted text again
+    /// around a paste. That is not the user copying something new.
+    func test_usersClipboard_isPutBack_whenAnotherAppWroteTheSameTextAgain() async throws {
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        pasteboard.setString("the user's clipboard", forType: .string)
+
+        try await TextInjectionService().injectViaClipboard(
+            text: "dictated text",
+            pasteboard: pasteboard,
+            postPaste: {
+                pasteboard.clearContents()
+                pasteboard.setString("dictated text", forType: .string)
+            },
+            restoreAfter: .milliseconds(50)
+        )
+
+        let restored = await pollUntil { pasteboard.string(forType: .string) == "the user's clipboard" }
+        XCTAssertTrue(restored, "The user's clipboard must come back")
+    }
+
+    func test_newCopyByTheUser_isLeftOnTheClipboard() async throws {
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        pasteboard.setString("the user's clipboard", forType: .string)
+
+        try await TextInjectionService().injectViaClipboard(
+            text: "dictated text",
+            pasteboard: pasteboard,
+            postPaste: {
+                pasteboard.clearContents()
+                pasteboard.setString("copied just now", forType: .string)
+            },
+            restoreAfter: .milliseconds(50)
+        )
+        try await Task.sleep(for: .milliseconds(300))
+
+        XCTAssertEqual(pasteboard.string(forType: .string), "copied just now")
+    }
+
+    func test_shouldRestore_byContent() {
+        XCTAssertTrue(TextInjectionService.shouldRestore(
+            changeCount: 5, changeCountAfterWrite: 5, currentText: "dictated", dictated: "dictated"))
+        XCTAssertTrue(TextInjectionService.shouldRestore(
+            changeCount: 7, changeCountAfterWrite: 5, currentText: "dictated", dictated: "dictated"))
+        XCTAssertFalse(TextInjectionService.shouldRestore(
+            changeCount: 6, changeCountAfterWrite: 5, currentText: "something else", dictated: "dictated"))
+        XCTAssertFalse(TextInjectionService.shouldRestore(
+            changeCount: 6, changeCountAfterWrite: 5, currentText: nil, dictated: "dictated"))
+    }
+
     func test_dictatedText_isMarkedSoClipboardManagersDoNotKeepIt() async throws {
         let pasteboard = NSPasteboard.withUniqueName()
         defer { pasteboard.releaseGlobally() }

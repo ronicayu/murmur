@@ -16,6 +16,7 @@
 - **A correction that adds a line break or a control character is not used.** The corrected text is typed into whatever app has focus; in a terminal a line break runs the line. The raw transcript is used instead.
 
 ### Fixed
+- **Your clipboard comes back after a dictation even when another app touches it.** Murmur pastes through the clipboard and puts your own content back 1.5 s later, but it skipped that whenever anything else wrote to the clipboard meanwhile. Clipboard tools and some input methods write the pasted text again around a paste, so the dictated text stayed on the clipboard. Murmur now looks at what the clipboard holds: if it is still the dictated text, your content comes back; if it is something new you copied, that stays.
 - **The microphone permission alert opened the Accessibility settings.** Its Open Settings button now opens Privacy & Security > Microphone.
 - **Sleep no longer stops a file transcription.** Since 0.5.1 the engine is a separate process, and releasing the model at sleep ended it mid-transcription, so the entry failed. The release now waits for the transcription to finish, and a file transcription keeps the Mac from idle sleep.
 - **Cancelling a Retry keeps the failed entry and its recording.** Before, it deleted both, though the failure had kept the recording for a retry.
