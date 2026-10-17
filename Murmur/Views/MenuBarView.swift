@@ -7,6 +7,11 @@ struct MenuBarView: View {
     var onOpenSettings: () -> Void = {}
     var onOpenTranscription: () -> Void = {}
     var onOpenRecentHistory: () -> Void = {}
+    var onSetUpDictation: () -> Void = {}
+
+    /// Dictation cannot work yet: Accessibility was skipped at onboarding or
+    /// taken away since. Read again each time the menu opens.
+    @State private var dictationNeedsSetUp = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,6 +25,12 @@ struct MenuBarView: View {
 
             // ── Actions ──
             VStack(spacing: 0) {
+                if dictationNeedsSetUp {
+                    menuButton(icon: "keyboard", label: "Set Up Dictation…") {
+                        onSetUpDictation()
+                    }
+                }
+
                 menuButton(
                     icon: "clock.arrow.circlepath",
                     label: "Recent Transcriptions",
@@ -52,6 +63,9 @@ struct MenuBarView: View {
             .padding(.vertical, 4)
         }
         .frame(width: 300)
+        .onAppear {
+            dictationNeedsSetUp = OnboardingViewModel.dictationNeedsSetUp(coordinator.permissions.checkAll())
+        }
     }
 
     // MARK: - Section Divider

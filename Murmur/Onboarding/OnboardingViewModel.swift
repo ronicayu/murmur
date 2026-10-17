@@ -13,6 +13,9 @@ final class OnboardingViewModel: ObservableObject {
     @Published var hotkeyPracticeMode = false
     @Published var hotkeyTestResult: String?
     @Published var hotkeyConflictDetected = false
+    /// The user chose to transcribe recordings only, for now: no
+    /// Accessibility prompt, no hotkey practice.
+    @Published private(set) var dictationSkipped = false
     @Published var customKey: Key = HotkeyPreference.defaultCustomKey
     @Published var customModifiers: NSEvent.ModifierFlags = HotkeyPreference.defaultCustomModifiers
 
@@ -20,8 +23,8 @@ final class OnboardingViewModel: ObservableObject {
     let modelManager: ModelManager
 
     /// Steps actually shown to the user (mic merged into welcome; modelChoice skipped)
-    private static let visibleSteps: [OnboardingStep] = [
-        .welcome, .accessibility, .modelDownload, .testTranscription, .done
+    static let visibleSteps: [OnboardingStep] = [
+        .welcome, .modelDownload, .accessibility, .testTranscription, .done
     ]
 
     var visibleStepCount: Int { Self.visibleSteps.count }
@@ -35,17 +38,44 @@ final class OnboardingViewModel: ObservableObject {
 
     private let loadHotkey: () -> HotkeyTrigger
     private let applyHotkey: (HotkeyTrigger) -> Void
+    private let registerLoginItem: () -> Void
+
+    /// Where the flow began: `.welcome` on first launch; a later step when
+    /// the user sets up dictation from the menu bar.
+    let startedAt: OnboardingStep
+    /// The full first-launch onboarding, not a later dictation set-up.
+    var isFirstRun: Bool { startedAt == .welcome }
+
+    /// Where "Set Up Dictation…" begins: the whole onboarding if it was
+    /// never finished, the model if it is missing (dictation cannot be tried
+    /// without it), otherwise Accessibility.
+    static func setUpDictationStart(onboardingCompleted: Bool, modelReady: Bool) -> OnboardingStep {
+        if !onboardingCompleted { return .welcome }
+        return modelReady ? .accessibility : .modelDownload
+    }
+
+    /// Whether the menu bar offers "Set Up Dictation…".
+    static func dictationNeedsSetUp(_ status: PermissionsStatus) -> Bool {
+        status.accessibility != .granted
+    }
 
     /// - Parameters:
     ///   - loadHotkey: reads the saved shortcut.
     ///   - applyHotkey: puts a shortcut into effect and saves it. `nil`
     ///     registers it with the coordinator's hotkey service.
+    ///   - startAt: `.accessibility` when the user sets up dictation after
+    ///     onboarding, from the menu bar.
     init(
         coordinator: AppCoordinator,
         modelManager: ModelManager,
+        startAt: OnboardingStep = .welcome,
         loadHotkey: @escaping () -> HotkeyTrigger = { HotkeyPreference.load() },
-        applyHotkey: ((HotkeyTrigger) -> Void)? = nil
+        applyHotkey: ((HotkeyTrigger) -> Void)? = nil,
+        registerLoginItem: @escaping () -> Void = { try? SMAppService.mainApp.register() }
     ) {
+        self.step = startAt
+        self.startedAt = startAt
+        self.registerLoginItem = registerLoginItem
         self.coordinator = coordinator
         self.modelManager = modelManager
         self.loadHotkey = loadHotkey
@@ -95,6 +125,25 @@ final class OnboardingViewModel: ObservableObject {
     }
 
 
+    /// "I've already enabled it". Stops the poll, which would otherwise move
+    /// the user on a second time, in the middle of the try-out.
+    func confirmAccessibilityEnabled() {
+        accessibilityPollTask?.cancel()
+        accessibilityPollTask = nil
+        accessibilityGranted = true
+        coordinator.reregisterHotkeyAfterAccessibilityChange()
+        nextStep()
+    }
+
+    /// Skips dictation's set-up and goes to the end. Nothing is asked for
+    /// that only dictation needs.
+    func skipDictation() {
+        accessibilityPollTask?.cancel()
+        accessibilityPollTask = nil
+        dictationSkipped = true
+        step = .done
+    }
+
     func requestMicrophone() async {
         micGranted = await coordinator.permissions.requestMicrophone()
         if micGranted {
@@ -112,6 +161,7 @@ final class OnboardingViewModel: ObservableObject {
             for await granted in coordinator.permissions.pollAccessibilityGranted() {
                 accessibilityGranted = granted
                 if granted {
+                    coordinator.reregisterHotkeyAfterAccessibilityChange()
                     nextStep()
                     break
                 }
@@ -193,7 +243,9 @@ final class OnboardingViewModel: ObservableObject {
 
     func completeOnboarding() {
         UserDefaults.standard.set(true, forKey: "onboardingCompleted")
-        try? SMAppService.mainApp.register()
+        // Launch at login is switched on by the first onboarding only: a
+        // later dictation set-up must not undo the user's choice in Settings.
+        if isFirstRun { registerLoginItem() }
         teardown()
     }
 

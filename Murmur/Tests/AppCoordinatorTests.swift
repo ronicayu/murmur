@@ -131,6 +131,7 @@ final class HotkeyEventTests: XCTestCase {
 
 // MARK: - OnboardingStep Tests
 
+@MainActor
 final class OnboardingStepTests: XCTestCase {
 
     func testStepOrder() {
@@ -139,16 +140,12 @@ final class OnboardingStepTests: XCTestCase {
         XCTAssertEqual(steps.last, .done)
     }
 
-    func testVisibleStepsExcludeModelChoice() {
-        // The visible steps (used for progress bar) should not include modelChoice.
-        // The huggingfaceLogin step was removed in v0.3.1 along with the HuggingFace
-        // backend; nothing to assert against on that any more.
-        let visibleSteps: [OnboardingStep] = [
-            .welcome, .accessibility, .modelDownload, .testTranscription, .done
-        ]
-        XCTAssertFalse(visibleSteps.contains(.modelChoice))
-        XCTAssertFalse(visibleSteps.contains(.microphone), "Microphone is now merged into welcome")
-        XCTAssertEqual(visibleSteps.count, 5)
+    func testVisibleSteps_putDictationSetUpAfterTheModel() {
+        XCTAssertEqual(
+            OnboardingViewModel.visibleSteps,
+            [.welcome, .modelDownload, .accessibility, .testTranscription, .done],
+            "What both modes need comes first; dictation's set-up can then be skipped"
+        )
     }
 }
 

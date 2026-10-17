@@ -247,6 +247,13 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
+    /// Installs the hotkey again. A monitor installed while Murmur had no
+    /// Accessibility access may not hear key presses once it has it.
+    func reregisterHotkeyAfterAccessibilityChange() {
+        guard registersGlobalHotkey else { return }
+        hotkey.register(trigger: HotkeyPreference.load())
+    }
+
     private func start() {
         // Load saved recording mode
         let savedMode: RecordingMode = UserDefaults.standard.string(forKey: "recordingMode")
@@ -1010,7 +1017,15 @@ final class AppCoordinator: ObservableObject {
 
     private func showPermissionAlert(for permission: MurmurError.Permission) {
         if ErrorAlerts.askToOpenSettings(for: permission) {
-            permissions.openAccessibilitySettings()
+            switch permission {
+            case .accessibility:
+                // The guided set-up, which also tries dictation out.
+                NotificationCenter.default.post(name: .setUpDictation, object: nil)
+            case .microphone:
+                permissions.openMicrophoneSettings()
+            case .inputMonitoring:
+                permissions.openAccessibilitySettings()
+            }
         }
         state = .idle
         pill.hide()

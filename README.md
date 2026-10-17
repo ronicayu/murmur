@@ -56,8 +56,8 @@ open .build/debug/Murmur.app
 On first launch, Murmur walks you through 5 steps:
 
 1. **Welcome + Microphone** — Grant mic access (the OS permission dialog appears automatically)
-2. **Accessibility** — Required for text insertion (System Settings opens automatically)
-3. **Model Download** — Downloads the speech model (~1 GB)
+2. **Model Download** — Downloads the speech model (~1 GB)
+3. **Set Up Dictation** — Accessibility access, needed to type into other apps. You can skip it if you only transcribe recordings, and set it up later with **Set Up Dictation…** in the menu bar.
 4. **Test** — Record with the button, then try the hotkey
 5. **Done** — Shortcuts cheat sheet
 

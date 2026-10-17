@@ -67,7 +67,8 @@ struct MurmurApp: App {
                 coordinator: coordinator,
                 onOpenSettings: { showSettings() },
                 onOpenTranscription: { showTranscriptionWindow() },
-                onOpenRecentHistory: { showRecentHistory() }
+                onOpenRecentHistory: { showRecentHistory() },
+                onSetUpDictation: { showDictationSetUp() }
             )
         } label: {
             Label(coordinator.state.menuBarAccessibilityName, systemImage: menuBarIconName)
@@ -107,6 +108,10 @@ struct MurmurApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: .openSettings)) { _ in
                     showSettings()
                 }
+                // From the Accessibility alert a hotkey press shows without it.
+                .onReceive(NotificationCenter.default.publisher(for: .setUpDictation)) { _ in
+                    showDictationSetUp()
+                }
         }
         .menuBarExtraStyle(.window)
     }
@@ -137,7 +142,16 @@ struct MurmurApp: App {
         }
     }
 
-    private func showOnboarding() {
+    private func showDictationSetUp() {
+        showOnboarding(startAt: OnboardingViewModel.setUpDictationStart(
+            onboardingCompleted: UserDefaults.standard.bool(forKey: "onboardingCompleted"),
+            modelReady: modelManager.state == .ready
+        ))
+    }
+
+    /// - Parameter startAt: `.accessibility` to set up dictation after
+    ///   onboarding was finished without it.
+    private func showOnboarding(startAt: OnboardingStep = .welcome) {
         if let existing = onboardingWindow, existing.isVisible {
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -146,7 +160,8 @@ struct MurmurApp: App {
 
         let view = OnboardingView(
             coordinator: coordinator,
-            modelManager: modelManager
+            modelManager: modelManager,
+            startAt: startAt
         ) { [self] in
             onboardingWindow?.close()
             onboardingWindow = nil
@@ -158,7 +173,7 @@ struct MurmurApp: App {
             backing: .buffered,
             defer: false
         )
-        window.title = "Welcome to Murmur"
+        window.title = startAt == .welcome ? "Welcome to Murmur" : "Set Up Dictation"
         window.contentView = NSHostingView(rootView: view)
         window.center()
         window.isReleasedWhenClosed = false

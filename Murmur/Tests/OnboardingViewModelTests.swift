@@ -32,6 +32,74 @@ final class OnboardingViewModelTests: XCTestCase {
         super.tearDown()
     }
 
+    // MARK: - Dictation set-up can wait
+
+    func test_afterWelcome_comesTheModel_notAccessibility() {
+        XCTAssertEqual(viewModel.step, .welcome)
+        viewModel.nextStep()
+        XCTAssertEqual(viewModel.step, .modelDownload, "Precondition: no model in the test's directory")
+    }
+
+    func test_skipDictation_endsOnboarding_withoutAccessibility() {
+        viewModel.step = .accessibility
+
+        viewModel.skipDictation()
+
+        XCTAssertEqual(viewModel.step, .done)
+        XCTAssertTrue(viewModel.dictationSkipped)
+    }
+
+    func test_setUpDictationStart_dependsOnOnboardingAndTheModel() {
+        XCTAssertEqual(OnboardingViewModel.setUpDictationStart(onboardingCompleted: false, modelReady: true), .welcome)
+        XCTAssertEqual(OnboardingViewModel.setUpDictationStart(onboardingCompleted: true, modelReady: false), .modelDownload,
+                       "Dictation cannot be tried without the model")
+        XCTAssertEqual(OnboardingViewModel.setUpDictationStart(onboardingCompleted: true, modelReady: true), .accessibility)
+    }
+
+    func test_menuOffersSetUp_onlyWithoutAccessibility() {
+        XCTAssertTrue(OnboardingViewModel.dictationNeedsSetUp(
+            PermissionsStatus(microphone: .granted, accessibility: .denied)))
+        XCTAssertFalse(OnboardingViewModel.dictationNeedsSetUp(
+            PermissionsStatus(microphone: .granted, accessibility: .granted)))
+    }
+
+    func test_firstOnboarding_switchesOnLaunchAtLogin_butALaterSetUpDoesNot() {
+        defer { UserDefaults.standard.removeObject(forKey: "onboardingCompleted") }
+        var registered = 0
+        for (start, expected) in [(OnboardingStep.welcome, 1), (.accessibility, 1), (.modelDownload, 1)] {
+            let flow = OnboardingViewModel(
+                coordinator: coordinator,
+                modelManager: makeTestModelManager(),
+                startAt: start,
+                loadHotkey: { .rightCommand },
+                applyHotkey: { _ in },
+                registerLoginItem: { registered += 1 }
+            )
+            flow.completeOnboarding()
+            XCTAssertEqual(registered, expected, "after a flow that began at \(start)")
+        }
+    }
+
+    func test_accessibilityAlert_saysOnlyDictationNeedsIt() {
+        let text = ErrorAlerts.permissionAlertText(for: .accessibility)
+        XCTAssertTrue(text.message.contains("Transcribing recordings works without it"))
+        XCTAssertEqual(text.button, "Set Up Dictation")
+    }
+
+    /// From the menu bar's "Set Up Dictation…".
+    func test_setUpLater_startsAtTheAccessibilityStep() {
+        let later = OnboardingViewModel(
+            coordinator: coordinator,
+            modelManager: makeTestModelManager(),
+            startAt: .accessibility,
+            loadHotkey: { .rightCommand },
+            applyHotkey: { _ in }
+        )
+        defer { later.teardown() }
+        XCTAssertEqual(later.step, .accessibility)
+        XCTAssertFalse(later.dictationSkipped)
+    }
+
     // MARK: - Leaving onboarding
 
     func test_teardown_restoresAccessibilityCheck_afterTestStep() {
