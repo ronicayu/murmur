@@ -14,12 +14,99 @@ enum TranscriptionWindowState {
     case result(entry: TranscriptionEntry)
 }
 
+// MARK: - Problems
+
+/// News about something that went wrong, shown as a banner over whatever the
+/// window shows. Not a state: a refused start must keep the confirm screen.
+enum TranscriptionWindowProblem: Equatable {
+    case unsupportedFormat(ext: String)
+    case unreadableAudio
+    case tooLong(duration: TimeInterval)
+    case notEnoughDiskSpace
+    case recordingFailed(reason: String)
+    case dictationInProgress
+    /// `retryEntryID` is set when Murmur kept its own recording, so Try Again
+    /// can transcribe it again.
+    case transcriptionFailed(reason: String, retryEntryID: UUID?)
+    case recordingSavedForLater
+
+    /// What happened.
+    var title: String {
+        switch self {
+        case .unsupportedFormat(let ext): return "Murmur can't open .\(ext) files"
+        case .unreadableAudio: return "Murmur couldn't read this file"
+        case .tooLong: return "This file is longer than \(Self.hours(LongRecordingService.maxDurationSeconds))"
+        case .notEnoughDiskSpace: return "Not enough free disk space"
+        case .recordingFailed: return "Recording failed"
+        case .dictationInProgress: return "Voice dictation is still running"
+        case .transcriptionFailed: return "Transcription failed"
+        case .recordingSavedForLater:
+            return "Recording stopped at \(Self.hours(LongRecordingService.maxDurationSeconds))"
+        }
+    }
+
+    /// What to do about it.
+    var message: String {
+        switch self {
+        case .unsupportedFormat:
+            return "Use \(Self.acceptedFormats) file."
+        case .unreadableAudio:
+            return "The file may be damaged or not an audio file."
+        case .tooLong(let duration):
+            let minutes = Int(duration) / 60
+            return "It is \(minutes / 60) h \(minutes % 60) min long. "
+                + "Files can be up to \(Self.hours(LongRecordingService.maxDurationSeconds)). "
+                + "Split the file and try again."
+        case .notEnoughDiskSpace:
+            let gigabytes = LongRecordingService.minimumFreeSpaceBytes / (1024 * 1024 * 1024)
+            return "Free at least \(gigabytes) GB, then try again."
+        case .recordingFailed(let reason):
+            return reason
+        case .dictationInProgress:
+            return "Start the transcription again when it is done."
+        case .transcriptionFailed(let reason, let retryEntryID):
+            return Self.sentence(reason) + (retryEntryID != nil
+                ? " Your recording is saved."
+                : " Try again with the same file.")
+        case .recordingSavedForLater:
+            return "It is saved in the list. Transcribe it when the current transcription is done."
+        }
+    }
+
+    /// `text` with a full stop at the end. The engine's reasons have none
+    /// ("The speech engine stopped unexpectedly"), and a second sentence follows.
+    private static func sentence(_ text: String) -> String {
+        guard let last = text.last, !".!?。！？".contains(last) else { return text }
+        return text + "."
+    }
+
+    /// "2 hours" for the duration cap.
+    private static func hours(_ seconds: TimeInterval) -> String {
+        let hours = Int(seconds) / 3600
+        return hours == 1 ? "1 hour" : "\(hours) hours"
+    }
+
+    /// "a CAF, M4A, MP3, OGG or WAV", from the formats the upload accepts.
+    private static var acceptedFormats: String {
+        let names = UploadFormatValidator.acceptedExtensions.sorted().map { $0.uppercased() }
+        let list = names.count > 1
+            ? names.dropLast().joined(separator: ", ") + " or " + names[names.count - 1]
+            : names.joined()
+        // The article follows how the first name is read: "an MP3", "a WAV".
+        let readWithAVowel = "AEFHILMNORSX"
+        let article = names.first.map { readWithAVowel.contains($0.prefix(1)) } == true ? "an" : "a"
+        return "\(article) \(list)"
+    }
+}
+
 // MARK: - TranscriptionWindowView
 
 struct TranscriptionWindowView: View {
     @ObservedObject var historyService: TranscriptionHistoryService
     @ObservedObject var coordinator: AppCoordinator
-    @StateObject private var windowModel: TranscriptionWindowModel
+    /// Owned by the window controller, so a transcription, its progress and
+    /// any problem outlive the window being closed and opened again.
+    @ObservedObject var windowModel: TranscriptionWindowModel
 
     // Sidebar selection
     @State private var selectedEntryID: UUID?
@@ -28,15 +115,14 @@ struct TranscriptionWindowView: View {
     @State private var searchQuery: String = ""
     @AppStorage(TranscriptFormat.showTimestampsKey) private var showTimestamps = true
 
-    init(historyService: TranscriptionHistoryService, coordinator: AppCoordinator) {
+    init(
+        historyService: TranscriptionHistoryService,
+        coordinator: AppCoordinator,
+        windowModel: TranscriptionWindowModel
+    ) {
         self.historyService = historyService
         self.coordinator = coordinator
-        _windowModel = StateObject(
-            wrappedValue: TranscriptionWindowModel(
-                historyService: historyService,
-                coordinator: coordinator
-            )
-        )
+        self.windowModel = windowModel
     }
 
     var body: some View {
@@ -48,7 +134,20 @@ struct TranscriptionWindowView: View {
                 .frame(minWidth: 440)
         }
         .frame(minWidth: 640, idealWidth: 780, minHeight: 480, idealHeight: 560)
-        .onAppear { windowModel.onAppear() }
+        // `initial`: a problem set while the window was closed is announced
+        // when it opens again.
+        .onChange(of: windowModel.problemsPosted, initial: true) {
+            // The banner does not take focus, so VoiceOver would not read it.
+            guard let problem = windowModel.problem, let app = NSApp else { return }
+            NSAccessibility.post(
+                element: app,
+                notification: .announcementRequested,
+                userInfo: [
+                    .announcement: "\(problem.title). \(problem.message)",
+                    .priority: NSAccessibilityPriorityLevel.high.rawValue,
+                ]
+            )
+        }
     }
 
     // MARK: - Sidebar
@@ -253,8 +352,30 @@ struct TranscriptionWindowView: View {
 
     // MARK: - Main area
 
-    @ViewBuilder
     private var mainAreaView: some View {
+        VStack(spacing: 0) {
+            if let problem = windowModel.problem {
+                ProblemBanner(
+                    problem: problem,
+                    onRetry: retryAction(for: problem),
+                    onDismiss: { windowModel.dismissProblem() }
+                )
+            }
+            windowStateView
+        }
+    }
+
+    /// Try Again, only for a failed transcription whose recording Murmur kept.
+    private func retryAction(for problem: TranscriptionWindowProblem) -> (() -> Void)? {
+        guard case .transcriptionFailed(_, let entryID?) = problem else { return nil }
+        return {
+            selectedEntryID = nil
+            windowModel.retryFailedTranscription(entryID: entryID)
+        }
+    }
+
+    @ViewBuilder
+    private var windowStateView: some View {
         switch windowModel.windowState {
         case .idle:
             IdleView(

@@ -24,6 +24,26 @@ final class UndoWindowTests: XCTestCase {
         XCTAssertEqual(expiredCount, 0)
     }
 
+    func test_isOpen_untilItExpiresOrIsCancelled() async {
+        let window = UndoWindow()
+        XCTAssertFalse(window.isOpen)
+
+        window.open(seconds: 5, onUndoSeen: {}, onExpire: {})
+        XCTAssertTrue(window.isOpen)
+        window.cancel()
+        XCTAssertFalse(window.isOpen)
+
+        let expired = expectation(description: "onExpire called")
+        var openWhenExpired: Bool?
+        window.open(seconds: 0.05, onUndoSeen: {}, onExpire: {
+            openWhenExpired = window.isOpen
+            expired.fulfill()
+        })
+        await fulfillment(of: [expired], timeout: 5)
+        XCTAssertEqual(openWhenExpired, false)
+        XCTAssertFalse(window.isOpen)
+    }
+
     func test_openingAgain_replacesTheFirstWindow() async throws {
         let window = UndoWindow()
         var firstExpired = 0

@@ -44,6 +44,16 @@ final class SystemFilePickerService: FilePickerService {
 @MainActor
 final class TranscriptionWindowModel: ObservableObject {
     @Published var windowState: TranscriptionWindowState = .idle
+    /// What went wrong last, shown as a banner until the user dismisses it
+    /// or does something new.
+    @Published private(set) var problem: TranscriptionWindowProblem? {
+        didSet { if problem != nil { problemsPosted += 1 } }
+    }
+    /// Counts the problems set, so the view can announce each one. The same
+    /// problem can come twice in a row (the same file dropped again), and
+    /// SwiftUI may show nil and the second one in one update; a change of
+    /// `problem` alone would then not be seen.
+    @Published private(set) var problemsPosted = 0
 
     private let historyService: TranscriptionHistoryService
     private let coordinator: AppCoordinator
@@ -53,6 +63,8 @@ final class TranscriptionWindowModel: ObservableObject {
     /// Injected transcription service — if nil, falls through to coordinator.transcription.
     /// Provide a test double in unit tests to avoid loading the real speech model.
     private let injectedTranscriptionService: (any TranscriptionServiceProtocol)?
+    /// Reads a file's duration. Injected so "too long" and "unreadable" are testable.
+    private let durationProvider: @Sendable (URL) async -> TimeInterval?
     private var transcriptionTask: Task<Void, Never>?
 
     /// Where the audio of a transcription came from. Murmur may delete only
@@ -110,7 +122,8 @@ final class TranscriptionWindowModel: ObservableObject {
         recordingService: LongRecordingService? = nil,
         diskChecker: DiskSpaceChecking = SystemDiskSpaceChecker(),
         filePicker: FilePickerService? = nil,
-        transcriptionService: (any TranscriptionServiceProtocol)? = nil
+        transcriptionService: (any TranscriptionServiceProtocol)? = nil,
+        durationProvider: (@Sendable (URL) async -> TimeInterval?)? = nil
     ) {
         self.historyService = historyService
         self.coordinator = coordinator
@@ -118,24 +131,20 @@ final class TranscriptionWindowModel: ObservableObject {
         self.diskChecker = diskChecker
         self.filePicker = filePicker ?? SystemFilePickerService()
         self.injectedTranscriptionService = transcriptionService
+        self.durationProvider = durationProvider ?? Self.assetDuration
         self.recordingService.onAutoStop = { [weak self] url in
             self?.recordingDidAutoStop(url: url)
         }
     }
 
-    func onAppear() {
-        // Sync window state to coordinator — e.g. reopening during active transcription
-        switch coordinator.state {
-        case .transcribing:
-            windowState = .transcribing(progress: nil)
-        default:
-            break
-        }
-    }
+    // MARK: - Problem
+
+    func dismissProblem() { problem = nil }
 
     // MARK: - Idle
 
     func transitionToIdle() {
+        problem = nil
         // Leaving the confirm screen without Start or Discard would otherwise
         // strand the recording: its entry would stay "in progress" for ever.
         // Keep the audio and mark the entry failed, like any unfinished one.
@@ -149,6 +158,7 @@ final class TranscriptionWindowModel: ObservableObject {
     // MARK: - Recording
 
     func startRecording() {
+        problem = nil
         Task {
             do {
                 try await recordingService.startRecording()
@@ -169,11 +179,12 @@ final class TranscriptionWindowModel: ObservableObject {
                 try? historyService.add(entry)
 
             } catch LongRecordingError.insufficientDiskSpace {
-                // Surface inline — state remains idle with error shown via sheet/alert
                 Self.log.error("Insufficient disk space for recording")
+                problem = .notEnoughDiskSpace
                 windowState = .idle
             } catch {
                 Self.log.error("Failed to start recording: \(error)")
+                problem = .recordingFailed(reason: error.localizedDescription)
                 windowState = .idle
             }
         }
@@ -189,6 +200,7 @@ final class TranscriptionWindowModel: ObservableObject {
                 // The 2-hour auto-stop may have finished this recording already
                 // and be showing its confirm screen — do not replace that.
                 if case .recording = windowState {
+                    problem = .recordingFailed(reason: error.localizedDescription)
                     windowState = .idle
                 }
             }
@@ -205,6 +217,7 @@ final class TranscriptionWindowModel: ObservableObject {
                 // the confirm screen. Close the history entry; the m4a is kept.
                 if let recording = takePendingRecording(at: url) {
                     try? historyService.updateStatus(id: recording.entryID, status: .failed)
+                    problem = .recordingSavedForLater
                 }
             default:
                 await presentRecordingConfirm(url: url)
@@ -230,6 +243,7 @@ final class TranscriptionWindowModel: ObservableObject {
     }
 
     func discardRecording(url: URL) {
+        problem = nil
         if let recording = takePendingRecording(at: url) {
             deleteAudio(at: url, source: .ownRecording)
             try? historyService.delete(id: recording.entryID)
@@ -264,6 +278,7 @@ final class TranscriptionWindowModel: ObservableObject {
 
     func handleDroppedFile(_ url: URL?) {
         guard let url else { return }
+        problem = nil
         Task {
             await validateAndConfirmUpload(url: url)
         }
@@ -274,17 +289,19 @@ final class TranscriptionWindowModel: ObservableObject {
         // set is defined in one place and testable independently.
         let ext = url.pathExtension.lowercased()
         guard UploadFormatValidator.isAccepted(extension: ext) else {
-            // Return to idle — caller shows inline error
+            problem = .unsupportedFormat(ext: ext)
             windowState = .idle
             return
         }
 
         // Duration check
         guard let dur = await audioDuration(of: url) else {
+            problem = .unreadableAudio
             windowState = .idle
             return
         }
         guard dur <= LongRecordingService.maxDurationSeconds else {
+            problem = .tooLong(duration: dur)
             windowState = .idle
             return
         }
@@ -292,6 +309,7 @@ final class TranscriptionWindowModel: ObservableObject {
         // Disk space check
         let freeBytes = (try? diskChecker.availableCapacityBytes()) ?? 0
         guard freeBytes >= LongRecordingService.minimumFreeSpaceBytes else {
+            problem = .notEnoughDiskSpace
             windowState = .idle
             return
         }
@@ -302,6 +320,11 @@ final class TranscriptionWindowModel: ObservableObject {
     // MARK: - Transcription
 
     func beginTranscription(audioURL: URL) {
+        // A dictation is using the engine. The refused start changes
+        // nothing else, so the confirm screen stays and Start works later.
+        guard coordinator.beginWindowTranscription() else { problem = .dictationInProgress; return }
+        problem = nil
+
         // Only one transcription is tracked at a time. Starting another one
         // supersedes the earlier task, but that is not the user discarding it:
         // its entry is marked failed and its audio is kept, as for any
@@ -356,8 +379,17 @@ final class TranscriptionWindowModel: ObservableObject {
         default: return
         }
         guard activeTranscription == nil, let url = retryableAudio(for: entry) else { return }
+        guard coordinator.beginWindowTranscription() else { problem = .dictationInProgress; return }
+        problem = nil
         try? historyService.updateStatus(id: entry.id, status: .inProgress)
         startTranscription(audioURL: url, entryID: entry.id, source: .ownRecording, isRetry: true)
+    }
+
+    /// Try Again on a failed transcription's banner. The entry may have been
+    /// deleted since; then there is nothing to retry.
+    func retryFailedTranscription(entryID: UUID) {
+        guard let entry = historyService.getAll().first(where: { $0.id == entryID }) else { return }
+        retryTranscription(of: entry)
     }
 
     private func startTranscription(audioURL: URL, entryID: UUID, source: AudioSource, isRetry: Bool) {
@@ -365,12 +397,6 @@ final class TranscriptionWindowModel: ObservableObject {
         // only tell it which scripts to expect.
         let hint = SpokenLanguages.hint(for: SpokenLanguages.current())
         windowState = .transcribing(progress: nil)
-
-        // P0 fix: pause voice input (global hotkey) for the duration of
-        // transcription. Recording uses only AVAudioRecorder and does not
-        // compete with the model — so we must NOT pause during recording,
-        // only here at transcription-start.
-        coordinator.beginWindowTranscription()
 
         let session = TranscriptionSession(
             generation: nextGeneration,
@@ -479,8 +505,23 @@ final class TranscriptionWindowModel: ObservableObject {
             // Murmur's own recording is kept (entry.m4aPath) so it can be retried
             Self.log.error("Transcription failed: \(error)")
             try? historyService.updateStatus(id: session.entryID, status: .failed)
+            let keptRecording = session.source == .ownRecording
+                && FileManager.default.fileExists(atPath: session.audioURL.path)
+            problem = .transcriptionFailed(
+                reason: Self.reason(of: error),
+                retryEntryID: keptRecording ? session.entryID : nil
+            )
             windowState = .idle
         }
+    }
+
+    /// The reason a transcription failed, in words for the banner.
+    static func reason(of error: Error) -> String {
+        if case MurmurError.transcriptionFailed(let message) = error { return message }
+        if let murmurError = error as? MurmurError, let description = murmurError.errorDescription {
+            return description
+        }
+        return error.localizedDescription
     }
 
     /// Cleans up after a cancelled session. A first transcription leaves
@@ -517,7 +558,12 @@ final class TranscriptionWindowModel: ObservableObject {
     // MARK: - Audio duration helper
 
     private func audioDuration(of url: URL) async -> TimeInterval? {
-        return await Task.detached {
+        await durationProvider(url)
+    }
+
+    /// The duration AVFoundation reads from the file, or nil when it cannot.
+    private static let assetDuration: @Sendable (URL) async -> TimeInterval? = { url in
+        await Task.detached {
             let asset = AVURLAsset(url: url)
             guard let duration = try? await asset.load(.duration) else { return nil }
             return CMTimeGetSeconds(duration)

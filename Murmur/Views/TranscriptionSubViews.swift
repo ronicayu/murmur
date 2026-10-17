@@ -70,6 +70,49 @@ struct IdleView: View {
     }
 }
 
+// MARK: - ProblemBanner
+//
+// What went wrong, over whatever the window shows. It stays until the user
+// dismisses it or does something new; it never times out.
+
+struct ProblemBanner: View {
+    let problem: TranscriptionWindowProblem
+    var onRetry: (() -> Void)? = nil
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Color(NSColor.systemOrange))
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(problem.title)
+                    .font(.callout)
+                    .fontWeight(.semibold)
+                Text(problem.message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            // One element for VoiceOver; the buttons stay separate.
+            .accessibilityElement(children: .combine)
+
+            Spacer()
+
+            if let onRetry {
+                Button("Try Again", action: onRetry)
+            }
+            Button("Dismiss", action: onDismiss)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(Color(NSColor.secondarySystemFill), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+    }
+}
+
 // MARK: - ActionCard
 
 private struct ActionCard: View {
@@ -167,12 +210,6 @@ struct RecordingView: View {
             }
             .buttonStyle(.plain)
             .keyboardShortcut(.return, modifiers: [])
-
-            // Voice input pause notice
-            Text("Voice input paused")
-                .font(.caption2)
-                .foregroundStyle(Color(NSColor.systemOrange))
-                .padding(.bottom, 16)
 
             Spacer()
         }

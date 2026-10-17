@@ -757,8 +757,9 @@ final class StreamingTranscriptionCoordinator: ObservableObject {
         case .timedOut:
             logger.warning("StreamingCoordinator: full-pass exceeded \(Int(timeoutSeconds))s — keeping streaming version")
             fullPassFailed = true
-            // The abandoned decode still holds the engine, so the final
-            // window cannot be transcribed either.
+            // In-process, the abandoned decode still holds the engine; with the
+            // helper, `firstResult` cancelled it (dropped if waiting, helper
+            // ended if running). Either way the final window is not transcribed.
             await finishWithStreamedText(generation: generation, transcribeFinalWindow: false)
             return
         case .failed:

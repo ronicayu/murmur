@@ -188,19 +188,18 @@ final class AppCoordinator: ObservableObject {
 
     /// Load the model while the user is still speaking, so that it is ready
     /// when the recording ends. Does nothing when it is already loaded.
-    private var preloadTask: Task<Void, Never>?
-
+    ///
+    /// Each call runs to the end; none cancels an earlier one. A preload is
+    /// a request to the engine like any other, and cancelling it there would
+    /// stop the very load the next recording waits for.
     func preloadModelInBackground() {
-        preloadTask?.cancel()
-        preloadTask = Task.detached { [weak self] in
+        Task.detached { [weak self] in
             guard let self else { return }
             do {
                 try await self.transcription.preloadModel()
                 Self.log.info("Model preloaded successfully")
             } catch {
-                if !Task.isCancelled {
-                    Self.log.warning("Model preload failed (will retry on first use): \(String(describing: error), privacy: .public)")
-                }
+                Self.log.warning("Model preload failed (will retry on first use): \(String(describing: error), privacy: .public)")
             }
         }
     }
@@ -290,29 +289,63 @@ final class AppCoordinator: ObservableObject {
 
     // MARK: - Window Transcription Coordination
 
-    /// Called by TranscriptionWindowModel when the user initiates transcription
-    /// in the transcription window. Transitions the coordinator to .transcribing
-    /// so the global hotkey guard blocks new recordings (voice input paused).
-    ///
-    /// Must only be called when coordinator is currently .idle or .error.
-    func beginWindowTranscription() {
-        guard state == .idle || state.isError else { return }
-        transition(to: .transcribing)
+    /// Set while the transcription window owns the engine. Voice input is refused
+    /// while it is set; AppState is .transcribing for the menu bar.
+    @Published private(set) var isFileTranscriptionActive = false
+
+    /// Pure rule, tested exhaustively. A file may take the engine only when no
+    /// dictation is using or about to use it. .transcribing is excluded because
+    /// stopAndTranscribeV1 enters it before its transcribe request exists.
+    static func fileTranscriptionMayStart(during state: AppState) -> Bool {
+        switch state {
+        case .idle, .error, .undoable: return true
+        case .recording, .streaming, .transcribing, .injecting: return false
+        }
     }
 
-    /// Called by TranscriptionWindowModel when window transcription ends
-    /// (success, cancel, or error). Releases the .transcribing hold so
-    /// voice input (hotkey) resumes.
+    /// Called by TranscriptionWindowModel before it starts a file
+    /// transcription. Takes the hold, so voice input is refused until
+    /// `endWindowTranscription()`. Returns false, and changes nothing, while a
+    /// dictation uses the engine or is about to.
+    ///
+    /// While the hold is already taken it returns true: a new file supersedes
+    /// the running one, or starts before a cancelled one has unwound.
+    @discardableResult
+    func beginWindowTranscription() -> Bool {
+        if isFileTranscriptionActive { return true }
+        guard !pendingRecording, Self.fileTranscriptionMayStart(during: state) else { return false }
+        // Leaving .undoable: its timer must not fire later.
+        undoWindow.cancel()
+        // Leaving .error: a recording that failed to start leaves its
+        // "Recording" pill for the error recovery to hide, and that recovery
+        // does nothing once the state is .transcribing.
+        if state.isError { pill.hide() }
+        isFileTranscriptionActive = true
+        transition(to: .transcribing)
+        return true
+    }
+
+    /// Called by TranscriptionWindowModel when the last file transcription
+    /// task has unwound (success, cancel or error). Releases the hold so
+    /// voice input comes back. Without the hold it does nothing: the
+    /// .transcribing state then belongs to a dictation.
     func endWindowTranscription() {
-        guard state == .transcribing else { return }
-        // A hotkey press during the file transcription queued a recording.
-        // Nothing drains the queue on this path, so drop it: left set, the
-        // microphone would open by itself after the next dictation.
-        if pendingRecording {
-            pendingRecording = false
-            hotkey.notifyRecordingStopped()
-        }
-        transition(to: .idle)
+        guard isFileTranscriptionActive else { return }
+        isFileTranscriptionActive = false
+        // Under the hold only the hold sets .transcribing.
+        if state == .transcribing { transition(to: .idle) }
+    }
+
+    /// A hotkey press while the window owns the engine. Tell the user at once;
+    /// change no state (an .error transition would auto-recover to .idle under the hold).
+    private func refuseVoiceInputDuringFile() {
+        pendingRecording = false
+        // The hotkey service counted the press as a recording.
+        hotkey.notifyRecordingStopped()
+        audioFeedback.playError()
+        pill.show(state: .error(.voiceInputPaused))
+        pill.hide(after: Self.errorAutoRecoverySeconds)
+        Self.log.info("Recording refused: a file transcription owns the engine")
     }
 
     // MARK: - Event Handling
@@ -320,7 +353,18 @@ final class AppCoordinator: ObservableObject {
     private func handleHotkeyEvent(_ event: HotkeyEvent) async {
         switch event {
         case .startRecording:
-            if let failure = await startPreflightFailure() {
+            // Refused before the preflight, so a press during a file
+            // transcription never brings up the microphone prompt.
+            if isFileTranscriptionActive { refuseVoiceInputDuringFile(); return }
+            let failure = await startPreflightFailure()
+            // The hold may have begun while the preflight waited (for
+            // example on the microphone prompt). Checked before the failure
+            // too: an error state under the hold would recover to .idle and
+            // the menu bar would show Ready during the file. Such a failure
+            // is not shown; the first press after the file runs the
+            // preflight again and reports it then.
+            if isFileTranscriptionActive { refuseVoiceInputDuringFile(); return }
+            if let failure {
                 // The hotkey service already counts this press as a recording.
                 hotkey.notifyRecordingStopped()
                 handleError(failure)
@@ -377,6 +421,10 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func startRecordingFlow() async {
+        // This is the only path to .recording; the hold relies on that. It
+        // also catches a recording queued behind a dictation, which both
+        // stop flows start here.
+        if isFileTranscriptionActive { refuseVoiceInputDuringFile(); return }
         // The undo window of the previous dictation ends here; its timer
         // must not put a live recording back to idle.
         undoWindow.cancel()
@@ -834,6 +882,13 @@ final class AppCoordinator: ObservableObject {
             handleError(mapError(error))
         }
     }
+
+    /// Puts the coordinator in a dictation state without audio. Assigns directly:
+    /// no undo timer, no error auto-recovery, no alert.
+    func forceStateForTesting(_ newState: AppState) { state = newState }
+
+    /// Whether the Undo window of the last dictation is still open.
+    var isUndoWindowOpenForTesting: Bool { undoWindow.isOpen }
 #endif
 
     // MARK: - Helpers

@@ -10,6 +10,8 @@ enum MurmurError: Error, Sendable {
     case transcriptionFailed(String)
     case injectionFailed(String)
     case timeout(operation: String)
+    /// A hotkey press while the Transcription window transcribes a file.
+    case voiceInputPaused
 
     enum Permission: String, Sendable {
         case microphone
@@ -31,7 +33,7 @@ enum MurmurError: Error, Sendable {
         case .modelNotFound, .diskFull, .downloadStalled, .permissionRevoked:
             return .critical
         case .microphoneBusy, .silenceDetected, .transcriptionFailed,
-             .injectionFailed, .timeout:
+             .injectionFailed, .timeout, .voiceInputPaused:
             return .transient
         }
     }
@@ -50,6 +52,7 @@ enum MurmurError: Error, Sendable {
         case .transcriptionFailed: return "Transcription failed"
         case .injectionFailed: return "Couldn't insert text"
         case .timeout: return "Timed out"
+        case .voiceInputPaused: return "Transcribing a file"
         }
     }
 
@@ -86,6 +89,8 @@ extension MurmurError: LocalizedError {
             return "Could not insert text: \(msg)"
         case .timeout(let op):
             return "\(op) timed out."
+        case .voiceInputPaused:
+            return "Voice input is paused while a file is transcribed. It comes back when the file is done or cancelled."
         }
     }
 }

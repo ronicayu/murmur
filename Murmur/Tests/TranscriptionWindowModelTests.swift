@@ -85,6 +85,22 @@ final class TranscriptionWindowModelTests: XCTestCase {
         return url
     }
 
+    /// A model whose files last `duration` seconds (nil: unreadable) on a
+    /// disk with `freeBytes` free, recording through a stub recorder.
+    private func makeModel(
+        duration: TimeInterval?,
+        freeBytes: Int64 = 10 * 1024 * 1024 * 1024
+    ) -> TranscriptionWindowModel {
+        TranscriptionWindowModel(
+            historyService: historyService,
+            coordinator: coordinator,
+            recordingService: makeStubRecordingService(outputDirectory: recordingsDir),
+            diskChecker: StubDiskSpaceChecker(freeBytes: freeBytes),
+            transcriptionService: spyTranscription,
+            durationProvider: { _ in duration }
+        )
+    }
+
     // MARK: - cancel, then a second file before the first task unwinds
 
     /// The cancelled task unwinds (here: with CancellationError) while the second
@@ -128,6 +144,7 @@ final class TranscriptionWindowModelTests: XCTestCase {
         await drainMainActor()
 
         // Assert — the second transcription is untouched and still running
+        XCTAssertNil(model.problem, "A superseded task must not post a problem")
         if case .transcribing = model.windowState {
             // correct
         } else {
@@ -143,6 +160,7 @@ final class TranscriptionWindowModelTests: XCTestCase {
         await drainMainActor()
 
         // Assert
+        XCTAssertNil(model.problem)
         if case .result(let entry) = model.windowState {
             XCTAssertEqual(entry.text, "second")
         } else {
@@ -249,6 +267,11 @@ final class TranscriptionWindowModelTests: XCTestCase {
         let recordingEntry = historyService.getAll().first { $0.m4aPath == recordingPath }
         XCTAssertEqual(recordingEntry?.status, .failed)
         XCTAssertTrue(FileManager.default.fileExists(atPath: recordingPath))
+        let told = await pollUntil { self.sut.problem == .recordingSavedForLater }
+        XCTAssertTrue(told, "The user must learn where the stopped recording went")
+        guard case .transcribing = sut.windowState else {
+            return XCTFail("The banner must not replace the transcription; got \(sut.windowState)")
+        }
 
         // Cleanup
         sut.cancelTranscription()
@@ -500,31 +523,293 @@ final class TranscriptionWindowModelTests: XCTestCase {
     // MARK: - upload confirm (validateAndConfirmUpload uses injected diskChecker)
 
     func test_validateAndConfirmUpload_uses_injected_disk_checker() async throws {
-        // Arrange — inject a stingy disk checker
-        let stingyDisk = StubDiskSpaceChecker(freeBytes: 0)
-        let sutWithStingy = TranscriptionWindowModel(
+        // Arrange — a readable one-minute file, and no free disk
+        let model = makeModel(duration: 60, freeBytes: 0)
+
+        // Act
+        model.handleDroppedFile(makeUserFile())
+        let rejected = await pollUntil { model.problem != nil }
+
+        // Assert
+        XCTAssertTrue(rejected)
+        XCTAssertEqual(model.problem, .notEnoughDiskSpace)
+        guard case .idle = model.windowState else {
+            return XCTFail("Expected .idle but got \(model.windowState)")
+        }
+    }
+
+    func test_validateAndConfirmUpload_withEnoughDisk_offersTheFile() async throws {
+        // Arrange
+        let model = makeModel(duration: 60)
+
+        // Act
+        model.handleDroppedFile(makeUserFile())
+        let offered = await pollUntil {
+            if case .uploadConfirm = model.windowState { return true }
+            return false
+        }
+
+        // Assert
+        XCTAssertTrue(offered, "Expected .uploadConfirm but got \(model.windowState)")
+        XCTAssertNil(model.problem)
+    }
+
+    // MARK: - Problems shown in the banner
+
+    /// The view announces each problem to VoiceOver by this count. Dropping
+    /// the same file twice sets the same problem twice, and must count twice.
+    func test_sameProblemTwice_isPostedTwice() async throws {
+        let model = makeModel(duration: 60)
+        let file = URL(fileURLWithPath: "/tmp/x.flac")
+
+        model.handleDroppedFile(file)
+        let first = await pollUntil { model.problemsPosted == 1 }
+        XCTAssertTrue(first)
+        model.handleDroppedFile(file)
+        let second = await pollUntil { model.problemsPosted == 2 }
+
+        XCTAssertTrue(second, "The second drop must be announced too")
+        XCTAssertEqual(model.problem, .unsupportedFormat(ext: "flac"))
+    }
+
+    func test_unsupportedExtension_setsTheProblem() async throws {
+        let model = makeModel(duration: 60)
+
+        model.handleDroppedFile(URL(fileURLWithPath: "/tmp/x.flac"))
+        let told = await pollUntil { model.problem != nil }
+
+        XCTAssertTrue(told)
+        XCTAssertEqual(model.problem, .unsupportedFormat(ext: "flac"))
+        guard case .idle = model.windowState else {
+            return XCTFail("Expected .idle but got \(model.windowState)")
+        }
+    }
+
+    func test_unreadableFile_setsTheProblem() async throws {
+        let model = makeModel(duration: nil)
+
+        model.handleDroppedFile(makeUserFile())
+        let told = await pollUntil { model.problem != nil }
+
+        XCTAssertTrue(told)
+        XCTAssertEqual(model.problem, .unreadableAudio)
+        guard case .idle = model.windowState else {
+            return XCTFail("Expected .idle but got \(model.windowState)")
+        }
+    }
+
+    func test_fileLongerThanTwoHours_setsTheProblem() async throws {
+        let model = makeModel(duration: 7201)
+
+        model.handleDroppedFile(makeUserFile())
+        let told = await pollUntil { model.problem != nil }
+
+        XCTAssertTrue(told)
+        XCTAssertEqual(model.problem, .tooLong(duration: 7201))
+        guard case .idle = model.windowState else {
+            return XCTFail("Expected .idle but got \(model.windowState)")
+        }
+    }
+
+    /// While a dictation uses the engine, Start is refused and nothing else
+    /// changes: the confirm screen stays, so the user can press Start later.
+    func test_beginTranscription_duringADictation_isRefusedWithABanner() async throws {
+        // Arrange
+        coordinator.forceStateForTesting(.recording)
+        let model = TranscriptionWindowModel(
             historyService: historyService,
             coordinator: coordinator,
-            diskChecker: stingyDisk,
+            recordingService: makeStubRecordingService(outputDirectory: recordingsDir),
+            transcriptionService: WindowGatedTranscriptionService(calls: [])
+        )
+        let file = makeUserFile()
+        model.windowState = .uploadConfirm(fileURL: file, duration: 10)
+
+        // Act
+        model.beginTranscription(audioURL: file)
+
+        // Assert
+        guard case .uploadConfirm(let shown, _) = model.windowState else {
+            return XCTFail("The confirm screen must stay; got \(model.windowState)")
+        }
+        XCTAssertEqual(shown, file)
+        XCTAssertTrue(historyService.getAll().isEmpty, "A refused start must not add an entry")
+        XCTAssertEqual(model.problem, .dictationInProgress)
+        XCTAssertFalse(coordinator.isFileTranscriptionActive)
+        XCTAssertEqual(coordinator.state, .recording, "The dictation's state must not change")
+
+        coordinator.forceStateForTesting(.idle)
+    }
+
+    func test_retryTranscription_duringADictation_isRefusedWithABanner() async throws {
+        // Arrange — a failed own recording, then a dictation starts
+        let failed = try await failOwnRecording()
+        coordinator.forceStateForTesting(.recording)
+
+        // Act
+        sut.retryTranscription(of: failed)
+
+        // Assert
+        let entry = try XCTUnwrap(historyService.getAll().first { $0.id == failed.id })
+        XCTAssertEqual(entry.status, .failed, "A refused retry must leave the entry failed")
+        XCTAssertNotNil(sut.retryableAudio(for: entry))
+        XCTAssertEqual(sut.problem, .dictationInProgress)
+        XCTAssertFalse(coordinator.isFileTranscriptionActive)
+        guard case .idle = sut.windowState else {
+            return XCTFail("Expected .idle but got \(sut.windowState)")
+        }
+
+        coordinator.forceStateForTesting(.idle)
+    }
+
+    func test_beginTranscription_clearsAnEarlierProblem_andTakesTheHold() async throws {
+        // Arrange — a problem from an earlier drop
+        let model = makeModel(duration: 60)
+        model.handleDroppedFile(URL(fileURLWithPath: "/tmp/x.flac"))
+        let told = await pollUntil { model.problem != nil }
+        XCTAssertTrue(told, "Precondition: the drop must set a problem")
+        spyTranscription.shouldBlock = true
+
+        // Act
+        model.beginTranscription(audioURL: makeUserFile())
+
+        // Assert
+        XCTAssertNil(model.problem)
+        XCTAssertEqual(coordinator.state, .transcribing)
+        XCTAssertTrue(coordinator.isFileTranscriptionActive)
+
+        // Cleanup
+        model.cancelTranscription()
+        let released = await pollUntil { !self.coordinator.isFileTranscriptionActive }
+        XCTAssertTrue(released)
+    }
+
+    func test_failedTranscription_ofOwnRecording_offersRetry() async throws {
+        // Arrange + Act
+        let failed = try await failOwnRecording()
+
+        // Assert
+        XCTAssertEqual(failed.status, .failed)
+        XCTAssertEqual(sut.problem, .transcriptionFailed(reason: "engine failed", retryEntryID: failed.id))
+        guard case .idle = sut.windowState else {
+            return XCTFail("Expected .idle but got \(sut.windowState)")
+        }
+
+        // Act — Try Again on the banner
+        spyTranscription.stubbedResult = TranscriptionResult(
+            text: "second attempt", language: .english, durationMs: 10
+        )
+        sut.retryFailedTranscription(entryID: failed.id)
+        let completed = await pollUntil {
+            self.historyService.getAll().first { $0.id == failed.id }?.status == .completed
+        }
+
+        // Assert — the same entry is completed
+        XCTAssertTrue(completed)
+        let all = historyService.getAll()
+        XCTAssertEqual(all.map(\.id), [failed.id])
+        XCTAssertEqual(all.first?.text, "second attempt")
+        XCTAssertNil(sut.problem)
+    }
+
+    func test_failedTranscription_ofAUserFile_offersNoRetry() async throws {
+        // Arrange
+        spyTranscription.stubbedError = MurmurError.transcriptionFailed("engine failed")
+
+        // Act
+        sut.beginTranscription(audioURL: makeUserFile())
+        let told = await pollUntil { self.sut.problem != nil }
+
+        // Assert — Murmur did not keep the user's file, so there is nothing to retry
+        XCTAssertTrue(told)
+        XCTAssertEqual(sut.problem, .transcriptionFailed(reason: "engine failed", retryEntryID: nil))
+    }
+
+    func test_cancelledTranscription_setsNoProblem() async throws {
+        // Arrange
+        spyTranscription.stubbedError = CancellationError()
+
+        // Act
+        sut.beginTranscription(audioURL: makeUserFile())
+        let unwound = await pollUntil { !self.coordinator.isFileTranscriptionActive }
+
+        // Assert
+        XCTAssertTrue(unwound)
+        XCTAssertNil(sut.problem, "A cancel is the user's choice, not a failure")
+    }
+
+    func test_recordingThatCannotStart_setsTheProblem() async throws {
+        // Arrange — no free disk
+        let noDisk = TranscriptionWindowModel(
+            historyService: historyService,
+            coordinator: coordinator,
+            recordingService: LongRecordingService(
+                outputDirectory: recordingsDir,
+                diskChecker: StubDiskSpaceChecker(freeBytes: 0)
+            ),
             transcriptionService: spyTranscription
         )
 
-        // Act — drop a real audio file URL (format validation passes, disk check fails)
-        let mp3URL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(UUID().uuidString).mp3")
-        // Create a 0-byte file so format/extension check passes
-        FileManager.default.createFile(atPath: mp3URL.path, contents: nil)
-        defer { try? FileManager.default.removeItem(at: mp3URL) }
+        // Act
+        noDisk.startRecording()
+        let toldDisk = await pollUntil { noDisk.problem != nil }
 
-        sutWithStingy.handleDroppedFile(mp3URL)
-        await drainMainActor()
+        // Assert
+        XCTAssertTrue(toldDisk)
+        XCTAssertEqual(noDisk.problem, .notEnoughDiskSpace)
+        guard case .idle = noDisk.windowState else {
+            return XCTFail("Expected .idle but got \(noDisk.windowState)")
+        }
 
-        // Assert — disk check failed → state returns to idle
-        if case .idle = sutWithStingy.windowState {
-            // correct — disk check properly rejected via injected checker
-        } else {
-            // uploadConfirm or other: might be ok if duration check fired first
-            // The important thing is we did NOT get a crash from direct instantiation
+        // Arrange — a recorder that cannot be made
+        let failure = RecorderFailure()
+        let noRecorder = TranscriptionWindowModel(
+            historyService: historyService,
+            coordinator: coordinator,
+            recordingService: LongRecordingService(
+                outputDirectory: recordingsDir,
+                diskChecker: StubDiskSpaceChecker(freeBytes: 10 * 1024 * 1024 * 1024),
+                recorderFactory: { _, _ in throw failure }
+            ),
+            transcriptionService: spyTranscription
+        )
+
+        // Act
+        noRecorder.startRecording()
+        let toldRecorder = await pollUntil { noRecorder.problem != nil }
+
+        // Assert
+        XCTAssertTrue(toldRecorder)
+        XCTAssertEqual(noRecorder.problem, .recordingFailed(reason: failure.localizedDescription))
+        guard case .idle = noRecorder.windowState else {
+            return XCTFail("Expected .idle but got \(noRecorder.windowState)")
+        }
+    }
+
+    /// A problem stays until the user does something new. Each case starts
+    /// from a fresh model with a problem shown.
+    func test_problem_isClearedByTheNextUserAction() async throws {
+        let actions: [(name: String, act: (TranscriptionWindowModel) -> Void)] = [
+            ("a valid drop", { [unowned self] model in model.handleDroppedFile(self.makeUserFile()) }),
+            ("Record", { model in model.startRecording() }),
+            ("New", { model in model.transitionToIdle() }),
+            ("Dismiss", { model in model.dismissProblem() }),
+        ]
+        for action in actions {
+            // Arrange
+            let model = makeModel(duration: 60)
+            model.handleDroppedFile(URL(fileURLWithPath: "/tmp/x.flac"))
+            let told = await pollUntil { model.problem != nil }
+            XCTAssertTrue(told, "Precondition for \(action.name): the drop must set a problem")
+
+            // Act
+            action.act(model)
+
+            // Assert
+            XCTAssertNil(model.problem, "\(action.name) must clear the problem")
+            // Whatever the action started must not bring a problem back.
+            await drainMainActor()
+            XCTAssertNil(model.problem, "\(action.name) must not set a new problem")
         }
     }
 
@@ -565,7 +850,44 @@ final class TranscriptionWindowModelTests: XCTestCase {
     }
 }
 
+// MARK: - Banner copy
+
+final class TranscriptionWindowProblemTests: XCTestCase {
+
+    func test_failedTranscription_message_addsAFullStopToTheEnginesReason() {
+        let kept = TranscriptionWindowProblem.transcriptionFailed(
+            reason: "The speech engine stopped unexpectedly", retryEntryID: UUID()
+        )
+        XCTAssertEqual(kept.message, "The speech engine stopped unexpectedly. Your recording is saved.")
+
+        let notKept = TranscriptionWindowProblem.transcriptionFailed(
+            reason: "The file is damaged.", retryEntryID: nil
+        )
+        XCTAssertEqual(notKept.message, "The file is damaged. Try again with the same file.")
+    }
+
+    func test_tooLong_saysHowLongTheFileIs() {
+        let problem = TranscriptionWindowProblem.tooLong(duration: 2 * 3600 + 25 * 60 + 30)
+        XCTAssertEqual(problem.title, "This file is longer than 2 hours")
+        XCTAssertEqual(
+            problem.message,
+            "It is 2 h 25 min long. Files can be up to 2 hours. Split the file and try again."
+        )
+    }
+
+    func test_unsupportedFormat_namesTheFormatsThatWork() {
+        let problem = TranscriptionWindowProblem.unsupportedFormat(ext: "flac")
+        XCTAssertEqual(problem.title, "Murmur can't open .flac files")
+        XCTAssertEqual(problem.message, "Use a CAF, M4A, MP3, OGG or WAV file.")
+    }
+}
+
 // MARK: - Test doubles
+
+/// A recorder that cannot be made, as when no microphone is available.
+private struct RecorderFailure: LocalizedError {
+    var errorDescription: String? { "The audio recorder could not be made." }
+}
 
 /// Transcription service whose n-th `transcribeLong` call ends only when the
 /// test opens that call's gate, and then returns or throws the given outcome.

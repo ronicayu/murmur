@@ -20,6 +20,18 @@
 - **Cancelling a Retry keeps the failed entry and its recording.** Before, it deleted both, though the failure had kept the recording for a retry.
 - **Switching streaming on or off while recording no longer loses the dictation.** The stop followed the new setting, found no session, waited 50 s and dropped the recording. The stop now follows the mode the recording started in.
 - **A paragraph break is kept when the speech right after a long silence decodes to nothing** (a cough, a click). The two paragraphs around it were merged.
+- **Starting a file transcription during a dictation no longer leaves voice input on.** The Transcription window paused voice input only when Murmur was idle, so a file started while you dictated ran with the hotkey still working, and the two shared the engine.
+- **Finishing a file transcription no longer resets a dictation.** The end of a file put Murmur back to idle even when the "Transcribing" state belonged to a dictation that was still running.
+- **Cancelling a file transcription no longer fails other requests to the engine.** Murmur now sends the engine one request at a time. Cancelling a request that waits only removes it; cancelling the one that runs ends the engine, and the waiting requests continue in a new one. Before, a cancel ended the engine with everything in it.
+- **The model preload is no longer cancelled by the next recording start.** Each recording start cancelled the preload that the one before had started, and a cancel ended the speech engine while it loaded the model.
+- **The Transcription window now tells you when something goes wrong.** Before, most of these sent you back to the start screen without a word. A banner now says what happened and what to do: a file format Murmur can't open, a file it can't read, a file longer than 2 hours, not enough free disk space, a recording that failed to start or stop, a start refused because a dictation is running, a failed transcription, and a recording that reached 2 hours while another file was transcribed. When the failed transcription was of your own recording, the banner has **Try Again**. VoiceOver reads the banner.
+- **Closing the Transcription window no longer loses a running transcription.** Reopened, the window showed "Transcribing" with no progress, its Cancel did nothing, and the result appeared only in the history list. The window now keeps its progress, Cancel, result and banner when you close and reopen it.
+- The recording screen no longer says "Voice input paused". Voice input works while you record; it is paused only while a file is transcribed.
+
+### Changed
+- **A hotkey press during a file transcription now says "Transcribing a file".** Before, the press did nothing you could see. It also no longer asks for the microphone. Voice input comes back when the file is done or cancelled.
+- **Start Transcription during a dictation is refused with a message.** The engine runs one thing at a time; start the file again when the dictation is done.
+- **Starting a file transcription within the Undo window ends that Undo window.**
 
 ## [0.5.1] — 2026-10-16
 
